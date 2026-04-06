@@ -1,14 +1,98 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"text/template"
 	"time"
 )
 
 // ── Self-evolution task ──
+
+var evolveTemplate = template.Must(template.New("evolve").Parse(`# Self-Evolution (evolve mode · {{.Today}})
+
+This is your daily self-evolution cycle.
+
+## Goal
+Based on recent interactions, code state, and memory, find areas to improve — then **make the changes directly**.
+If there's no inspiration or improvement needed today, notify the user "No evolution needed today" and exit.
+
+## Checklist
+
+### 1. Review Recent Interactions (quick scan)
+Read recent daily notes:
+{{.Notes}}
+Recent session list:
+{{.Sessions}}
+Ask yourself:
+- Did the user correct my behavior? → Write feedback memory or adjust behavior
+- Are there recurring action patterns? → Consider automating or creating a skill
+- Are there failure patterns? → Fix root cause
+- Did the user express new preferences or needs? → Update USER.md or SOUL.md
+
+### 2. System Health Check
+- Run ` + "`{{.CLI}} doctor`" + ` for quick diagnostics
+- Run ` + "`{{.CLI}} db stats`" + ` — any large backlog?
+- Run ` + "`{{.CLI}} db gc`" + ` and ` + "`{{.CLI}} clean`" + ` — clean stale data
+
+### 3. Code Evolution (primary focus)
+Source code is at: {{.SrcDir}}
+
+**3a. Audit** — Read the Go source files, look for:
+- Bugs: silent error swallowing, incorrect logic, race conditions
+- Dead code: unused functions, stale comments, unreachable branches
+- Performance: unnecessary file reads, unbounded loops, missing caching
+- Security: unsanitized input, missing validation at boundaries
+- Test gaps: untested functions, missing edge cases
+
+**3b. Implement** — For each issue found:
+- Fix it directly (edit the file)
+- Keep changes focused — one concern per edit
+- Don't refactor working code for aesthetics
+- Don't add features nobody asked for
+
+**3c. Verify** — After all code changes:
+` + "`cd {{.SrcDir}} && go test ./... -timeout 60s`" + `
+If tests pass: ` + "`{{.CLI}} build`" + `
+If tests fail: fix the failure, don't skip tests.
+
+**3d. Commit** — Stage and commit with a descriptive message:
+` + "`cd {{.SrcDir}} && git add -A && git commit -m \"evolve: <what changed>\"`" + `
+Do NOT push — the user decides when to push.
+
+### 4. Memory & Soul Evolution (secondary)
+- Update outdated memory topics
+- Fine-tune SOUL.md / USER.md if new understanding emerged
+- Update AGENTS.md / TOOLS.md if rules changed
+- Improve skills (better prompts, new parameters)
+
+### 5. Documentation Sync (if code changed)
+- CLAUDE.md in the source directory: update architecture table, line counts, feature descriptions if they drifted
+- README.md: only if a user-visible feature was added/removed
+
+### 6. Wrap Up
+- Record what was evolved today in daily notes ({{.Workspace}}/memory/{{.Today}}.md)
+- **Write report file** (auto-sends via Telegram after exit):
+` + "```bash" + `
+cat > {{.ReportPath}} << 'RPTEOF'
+🧬 Evolution report:
+- [code] what changed and why (if any)
+- [soul/memory] what changed and why (if any)
+- Test results / build status
+RPTEOF
+` + "```" + `
+If no evolution needed, write "No evolution inspiration today, system running normally" in the report.
+
+## Principles
+- **Code first** — code improvements are the highest-value evolution
+- **Do it or skip it** — don't evolve for the sake of evolving
+- **Small steps, fast pace** — change a little, but change it right
+- **Safety first** — tests must pass, code must compile, ` + "`{{.CLI}} build`" + ` must succeed
+- **Leave a trace** — commit message + daily notes, every change documented
+`))
 
 func evolveTask() string {
 	today := time.Now().Format("2006-01-02")
@@ -35,65 +119,21 @@ func evolveTask() string {
 		sessionsPart = formatSessionList(sessions)
 	}
 
-	return fmt.Sprintf(`# Self-Evolution (evolve mode · %s)
+	data := map[string]string{
+		"Today":      today,
+		"Notes":      notesList.String(),
+		"Sessions":   sessionsPart,
+		"CLI":        appName,
+		"SrcDir":     appDir,
+		"Workspace":  workspace,
+		"ReportPath": sessionTmp("report.txt"),
+	}
 
-This is your daily self-evolution cycle.
-
-## Goal
-Based on recent interactions and memory, find areas to improve yourself, then **make the changes directly**.
-If there's no inspiration or improvement needed today, notify the user "No evolution needed today" and exit.
-
-## Checklist
-
-### 1. Review Recent Interactions (quick scan)
-Read recent daily notes:
-%s
-Recent session list:
-%s
-Ask yourself:
-- Did the user correct my behavior? → Write feedback memory or adjust behavior
-- Are there recurring action patterns? → Consider automating or creating a skill
-- Are there failure patterns? → Fix root cause
-- Did the user express new preferences or needs? → Update USER.md or SOUL.md
-
-### 2. Check System Health
-- Any TODOs or known issues in ` + appName + ` CLI? Run ` + "`` + appName + ` doctor`" + `
-- Memory system: ` + "`` + appName + ` db stats`" + `, any large backlog?
-- Skills: any skills that need updating?
-- AGENTS.md / TOOLS.md: any outdated rules?
-
-### 3. Execute Evolution (selective, only do what's valuable)
-Possible improvement directions (not limited to):
-- Fix ` + appName + ` CLI bugs or add small features
-- Update outdated memory topics
-- Fine-tune SOUL.md / USER.md (based on new understanding)
-- Improve skills (better prompts, new parameters)
-- Write new automation hooks
-- Clean up tech debt
-
-### 4. Wrap Up
-- If code was changed: ` + "`cd %s && go test ./... && ` + appName + ` build`" + `
-- If config/memory was changed: verify format is correct
-- Record what was evolved today in daily notes
-
-### 5. Notify User
-**Write a report file** (auto-sends via Telegram after exit):
-` + "```bash" + `
-cat > %s << 'RPTEOF'
-Evolution report (2-5 lines):
-- What was done
-- Why
-- Result
-RPTEOF
-` + "```" + `
-If no evolution needed, write "No evolution inspiration today, system running normally" in the report.
-
-## Principles
-- **Do it or skip it** — don't evolve for the sake of evolving
-- **Small steps, fast pace** — change a little, but change it right
-- **Safety first** — test after changes, code must compile
-- **Leave a trace** — record what changed and why in daily notes
-`, today, notesList.String(), sessionsPart, appDir, sessionTmp("report.txt"))
+	var buf bytes.Buffer
+	if err := evolveTemplate.Execute(&buf, data); err != nil {
+		return fmt.Sprintf("evolve template error: %v", err)
+	}
+	return buf.String()
 }
 
 // ── Heartbeat task text ──
