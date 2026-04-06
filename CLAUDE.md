@@ -18,29 +18,34 @@ No external services needed for tests (uses temp dirs and in-memory SQLite). The
 
 ## Architecture
 
-Multi-file Go program (package main, ~3200 lines across 11 files) with no internal packages.
+Multi-file Go program (package main, ~6000 lines across 14 files) with no internal packages.
 
 | File | Lines | Responsibility |
 |------|-------|----------------|
-| `main.go` | ~325 | Globals, init, main(), parseArgs, helpText |
-| `prompt.go` | ~390 | buildPrompt, Telegram context, token estimation, sanitize |
+| `main.go` | ~650 | Globals, init, main(), parseArgs, helpText, `-r` TUI picker |
+| `db.go` | ~800 | SQLite DB operations, handleDB subcommands, pattern cultivation |
+| `status.go` | ~800 | Health check, diagnostics, config display, diff viewer, metrics |
+| `prompt.go` | ~680 | buildPrompt, Telegram context, token estimation, sanitize |
 | `sessions.go` | ~585 | Session search/scan/filter, TUI entry, recentSessions |
 | `tui.go` | ~475 | Bubbletea TUI for session explorer |
-| `db.go` | ~300 | SQLite DB operations, handleDB subcommands, importSummaries |
-| `skills.go` | ~280 | Skill/project index scanning |
-| `hooks.go` | ~230 | Post-hooks, safetyCheck, deliverReport |
-| `versions.go` | ~220 | Version management, build/rollback |
-| `tasks.go` | ~215 | Heartbeat/cron/weekly task text generation |
-| `telegram.go` | ~100 | Telegram send message/photo |
-| `claude.go` | ~100 | exec/run claude, lock management |
+| `tasks.go` | ~405 | Heartbeat/cron/evolve task templates (text/template) |
+| `hooks.go` | ~375 | Post-hooks, safetyCheck, deliverReport, failure streak detection |
+| `skills.go` | ~320 | Skill/project index scanning, dir exclusion |
+| `claude.go` | ~315 | exec/run claude, lock management, metrics tracking |
+| `versions.go` | ~275 | Version management, build/rollback |
+| `telegram.go` | ~160 | Telegram send message/photo (with token caching) |
+| `new.go` | ~110 | Reset Telegram sessions |
+| `safe.go` | ~105 | Symlink protection, NFS-safe lock |
 
 Key subsystems:
 
 **Modes** (selected via CLI args in `parseArgs`):
 - `interactive` — default, `syscall.Exec` replaces process with `claude`
+- `-r` / `-c` — resume session; bare `-r` opens TUI session picker
 - `-p "task"` — one-shot task, also uses `syscall.Exec`
 - `--cron` — memory consolidation (subprocess `runClaude`, then post-hooks). On Sundays, runs a two-phase deep review: haiku pre-scan then opus consolidation
 - `--heartbeat` — health check patrol (subprocess `runClaude`, then post-hooks)
+- `--evolve` — self-evolution: audits code, fixes bugs, updates soul/memory, builds & commits
 - `notify` / `notify-photo` — send Telegram messages directly
 - `db` subcommands — manage the session summary SQLite database
 
@@ -48,7 +53,7 @@ Key subsystems:
 
 **Session DB** (SQLite via `modernc.org/sqlite`): Tracks which JSONL session files have been summarized. Uses SHA-256 hash (head+tail for large files) to detect changes. DB path: `sessions.db` in this directory.
 
-**Post-Hooks** (`runHooks`): After cron/heartbeat runs, executes: (1) import `/tmp/weiran-summaries.json` into DB, (2) send `/tmp/weiran-report.txt` via Telegram, (3) safety check (soul files, memory bloat, sensitive info in git diff, config drift), (4) user scripts in `hooks/{cron,heartbeat}.d/*.sh`.
+**Post-Hooks** (`runHooks`): After cron/heartbeat/evolve runs, executes: (1) import summaries.json into DB, (2) send report.txt via Telegram, (3) safety check (soul files, memory bloat, sensitive info in git diff, config drift), (4) user scripts in `hooks/{cron,heartbeat,evolve}.d/*.sh`.
 
 **Skill/Project Index**: Scans `~/.openclaw/skills/` and `~/.openclaw/workspace/skills/` for `SKILL.md` files with YAML frontmatter. Scans multiple project roots for `CLAUDE.md` files. Both produce markdown tables injected into the prompt.
 

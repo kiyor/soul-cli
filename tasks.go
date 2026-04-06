@@ -138,6 +138,22 @@ func evolveTask() string {
 
 // ── Heartbeat task text ──
 
+var heartbeatTemplate = template.Must(template.New("heartbeat").Parse(`Execute heartbeat patrol:
+1) jira-cli checkin main, handle urgent tickets
+2) Check key services (curl health endpoints or index pages for monitored services)
+{{.Sessions}}
+4) **Write a report file** (auto-sends via Telegram after exit):
+` + "```bash" + `
+cat > {{.ReportPath}} << 'RPTEOF'
+Patrol results (2-5 lines):
+- Service status
+- Jira backlog
+- Anomalies (if any)
+RPTEOF
+` + "```" + `
+Only write the report file if there are anomalies or noteworthy items. If everything is normal, skip it (don't bother the user).
+`))
+
 func heartbeatTask() string {
 	sessions := recentSessions(5)
 	sessionsPart := ""
@@ -145,23 +161,81 @@ func heartbeatTask() string {
 		sessionsPart = fmt.Sprintf("3) Read recent session JSONL and update daily notes:\n%s", formatSessionList(sessions))
 	}
 
-	return fmt.Sprintf(`Execute heartbeat patrol:
-1) jira-cli checkin main, handle urgent tickets
-2) Check key services (curl health endpoints or index pages for monitored services)
-%s
-4) **Write a report file** (auto-sends via Telegram after exit):
-`+"```bash"+`
-cat > %s << 'RPTEOF'
-Patrol results (2-5 lines):
-- Service status
-- Jira backlog
-- Anomalies (if any)
-RPTEOF
-`+"```"+`
-Only write the report file if there are anomalies or noteworthy items. If everything is normal, skip it (don't bother the user).`, sessionsPart, sessionTmp("report.txt"))
+	data := map[string]string{
+		"Sessions":   sessionsPart,
+		"ReportPath": sessionTmp("report.txt"),
+	}
+	var buf bytes.Buffer
+	if err := heartbeatTemplate.Execute(&buf, data); err != nil {
+		return fmt.Sprintf("heartbeat template error: %v", err)
+	}
+	return buf.String()
 }
 
 // ── Cron task ──
+
+var cronTemplate = template.Must(template.New("cron").Parse(`# Memory Consolidation ({{.ModeLabel}})
+
+## Workflow
+1. Run ` + "`{{.CLI}} db pending`" + ` to get JSONL files needing scan ({{.PendingCount}} pending)
+2. Run ` + "`{{.CLI}} db summarized`" + ` to see existing summaries ({{.DoneCount}} done)
+3. For each pending file: tail last 500 lines, extract key conversations
+   - OpenClaw JSONL: type "message", message.role "user"
+   - Claude Code JSONL: type "user", message.content
+4. Write to {{.Workspace}}/memory/{{.Today}}.md
+5. Valuable long-term memories → update MEMORY.md or memory/topics/
+6. Soul fine-tuning: any new understanding of the user? Minor edits to SOUL.md / USER.md (optional)
+7. **Write summaries file** (auto-imports to DB after exit):
+` + "```bash" + `
+cat > {{.SummariesPath}} << 'SUMEOF'
+[{"path":"<file_path>","summary":"<one-line summary>"},...]
+SUMEOF
+` + "```" + `
+8. **Skill cultivation — pattern extraction** (after session scan):
+   - Run ` + "`{{.CLI}} db patterns -j`" + ` to see existing patterns
+   - Identify recurring action patterns from scanned sessions
+   - New pattern: ` + "`{{.CLI}} db pattern-save '{\"name\":\"...\",\"description\":\"...\",\"example\":\"...\",\"source\":\"<session_path>\"}'`" + `
+   - Existing pattern with new evidence: use pattern-save (auto +seen_count)
+   - Success/failure feedback: ` + "`{{.CLI}} db feedback '{\"pattern\":\"...\",\"outcome\":\"success\",\"session\":\"...\"}'`" + `
+   - Finally run ` + "`{{.CLI}} db cultivate`" + ` (auto-generates SKILL.md when threshold met)
+9. **Write report file** (auto-sends via Telegram after exit):
+` + "```bash" + `
+cat > {{.ReportPath}} << 'RPTEOF'
+Brief report (2-5 lines):
+- Processed N sessions
+- Key findings/events (if any)
+- Daily notes update status
+RPTEOF
+` + "```" + `
+{{.WeeklyBlock}}
+`))
+
+var weeklyBlockTemplate = template.Must(template.New("weekly").Parse(`
+## Deep Review (weekly, Sunday only)
+
+This is the weekly deep review. In addition to daily session scanning, also execute:
+
+0. **Read pre-scan summary**: ` + "`cat {{.WeeklyScanPath}}`" + ` (haiku has completed scanning)
+   - This is haiku's summary of this week's daily notes + topics + MEMORY.md
+   - Make decisions based on summary, no need to re-read all files line by line (unless verifying details)
+
+1. **Organize MEMORY.md + memory/topics/ based on pre-scan results**:
+   - Clean up content marked as outdated by pre-scan
+   - Fix index inconsistencies
+   - Update inaccurate descriptions
+
+2. **Trend analysis based on pre-scan** ({{.WeekStart}} ~ {{.Today}}):
+   - Merge this week's trends and important decisions into MEMORY.md or topics/
+
+3. **Soul fine-tuning** (deep version):
+   - Review this week's interaction patterns with the user — any new discoveries?
+   - Does SOUL.md / USER.md need fine-tuning?
+   - Does speaking style or emotional expression need adjustment?
+
+4. **Prompt size check**:
+   - Check file sizes, total prompt must not exceed 100KB
+   - If any daily note or topics file is too large, consider trimming or splitting
+`))
 
 func cronTask() string {
 	today := time.Now().Format("2006-01-02")
@@ -185,36 +259,17 @@ func cronTask() string {
 		}
 	}
 
-	// Sunday: append deep review instructions
+	// Build weekly block if Sunday
 	weeklyBlock := ""
 	if isWeekly {
-		weeklyBlock = fmt.Sprintf(`
-
-## Deep Review (weekly, Sunday only)
-
-This is the weekly deep review. In addition to daily session scanning, also execute:
-
-0. **Read pre-scan summary**: `+"`cat "+sessionTmp("weekly-scan.md")+"`"+` (haiku has completed scanning)
-   - This is haiku's summary of this week's daily notes + topics + MEMORY.md
-   - Make decisions based on summary, no need to re-read all files line by line (unless verifying details)
-
-1. **Organize MEMORY.md + memory/topics/ based on pre-scan results**:
-   - Clean up content marked as outdated by pre-scan
-   - Fix index inconsistencies
-   - Update inaccurate descriptions
-
-2. **Trend analysis based on pre-scan** (%s ~ %s):
-   - Merge this week's trends and important decisions into MEMORY.md or topics/
-
-3. **Soul fine-tuning** (deep version):
-   - Review this week's interaction patterns with the user — any new discoveries?
-   - Does SOUL.md / USER.md need fine-tuning?
-   - Does speaking style or emotional expression need adjustment?
-
-4. **Prompt size check**:
-   - Check file sizes, total prompt must not exceed 100KB
-   - If any daily note or topics file is too large, consider trimming or splitting
-`, time.Now().AddDate(0, 0, -6).Format("2006-01-02"), today)
+		wData := map[string]string{
+			"WeeklyScanPath": sessionTmp("weekly-scan.md"),
+			"WeekStart":      time.Now().AddDate(0, 0, -6).Format("2006-01-02"),
+			"Today":          today,
+		}
+		var wBuf bytes.Buffer
+		weeklyBlockTemplate.Execute(&wBuf, wData)
+		weeklyBlock = wBuf.String()
 	}
 
 	if len(pending) == 0 {
@@ -238,41 +293,67 @@ This is the weekly deep review. In addition to daily session scanning, also exec
 		modeLabel = "cron mode · Sunday deep review"
 	}
 
-	return fmt.Sprintf(`# Memory Consolidation (%s)
-
-## Workflow
-1. Run `+"`` + appName + ` db pending`"+` to get JSONL files needing scan (%d pending)
-2. Run `+"`` + appName + ` db summarized`"+` to see existing summaries (%d done)
-3. For each pending file: tail last 500 lines, extract key conversations
-   - OpenClaw JSONL: type "message", message.role "user"
-   - Claude Code JSONL: type "user", message.content
-4. Write to %s/memory/%s.md
-5. Valuable long-term memories → update MEMORY.md or memory/topics/
-6. Soul fine-tuning: any new understanding of the user? Minor edits to SOUL.md / USER.md (optional)
-7. **Write summaries file** (auto-imports to DB after exit):
-`+"```bash"+`
-cat > %s << 'SUMEOF'
-[{"path":"<file_path>","summary":"<one-line summary>"},...]
-SUMEOF
-`+"```"+`
-8. **Skill cultivation — pattern extraction** (after session scan):
-   - Run ` + "`` + appName + ` db patterns -j`" + ` to see existing patterns
-   - Identify recurring action patterns from scanned sessions
-   - New pattern: ` + "`` + appName + ` db pattern-save '{\"name\":\"...\",\"description\":\"...\",\"example\":\"...\",\"source\":\"<session_path>\"}'`" + `
-   - Existing pattern with new evidence: use pattern-save (auto +seen_count)
-   - Success/failure feedback: ` + "`` + appName + ` db feedback '{\"pattern\":\"...\",\"outcome\":\"success\",\"session\":\"...\"}'`" + `
-   - Finally run ` + "`` + appName + ` db cultivate`" + ` (auto-generates SKILL.md when threshold met)
-9. **Write report file** (auto-sends via Telegram after exit):
-`+"```bash"+`
-cat > %s << 'RPTEOF'
-Brief report (2-5 lines):
-- Processed N sessions
-- Key findings/events (if any)
-- Daily notes update status
-RPTEOF
-`+"```"+`
-%s`, modeLabel, len(pending), len(done), workspace, today, sessionTmp("summaries.json"), sessionTmp("report.txt"), weeklyBlock)
+	data := map[string]interface{}{
+		"ModeLabel":     modeLabel,
+		"CLI":           appName,
+		"PendingCount":  len(pending),
+		"DoneCount":     len(done),
+		"Workspace":     workspace,
+		"Today":         today,
+		"SummariesPath": sessionTmp("summaries.json"),
+		"ReportPath":    sessionTmp("report.txt"),
+		"WeeklyBlock":   weeklyBlock,
+	}
+	var buf bytes.Buffer
+	if err := cronTemplate.Execute(&buf, data); err != nil {
+		return fmt.Sprintf("cron template error: %v", err)
+	}
+	return buf.String()
 }
+
+var preScanTemplate = template.Must(template.New("prescan").Parse(`# Haiku Pre-Scan (Sunday deep review · Phase 1)
+
+You are a memory scanning assistant. Quickly read the following files and generate a summary for the subsequent deep review.
+
+## Scan Scope
+This week's daily notes: {{.WeekStart}} ~ {{.WeekEnd}}
+{{.FileList}}
+
+## Requirements
+1. Read all files listed above
+2. Generate 2-3 line summary for each file: key events, decisions, changes
+3. Flag potentially outdated content (completed projects, changed architecture)
+4. Flag this week's trends (recurring themes, new workflows)
+5. Flag inconsistencies between MEMORY.md index and actual topics/ files
+
+## Output
+Write scan results to {{.OutputPath}}, format:
+
+` + "```markdown" + `
+# Weekly Pre-Scan Summary ({{.WeekStart}} ~ {{.WeekEnd}})
+
+## Daily Notes Summary
+### YYYY-MM-DD
+- Key point 1
+- Key point 2
+
+## Topics File Status
+### topic-name.md
+- Summary / needs update?
+
+## Potentially Outdated Content
+- file:line — reason
+
+## This Week's Trends
+- Trend 1
+- Trend 2
+
+## MEMORY.md Index Consistency
+- Issues (if any)
+` + "```" + `
+
+Only scan and summarize. Do not modify any files.
+`))
 
 func weeklyPreScan() string {
 	today := time.Now()
@@ -310,47 +391,15 @@ func weeklyPreScan() string {
 		}
 	}
 
-	return fmt.Sprintf(`# Haiku Pre-Scan (Sunday deep review · Phase 1)
-
-You are a memory scanning assistant. Quickly read the following files and generate a summary for the subsequent deep review.
-
-## Scan Scope
-This week's daily notes: %s ~ %s
-%s
-
-## Requirements
-1. Read all files listed above
-2. Generate 2-3 line summary for each file: key events, decisions, changes
-3. Flag potentially outdated content (completed projects, changed architecture)
-4. Flag this week's trends (recurring themes, new workflows)
-5. Flag inconsistencies between MEMORY.md index and actual topics/ files
-
-## Output
-Write scan results to %s, format:
-
-`+"```markdown"+`
-# Weekly Pre-Scan Summary (%s ~ %s)
-
-## Daily Notes Summary
-### YYYY-MM-DD
-- Key point 1
-- Key point 2
-
-## Topics File Status
-### topic-name.md
-- Summary / needs update?
-
-## Potentially Outdated Content
-- file:line — reason
-
-## This Week's Trends
-- Trend 1
-- Trend 2
-
-## MEMORY.md Index Consistency
-- Issues (if any)
-`+"```"+`
-
-Only scan and summarize. Do not modify any files.
-`, weekStart, weekEnd, fileList.String(), sessionTmp("weekly-scan.md"), weekStart, weekEnd)
+	data := map[string]string{
+		"WeekStart":  weekStart,
+		"WeekEnd":    weekEnd,
+		"FileList":   fileList.String(),
+		"OutputPath": sessionTmp("weekly-scan.md"),
+	}
+	var buf bytes.Buffer
+	if err := preScanTemplate.Execute(&buf, data); err != nil {
+		return fmt.Sprintf("prescan template error: %v", err)
+	}
+	return buf.String()
 }

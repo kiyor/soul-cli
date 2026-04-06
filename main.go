@@ -14,7 +14,7 @@ import (
 )
 
 // Version constant — maintained manually, buildDate/buildCommit overridden via ldflags at compile time
-const version = "1.2.0"
+const version = "1.3.0"
 
 // Injected at build time: go build -ldflags "-X main.buildDate=xxx -X main.buildCommit=xxx -X main.defaultAppName=weiran"
 var (
