@@ -8,6 +8,21 @@ import (
 	"strings"
 )
 
+// skippedDirs are directories excluded from recursive CLAUDE.md/skill scanning
+var skippedDirs = map[string]bool{
+	"node_modules": true,
+	".git":         true,
+	"vendor":       true,
+	"dist":         true,
+	"__pycache__":  true,
+	".venv":        true,
+	"build":        true,
+}
+
+func isSkippedDir(name string) bool {
+	return skippedDirs[name]
+}
+
 // ── Skill Index ──
 
 type skillEntry struct {
@@ -241,7 +256,7 @@ func findCLAUDEMDsInner(root string, maxDepth int, visited map[deviceInode]bool)
 			continue
 		}
 		name := e.Name()
-		if name == "node_modules" || name == ".git" || name == "vendor" || name == "dist" {
+		if isSkippedDir(name) {
 			continue
 		}
 		subDir := filepath.Join(root, name)

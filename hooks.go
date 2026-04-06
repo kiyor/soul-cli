@@ -361,6 +361,7 @@ func deliverReport(mode string) {
 	prefix := map[string]string{
 		"cron":      "📓",
 		"heartbeat": "💓",
+		"evolve":    "🧬",
 	}
 	emoji := prefix[mode]
 	if emoji == "" {

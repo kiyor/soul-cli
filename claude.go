@@ -290,11 +290,15 @@ func trackClaudeExit(exitCode int, duration time.Duration, errMsg string) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
 	f.Write(data)
+	fi, _ := f.Stat()
+	f.Close()
 
-	// rotate: keep last 800 lines when exceeding 1000 lines
-	rotateMetrics(metricsPath, 1000, 800)
+	// rotate only if file is large enough to possibly exceed 1000 lines
+	// (average metric line ~150 bytes, so 1000 lines ~150KB)
+	if fi != nil && fi.Size() > 100*1024 {
+		rotateMetrics(metricsPath, 1000, 800)
+	}
 }
 
 // rotateMetrics truncates to last keepLines when file exceeds maxLines

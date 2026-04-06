@@ -259,12 +259,8 @@ func buildTelegramContext(tokenBudget int) (string, string) {
 	if err != nil {
 		return "", ""
 	}
-	if info.Size() > tailBytes {
-		f.Seek(info.Size()-tailBytes, io.SeekStart)
-		// Skip potentially truncated first line
-		br := bufio.NewReader(f)
-		br.ReadBytes('\n')
-		// Re-seek for scanner
+	isTailed := info.Size() > tailBytes
+	if isTailed {
 		f.Seek(info.Size()-tailBytes, io.SeekStart)
 	}
 
@@ -276,7 +272,7 @@ func buildTelegramContext(tokenBudget int) (string, string) {
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB line buffer
-	firstLine := info.Size() > tailBytes // need to skip first line (may be truncated)
+	firstLine := isTailed // need to skip first line (may be truncated from seek)
 	for scanner.Scan() {
 		if firstLine {
 			firstLine = false
