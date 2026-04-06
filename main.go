@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,12 +14,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Version constant — maintained manually, buildDate/buildCommit overridden via ldflags at compile time
-const version = "1.3.0"
+//go:embed VERSION
+var embeddedVersion string
 
 // Injected at build time: go build -ldflags "-X main.buildDate=xxx -X main.buildCommit=xxx -X main.defaultAppName=weiran"
 var (
-	buildVersion   = version
+	buildVersion   = ""
 	buildDate      = "unknown"
 	buildCommit    = "unknown"
 	defaultAppName = "" // if set via ldflags, takes priority over os.Args[0]
@@ -277,6 +278,9 @@ func loadConfig() {
 }
 
 func init() {
+	if buildVersion == "" {
+		buildVersion = strings.TrimSpace(embeddedVersion)
+	}
 	initAppName()
 	initWorkspace()
 }
