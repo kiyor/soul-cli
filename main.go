@@ -57,7 +57,8 @@ var (
 	maxVersions = 3
 
 	// App data directory: where sessions.db, metrics.jsonl, hooks/, .versions/ live
-	appDir string // workspace/scripts/<appName>/
+	appDir string // <appHome>/data/ (sessions.db, metrics, hooks, versions)
+	srcDir string // source code directory (for build/update commands)
 
 	// Service health check (from services.json or fallback defaults)
 	monitoredServices []serviceEntry
@@ -166,19 +167,24 @@ func initWorkspace() {
 	// Read user config from config.json (may override tgChatID/jiraToken/projectRoots)
 	loadConfig()
 
-	// App data directory: prefer workspace/scripts/<appName>/, fallback to executable dir
-	appDir = filepath.Join(workspace, "scripts", appName)
-	if _, err := os.Stat(appDir); err != nil {
-		// try executable directory as fallback
+	// App data directory: <appHome>/data/ (XDG-style, independent of source tree)
+	// Legacy: workspace/scripts/<appName>/ (auto-migrated)
+	appDir = filepath.Join(appHome, "data")
+	os.MkdirAll(appDir, 0755)
+
+	// Migrate from legacy source-tree location if data exists there
+	legacyDir := filepath.Join(workspace, "scripts", appName)
+	migrateAppData(legacyDir, appDir)
+
+	// Source directory: where go.mod lives (for build/update commands)
+	// Try: workspace/scripts/<appName>/ → executable dir → not found
+	srcDir = filepath.Join(workspace, "scripts", appName)
+	if _, err := os.Stat(filepath.Join(srcDir, "go.mod")); err != nil {
 		if exe, err := os.Executable(); err == nil {
 			candidate := filepath.Dir(exe)
 			if _, err := os.Stat(filepath.Join(candidate, "go.mod")); err == nil {
-				appDir = candidate
+				srcDir = candidate
 			}
-		}
-		// ultimate fallback: create the directory
-		if _, err := os.Stat(appDir); err != nil {
-			os.MkdirAll(appDir, 0755)
 		}
 	}
 
@@ -209,12 +215,72 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
+// migrateAppData moves data files from legacy source-tree location to the new appDir.
+// Only migrates if the destination file does NOT already exist (no overwrite).
+func migrateAppData(legacyDir, newDir string) {
+	if legacyDir == newDir {
+		return
+	}
+	if _, err := os.Stat(legacyDir); err != nil {
+		return // legacy dir doesn't exist, nothing to migrate
+	}
+
+	dataFiles := []string{"sessions.db", "metrics.jsonl", "services.json", "config.json"}
+	dataDirs := []string{".versions", "hooks"}
+
+	migrated := 0
+	for _, name := range dataFiles {
+		src := filepath.Join(legacyDir, name)
+		dst := filepath.Join(newDir, name)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		if _, err := os.Stat(dst); err == nil {
+			continue // already exists at destination
+		}
+		if err := os.Rename(src, dst); err != nil {
+			// cross-device: copy + remove
+			data, err := os.ReadFile(src)
+			if err != nil {
+				continue
+			}
+			info, _ := os.Stat(src)
+			if os.WriteFile(dst, data, info.Mode()) == nil {
+				os.Remove(src)
+				migrated++
+			}
+		} else {
+			migrated++
+		}
+	}
+
+	for _, name := range dataDirs {
+		src := filepath.Join(legacyDir, name)
+		dst := filepath.Join(newDir, name)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		if _, err := os.Stat(dst); err == nil {
+			continue
+		}
+		if err := os.Rename(src, dst); err == nil {
+			migrated++
+		}
+		// skip cross-device dir copy — too complex, user can do manually
+	}
+
+	if migrated > 0 {
+		fmt.Fprintf(os.Stderr, "[%s] migrated %d data items from %s → %s\n", appName, migrated, legacyDir, newDir)
+	}
+}
+
 // loadConfig reads user configuration from config.json.
 // Config file is located in the app data directory.
 // All fields are optional; if unset, values are read from environment variables or openclaw.json.
 func loadConfig() {
 	configPaths := []string{
-		filepath.Join(workspace, "scripts", appName, "config.json"),
+		filepath.Join(appHome, "data", "config.json"),               // new location
+		filepath.Join(workspace, "scripts", appName, "config.json"), // legacy
 	}
 	// Also check the directory containing the binary (for development)
 	if exe, err := os.Executable(); err == nil {

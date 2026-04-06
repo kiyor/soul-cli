@@ -51,7 +51,7 @@ Key subsystems:
 
 **Prompt Assembly** (`buildPrompt`): Concatenates startup protocol + soul files (SOUL.md, IDENTITY.md, USER.md, AGENTS.md, TOOLS.md) + MEMORY.md + today/yesterday daily notes + skill index + project index. Token budget is 100k tokens with a `estimateTokens` heuristic.
 
-**Session DB** (SQLite via `modernc.org/sqlite`): Tracks which JSONL session files have been summarized. Uses SHA-256 hash (head+tail for large files) to detect changes. DB path: `sessions.db` in this directory.
+**Session DB** (SQLite via `modernc.org/sqlite`): Tracks which JSONL session files have been summarized. Uses SHA-256 hash (head+tail for large files) to detect changes. DB path: `<appHome>/data/sessions.db`.
 
 **Post-Hooks** (`runHooks`): After cron/heartbeat/evolve runs, executes: (1) import summaries.json into DB, (2) send report.txt via Telegram, (3) safety check (soul files, memory bloat, sensitive info in git diff, config drift), (4) user scripts in `hooks/{cron,heartbeat,evolve}.d/*.sh`.
 
@@ -63,7 +63,7 @@ Key subsystems:
 - `claudeBin` = `~/.local/bin/claude`
 - `lockfile` = `/tmp/weiran.lock` (prevents concurrent cron/heartbeat)
 - `promptOut` = `/tmp/weiran-prompt-active.md` (assembled prompt written here)
-- `dbPath` = `./sessions.db` (SQLite, in this directory)
+- `dbPath` = `<appHome>/data/sessions.db` (SQLite)
 - `tgChatID` = Telegram chat ID (read from config.json / openclaw.json / env var)
 
 ## Hooks

@@ -149,7 +149,6 @@ func verifyBinary(path string) bool {
 }
 
 func handleBuild() {
-	srcDir := appDir
 	tmpBin := appBin + ".new" // compile to temp path
 
 	// 1. compile to temp path (inject version info)
@@ -235,8 +234,6 @@ func handleVersions() {
 }
 
 func handleUpdate() {
-	srcDir := appDir
-
 	// 1. git pull
 	fmt.Println("[" + appName + "] git pull...")
 	pull := exec.Command("git", "-C", srcDir, "pull", "--ff-only")

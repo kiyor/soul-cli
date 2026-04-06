@@ -510,6 +510,8 @@ func handleConfig() {
 	fmt.Printf("  workspace:    %s\n", workspace)
 	fmt.Printf("  claude:       %s\n", claudeBin)
 	fmt.Printf("  app bin:      %s\n", appBin)
+	fmt.Printf("  app data:     %s\n", appDir)
+	fmt.Printf("  source:       %s\n", srcDir)
 	fmt.Printf("  versions:     %s\n", versionsDir)
 	fmt.Printf("  db:           %s\n", dbPath)
 	fmt.Printf("  hooks:        %s\n", hooksDir)

@@ -55,10 +55,13 @@ workspace/
 │   ├── 2026-04-05.md    ← today's daily notes
 │   ├── 2026-04-04.md    ← yesterday's
 │   └── topics/          ← long-term memory files by subject
-└── scripts/<your-binary-name>/
-    ├── config.json      ← your local config (gitignored)
+└── data/                    ← app data (independent of source tree)
+    ├── config.json      ← your local config
     ├── sessions.db      ← session summary database
-    └── hooks/           ← post-run hooks
+    ├── metrics.jsonl    ← run metrics
+    ├── services.json    ← service health check targets
+    ├── hooks/           ← post-run hooks
+    └── .versions/       ← binary version history
 ```
 
 ## Install
@@ -76,7 +79,7 @@ mv myai ~/go/bin/  # or anywhere in your PATH
 # https://docs.anthropic.com/en/docs/claude-code
 ```
 
-The `-X main.defaultAppName=myai` flag bakes the identity into the binary. All paths, environment variables, and log prefixes are derived from it. For example, `myai` gets `MYAI_HOME`, `MYAI_TG_CHAT_ID`, and stores data in `workspace/scripts/myai/`.
+The `-X main.defaultAppName=myai` flag bakes the identity into the binary. All paths, environment variables, and log prefixes are derived from it. For example, `myai` gets `MYAI_HOME`, `MYAI_TG_CHAT_ID`, and stores data in `~/.myai/data/`.
 
 **Name resolution priority:**
 
@@ -100,7 +103,7 @@ go build -ldflags "-X main.defaultAppName=gpu"       -o gpu .       # GPU worker
 Each binary automatically:
 - Matches its agent config from `openclaw.json` by ID (e.g. `intern` finds `agents.list[].id == "intern"`)
 - Reads the matched agent's name and workspace
-- Stores data in its own directory (`workspace/scripts/intern/`)
+- Stores data in `<APPNAME_HOME>/data/`
 - Uses isolated lock files, session DBs, hooks, and metrics
 - Prefixes all logs with its own name (`[intern]`, `[sentinel]`, etc.)
 
