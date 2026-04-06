@@ -80,12 +80,12 @@ func handleStatus() {
 
 	// 2. Prompt size
 	fmt.Println("\n── Prompt ──")
-	// use local vars to avoid polluting global sessionDir
-	savedSessionDir, savedPromptOut := sessionDir, promptOut
+	// temporarily set sessionDir/promptOut for buildPrompt, restore immediately after
+	origSessionDir, origPromptOut := sessionDir, promptOut
 	sessionDir = os.TempDir()
 	promptOut = filepath.Join(sessionDir, appName+"-status-prompt.md")
 	result := buildPrompt()
-	defer func() { sessionDir, promptOut = savedSessionDir, savedPromptOut }()
+	sessionDir, promptOut = origSessionDir, origPromptOut
 	tokens := estimateTokens(result.content)
 	fmt.Printf("  size: %d chars, ~%dk tokens (limit %dk)\n", len(result.content), tokens/1000, promptTokenLimit/1000)
 

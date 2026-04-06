@@ -20,32 +20,40 @@ func openDB() (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open DB: %w", err)
 	}
-	db.Exec(`CREATE TABLE IF NOT EXISTS sessions (
-		path       TEXT PRIMARY KEY,
-		size       INTEGER NOT NULL,
-		hash       TEXT NOT NULL,
-		summary    TEXT NOT NULL DEFAULT '',
-		updated_at TEXT NOT NULL
-	)`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS patterns (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		name        TEXT NOT NULL UNIQUE,
-		description TEXT NOT NULL DEFAULT '',
-		example     TEXT NOT NULL DEFAULT '',
-		sources     TEXT NOT NULL DEFAULT '[]',
-		first_seen  TEXT NOT NULL,
-		last_seen   TEXT NOT NULL,
-		seen_count  INTEGER NOT NULL DEFAULT 1,
-		status      TEXT NOT NULL DEFAULT 'candidate'
-	)`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS pattern_feedback (
-		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		pattern_id INTEGER NOT NULL REFERENCES patterns(id),
-		outcome    TEXT NOT NULL,
-		note       TEXT NOT NULL DEFAULT '',
-		session    TEXT NOT NULL DEFAULT '',
-		created_at TEXT NOT NULL
-	)`)
+	schemas := []string{
+		`CREATE TABLE IF NOT EXISTS sessions (
+			path       TEXT PRIMARY KEY,
+			size       INTEGER NOT NULL,
+			hash       TEXT NOT NULL,
+			summary    TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS patterns (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			name        TEXT NOT NULL UNIQUE,
+			description TEXT NOT NULL DEFAULT '',
+			example     TEXT NOT NULL DEFAULT '',
+			sources     TEXT NOT NULL DEFAULT '[]',
+			first_seen  TEXT NOT NULL,
+			last_seen   TEXT NOT NULL,
+			seen_count  INTEGER NOT NULL DEFAULT 1,
+			status      TEXT NOT NULL DEFAULT 'candidate'
+		)`,
+		`CREATE TABLE IF NOT EXISTS pattern_feedback (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			pattern_id INTEGER NOT NULL REFERENCES patterns(id),
+			outcome    TEXT NOT NULL,
+			note       TEXT NOT NULL DEFAULT '',
+			session    TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		)`,
+	}
+	for _, s := range schemas {
+		if _, err := db.Exec(s); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("schema creation failed: %w", err)
+		}
+	}
 	return db, nil
 }
 
@@ -66,10 +74,15 @@ func fileHash(path string) (string, int64) {
 	// large files: hash only first+last 64KB
 	if size > 128*1024 {
 		buf := make([]byte, 64*1024)
-		f.Read(buf)
-		h.Write(buf)
-		f.Seek(-64*1024, io.SeekEnd)
-		n, _ := f.Read(buf)
+		n, err := f.Read(buf)
+		if err != nil {
+			return "", 0
+		}
+		h.Write(buf[:n])
+		if _, err := f.Seek(-64*1024, io.SeekEnd); err != nil {
+			return "", 0
+		}
+		n, _ = f.Read(buf)
 		h.Write(buf[:n])
 		// mix in size as well
 		fmt.Fprintf(h, "%d", size)
@@ -113,11 +126,12 @@ func checkSessions(db *sql.DB, files []sessionFile) []sessionState {
 }
 
 // saveSummary saves a single file's summary to DB
-func saveSummary(db *sql.DB, path, hash string, size int64, summary string) {
+func saveSummary(db *sql.DB, path, hash string, size int64, summary string) error {
 	now := time.Now().Format(time.RFC3339)
-	db.Exec(`INSERT INTO sessions (path, size, hash, summary, updated_at) VALUES (?, ?, ?, ?, ?)
+	_, err := db.Exec(`INSERT INTO sessions (path, size, hash, summary, updated_at) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET size=excluded.size, hash=excluded.hash, summary=excluded.summary, updated_at=excluded.updated_at`,
 		path, size, hash, summary, now)
+	return err
 }
 
 // ── DB subcommands ──
@@ -154,7 +168,10 @@ func handleDB(args []string) {
 			fmt.Fprintf(os.Stderr, "file not readable: %s\n", input.Path)
 			os.Exit(1)
 		}
-		saveSummary(db, input.Path, hash, size, input.Summary)
+		if err := saveSummary(db, input.Path, hash, size, input.Summary); err != nil {
+			fmt.Fprintf(os.Stderr, "save failed: %v\n", err)
+			os.Exit(1)
+		}
 		fmt.Printf("saved: %s (%d bytes)\n", input.Path, size)
 
 	case "save-batch":
@@ -182,7 +199,10 @@ func handleDB(args []string) {
 				fmt.Fprintf(os.Stderr, "skipping unreadable: %s\n", input.Path)
 				continue
 			}
-			saveSummary(db, input.Path, hash, size, input.Summary)
+			if err := saveSummary(db, input.Path, hash, size, input.Summary); err != nil {
+				fmt.Fprintf(os.Stderr, "save failed for %s: %v\n", input.Path, err)
+				continue
+			}
 			fmt.Printf("saved: %s (%d bytes)\n", input.Path, size)
 			saved++
 		}
@@ -464,7 +484,10 @@ func importSummaries() {
 		if hash == "" {
 			continue
 		}
-		saveSummary(db, item.Path, hash, size, item.Summary)
+		if err := saveSummary(db, item.Path, hash, size, item.Summary); err != nil {
+			fmt.Fprintf(os.Stderr, "["+appName+"] save failed for %s: %v\n", item.Path, err)
+			continue
+		}
 		saved++
 	}
 	fmt.Fprintf(os.Stderr, "[" + appName + "] imported %d/%d summaries\n", saved, len(items))
@@ -566,9 +589,24 @@ func getPatternMetrics(db *sql.DB, patternID int, sources []string) patternMetri
 	var m patternMetrics
 	m.Diversity = len(sources)
 
-	db.QueryRow("SELECT COUNT(*) FROM pattern_feedback WHERE pattern_id = ? AND outcome = 'success'", patternID).Scan(&m.SuccessCount)
-	db.QueryRow("SELECT COUNT(*) FROM pattern_feedback WHERE pattern_id = ? AND outcome = 'failure'", patternID).Scan(&m.FailureCount)
-	db.QueryRow("SELECT COUNT(*) FROM pattern_feedback WHERE pattern_id = ? AND outcome = 'correction'", patternID).Scan(&m.CorrectionCount)
+	rows, err := db.Query("SELECT outcome, COUNT(*) FROM pattern_feedback WHERE pattern_id = ? GROUP BY outcome", patternID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var outcome string
+			var count int
+			if rows.Scan(&outcome, &count) == nil {
+				switch outcome {
+				case "success":
+					m.SuccessCount = count
+				case "failure":
+					m.FailureCount = count
+				case "correction":
+					m.CorrectionCount = count
+				}
+			}
+		}
+	}
 	m.TotalFeedback = m.SuccessCount + m.FailureCount + m.CorrectionCount
 
 	if denom := m.SuccessCount + m.FailureCount; denom > 0 {
@@ -602,7 +640,8 @@ func handlePatterns(db *sql.DB, jsonMode bool) {
 	for rows.Next() {
 		var p patternOut
 		var sourcesJSON string
-		rows.Scan(&p.ID, &p.Name, &p.Description, &sourcesJSON, &p.LastSeen, &p.LastSeen, &p.SeenCount, &p.Status)
+		var firstSeen string
+		rows.Scan(&p.ID, &p.Name, &p.Description, &sourcesJSON, &firstSeen, &p.LastSeen, &p.SeenCount, &p.Status)
 		var sources []string
 		json.Unmarshal([]byte(sourcesJSON), &sources)
 		p.Metrics = getPatternMetrics(db, p.ID, sources)

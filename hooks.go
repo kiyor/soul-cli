@@ -233,6 +233,8 @@ func safetyCheck(mode string) {
 	sensitivePatterns := []string{
 		"botToken", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
 		"sk-ant-", "sk-proj-", "Bearer ", "secret_key",
+		"AKIA", "aws_secret", "ghp_", "gho_", "github_pat_",
+		"xoxb-", "xoxp-", "PRIVATE KEY", "password",
 	}
 	gitDiff, err := exec.Command("git", "-C", workspace, "diff", "--cached", "--diff-filter=ACMR").Output()
 	if err == nil && len(gitDiff) > 0 {

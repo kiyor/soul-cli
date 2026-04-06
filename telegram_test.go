@@ -21,11 +21,14 @@ func setTestHome(t *testing.T, dir string) {
 	t.Helper()
 	origHome := home
 	origWeiranHome := appHome
+	origCachedToken := cachedTelegramToken
 	home = dir
 	appHome = filepath.Join(dir, ".openclaw")
+	cachedTelegramToken = "" // clear cache for test isolation
 	t.Cleanup(func() {
 		home = origHome
 		appHome = origWeiranHome
+		cachedTelegramToken = origCachedToken
 	})
 }
 

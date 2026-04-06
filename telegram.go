@@ -12,7 +12,12 @@ import (
 
 // ── Telegram Notify ──
 
+var cachedTelegramToken string
+
 func getTelegramToken() string {
+	if cachedTelegramToken != "" {
+		return cachedTelegramToken
+	}
 	data, err := os.ReadFile(filepath.Join(appHome, "openclaw.json"))
 	if err != nil {
 		return ""
@@ -25,12 +30,14 @@ func getTelegramToken() string {
 	channels, _ := cfg["channels"].(map[string]interface{})
 	tg, _ := channels["telegram"].(map[string]interface{})
 	if token, ok := tg["botToken"].(string); ok && token != "" {
+		cachedTelegramToken = token
 		return token
 	}
 	// fallback: channels.telegram.accounts.main.botToken
 	accounts, _ := tg["accounts"].(map[string]interface{})
 	main, _ := accounts["main"].(map[string]interface{})
 	token, _ := main["botToken"].(string)
+	cachedTelegramToken = token
 	return token
 }
 
