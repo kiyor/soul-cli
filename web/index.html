@@ -182,6 +182,13 @@ body{
 .main{display:flex;flex-direction:column;overflow:hidden;position:relative}
 .model-badge{position:absolute;top:8px;right:12px;z-index:10;font-size:11px;color:var(--muted2);background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:6px;padding:2px 8px;backdrop-filter:blur(8px);pointer-events:none;transition:opacity .2s}
 .model-badge:empty{opacity:0}
+.context-bar{position:absolute;top:30px;right:12px;z-index:10;display:flex;align-items:center;gap:6px;pointer-events:none;transition:opacity .3s}
+.context-bar.hidden{opacity:0}
+.context-track{width:60px;height:4px;border-radius:99px;background:rgba(255,255,255,.06);overflow:hidden}
+.context-fill{height:100%;border-radius:99px;background:var(--accent2);transition:width .4s var(--spring);min-width:1px}
+.context-fill.warn{background:var(--warn)}
+.context-fill.danger{background:var(--bad)}
+.context-pct{font-size:9px;color:var(--muted2);font-family:var(--mono)}
 
 /* Slash command dropdown */
 .slash-dropdown{
@@ -289,6 +296,85 @@ body{
 .streaming .md::after{content:'';display:inline-block;width:2px;height:14px;background:var(--accent2);margin-left:2px;vertical-align:text-bottom;animation:blink .8s ease-in-out infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* Thinking indicator (mobile tool chain replacement) */
+.thinking-indicator{
+  display:none;padding:6px 0;text-align:center;flex-shrink:0;
+}
+.thinking-indicator.show{display:block}
+.thinking-dots{display:inline-flex;gap:4px;align-items:center;padding:6px 14px;border-radius:99px;background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.12)}
+.thinking-dots span{width:6px;height:6px;border-radius:50%;background:rgba(139,92,246,.6);animation:dotPulse 1.4s ease-in-out infinite}
+.thinking-dots span:nth-child(2){animation-delay:.2s}
+.thinking-dots span:nth-child(3){animation-delay:.4s}
+@keyframes dotPulse{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1)}}
+
+/* Settings menu (right-top, below model badge) */
+.settings-btn{
+  position:absolute;top:32px;right:12px;z-index:11;
+  width:28px;height:28px;border-radius:8px;border:none;
+  background:transparent;color:var(--muted2);opacity:.35;
+  cursor:pointer;display:none;place-items:center;
+  transition:opacity .15s,color .15s;
+}
+.settings-btn:active{opacity:.8}
+.settings-btn svg{width:16px;height:16px}
+
+.settings-panel{
+  position:absolute;top:60px;right:12px;z-index:12;
+  min-width:200px;border-radius:14px;
+  background:rgba(18,24,38,.92);
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border:1px solid rgba(255,255,255,.08);
+  box-shadow:0 12px 40px rgba(0,0,0,.5);
+  padding:6px;opacity:0;transform:scale(.95) translateY(-4px);
+  pointer-events:none;transition:opacity .18s var(--spring),transform .18s var(--spring);
+}
+.settings-panel.show{opacity:1;transform:scale(1) translateY(0);pointer-events:auto}
+
+.settings-row{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 12px;border-radius:10px;transition:background .12s;
+}
+.settings-row:active{background:rgba(255,255,255,.04)}
+.settings-label{font-size:13px;color:var(--text);font-weight:500}
+
+/* iOS-style toggle switch */
+.toggle-switch{
+  position:relative;width:44px;height:26px;flex-shrink:0;
+}
+.toggle-switch input{opacity:0;width:0;height:0;position:absolute}
+.toggle-track{
+  position:absolute;inset:0;border-radius:99px;cursor:pointer;
+  background:rgba(255,255,255,.1);transition:background .25s;
+}
+.toggle-track::after{
+  content:'';position:absolute;top:2px;left:2px;width:22px;height:22px;
+  border-radius:50%;background:#fff;
+  box-shadow:0 1px 3px rgba(0,0,0,.3);
+  transition:transform .25s var(--spring);
+}
+.toggle-switch input:checked+.toggle-track{background:rgba(139,92,246,.7)}
+.toggle-switch input:checked+.toggle-track::after{transform:translateX(18px)}
+
+.settings-backdrop{
+  display:none;position:fixed;inset:0;z-index:11;
+}
+.settings-backdrop.show{display:block}
+
+/* Link preview card */
+.link-preview{
+  display:flex;gap:10px;padding:10px;margin:8px 0;
+  border-radius:var(--radius2);border:1px solid var(--border);
+  background:rgba(15,22,38,.7);cursor:pointer;text-decoration:none;color:inherit;
+  overflow:hidden;transition:background .15s;max-width:480px;
+}
+.link-preview:hover{background:rgba(20,28,48,.8)}
+.link-preview:active{transform:scale(.99)}
+.link-preview-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.link-preview-title{font-size:13px;font-weight:650;color:var(--text);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.link-preview-desc{font-size:11px;color:var(--muted2);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.4}
+.link-preview-host{font-size:10px;color:var(--muted2);font-family:var(--mono);margin-top:auto}
+.link-preview-img{width:80px;height:80px;border-radius:8px;object-fit:cover;flex-shrink:0;background:rgba(255,255,255,.03)}
 
 /* ── Composer ── */
 .composer{
@@ -434,6 +520,11 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   .welcome .wlogo{width:52px;height:52px;font-size:22px;border-radius:16px}
   .welcome h2{font-size:16px}
   .welcome p{font-size:12px}
+
+  /* Hide tool chain on mobile by default */
+  .msg.ai:has(.tool-block),.msg.system-msg:has(.tool-block){display:none}
+  .show-tools .msg.ai:has(.tool-block),.show-tools .msg.system-msg:has(.tool-block){display:block}
+  .settings-btn{display:grid}
 }
 
 /* Desktop: hide menu btn, show sidebar normally */
@@ -510,6 +601,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   <!-- Main -->
   <div class="main" id="main">
     <div class="model-badge" id="model-badge"></div>
+    <div class="context-bar hidden" id="context-bar"><div class="context-track"><div class="context-fill" id="context-fill"></div></div><span class="context-pct" id="context-pct"></span></div>
     <div class="content" id="content">
       <div class="welcome" id="welcome">
         <div class="wlogo" id="w-logo">W</div>
@@ -519,6 +611,15 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
       <div class="wrap" id="messages" style="display:none"></div>
     </div>
     <button class="scroll-fab" id="scroll-fab" onclick="scrollBottom()">&#8595;</button>
+    <button class="settings-btn" id="settings-btn" onclick="toggleSettingsPanel()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+    <div class="settings-backdrop" id="settings-backdrop" onclick="closeSettingsPanel()"></div>
+    <div class="settings-panel" id="settings-panel">
+      <div class="settings-row">
+        <span class="settings-label">Show tools</span>
+        <label class="toggle-switch"><input type="checkbox" id="toggle-tools" onchange="toggleTools(this.checked)"><span class="toggle-track"></span></label>
+      </div>
+    </div>
+    <div class="thinking-indicator" id="thinking"><div class="thinking-dots"><span></span><span></span><span></span></div></div>
     <div class="composer disabled" id="composer">
       <div class="slash-dropdown" id="slash-dropdown"></div>
       <div class="inner">
@@ -606,6 +707,9 @@ let TOKEN = new URLSearchParams(location.search).get('token')||localStorage.getI
 let ws = null, wsRetryDelay = 1000, wsRetryTimer = null;
 let activeSessionId = null, sessions = {}, streamingMsgEl = null, streamingText = '';
 let typeBuf = '', typeRendered = '', typeRAF = null, typeLastChunk = 0;
+let showToolsMode = false, toolRunning = false;
+let currentModel = '', contextMax = 0, contextTokensPeak = 0;
+let linkPreviewCache = {};
 let agentName = 'Weiran', agentAvatar = 'W';
 let pendingResumeId = null, pendingResumeName = null, pendingDestroyId = null;
 let historyData = [];
@@ -796,8 +900,11 @@ function handleWSMessage(msg){
     case 'resumed':
       if(msg.session){
         toast('Session resumed','success');
-        refreshFromWS();
-        selectSession(msg.session.id);
+        resumeInProgress=false;
+        activeSessionId=msg.session.id;
+        wsSend({type:'subscribe',sid:msg.session.id});
+        updateSidebarActive();
+        document.getElementById('send-btn').disabled=!document.getElementById('input').value.trim();
         if(isMobile)closeSidebar();
       }
       break;
@@ -829,7 +936,7 @@ function handleSessionsUpdate(list){
 
   const newIds=new Set();
   (list||[]).forEach(s=>{sessions[s.id]=s;newIds.add(s.id)});
-  Object.keys(sessions).forEach(id=>{if(!newIds.has(id)){delete sessions[id];if(activeSessionId===id)selectSession(null)}});
+  Object.keys(sessions).forEach(id=>{if(!newIds.has(id)){delete sessions[id];if(activeSessionId===id&&!resumeInProgress)selectSession(null)}});
 
   if(!list||list.length===0){
     emptyEl.style.display='';
@@ -859,7 +966,11 @@ function handleSessionsUpdate(list){
 function handleSessionEvent(event,data){
   switch(event){
     case 'init':
-      document.getElementById('model-badge').textContent=data.model||'';
+      currentModel=data.model||'';
+      document.getElementById('model-badge').textContent=currentModel;
+      contextMax=getContextWindow(currentModel);
+      // Show bar with current peak (or 0 on fresh session)
+      updateContextBar(contextTokensPeak);
       break;
     case 'assistant':
       handleAssistant(data);
@@ -891,6 +1002,8 @@ function selectSession(id){
   streamingMsgEl=null;streamingText='';
   activeSessionId=id;
   document.getElementById('model-badge').textContent='';
+  document.getElementById('context-bar').classList.add('hidden');
+  currentModel='';contextMax=0;contextTokensPeak=0;
 
   const w=document.getElementById('welcome'),m=document.getElementById('messages'),c=document.getElementById('composer');
   if(!id){
@@ -914,12 +1027,23 @@ function updateSidebarActive(){
 // ── Message Rendering (typewriter) ──
 function handleAssistant(data){
   const msg=data.message;if(!msg||!msg.content)return;
+  // Update context bar from usage data (monotonic — only goes up)
+  if(data.message&&data.message.usage){
+    const u=data.message.usage;
+    const total=(u.input_tokens||0)+(u.cache_creation_input_tokens||0)+(u.cache_read_input_tokens||0);
+    if(total>contextTokensPeak){
+      contextTokensPeak=total;
+      if(contextMax>0)updateContextBar(total);
+    }
+  }
+
   let text='';msg.content.forEach(b=>{if(b.type==='text')text+=b.text});
   if(!text)return;
 
   // Append to type buffer
   typeBuf+=text;
   typeLastChunk=performance.now();
+  if(isMobile)setThinking(false);
 
   if(!streamingMsgEl){
     typeRendered='';
@@ -966,11 +1090,54 @@ function typewriterTick(now){
 function handleToolUse(data){
   finalizeStream();const msg=data.message;if(!msg||!msg.content)return;
   msg.content.forEach(b=>{if(b.type==='tool_use')addToolUseMsg(b.name,b.input)});
+  if(isMobile)setThinking(true);
 }
 
 function handleToolResult(data){
   const msg=data.message;if(!msg||!msg.content)return;
-  msg.content.forEach(b=>{if(b.type==='tool_result'){const t=typeof b.content==='string'?b.content:JSON.stringify(b.content);addToolResultMsg(t)}});
+  msg.content.forEach(b=>{
+    if(b.type==='tool_result'){
+      // Check for image content (base64 from Read tool)
+      const images=extractImages(b.content);
+      if(images.length>0){
+        addImageResultMsg(images);
+        return;
+      }
+      const t=typeof b.content==='string'?b.content:JSON.stringify(b.content);
+      addToolResultMsg(t);
+    }
+  });
+}
+
+function extractImages(content){
+  const imgs=[];
+  if(!content)return imgs;
+  const arr=Array.isArray(content)?content:[content];
+  for(const item of arr){
+    if(typeof item!=='object'||!item)continue;
+    if(item.type==='image'&&item.source){
+      const s=item.source;
+      if(s.type==='base64'&&s.data){
+        const mime=s.media_type||'image/jpeg';
+        imgs.push(`data:${mime};base64,${s.data}`);
+      }
+    }
+  }
+  return imgs;
+}
+
+function addHistoryImages(images){
+  const srcs=images.map(img=>`data:${img.media_type||'image/jpeg'};base64,${img.data}`);
+  addImageResultMsg(srcs);
+}
+
+function addImageResultMsg(srcs){
+  const el=document.createElement('div');el.className='msg ai';
+  const grid=srcs.length>1?` cols-${Math.min(srcs.length,3)}`:'';
+  const imgsHtml=srcs.map(s=>`<img src="${s}" onclick="openLightbox(this.src)" loading="lazy" style="max-width:100%;border-radius:var(--radius2);cursor:pointer">`).join('');
+  el.innerHTML=`<div class="body"><div class="md"><div class="media-grid${grid}">${imgsHtml}</div></div></div>`;
+  document.getElementById('messages').appendChild(el);
+  scrollBottomSmooth();
 }
 
 function finalizeStream(){
@@ -984,14 +1151,19 @@ function finalizeStream(){
     streamingText=typeRendered;
   }
   if(typeRAF){cancelAnimationFrame(typeRAF);typeRAF=null}
+  const finEl=streamingMsgEl;
   streamingMsgEl.classList.remove('streaming');
   streamingMsgEl.querySelectorAll('pre code').forEach(el=>{try{hljs.highlightElement(el)}catch(e){}});
   streamingMsgEl=null;streamingText='';typeRendered='';typeBuf='';
+  if(isMobile)setThinking(false);
+  injectLinkPreviews(finEl);
 }
 
 function addUserMsg(text){
-  document.getElementById('messages').appendChild(createMsg('user','U','You',text));
+  const el=createMsg('user','U','You',text);
+  document.getElementById('messages').appendChild(el);
   scrollBottomSmooth();
+  injectLinkPreviews(el);
 }
 
 function addAIMsg(text,streaming=false){
@@ -999,6 +1171,7 @@ function addAIMsg(text,streaming=false){
   if(streaming)el.classList.add('streaming');
   document.getElementById('messages').appendChild(el);
   scrollBottomSmooth();
+  if(!streaming)injectLinkPreviews(el);
   return el;
 }
 
@@ -1125,18 +1298,24 @@ function closeResumeSheet(){
   setTimeout(()=>document.getElementById('resume-overlay').classList.remove('show'),350);
   pendingResumeId=null;
 }
+var resumeInProgress=false;
+
 function confirmResume(){
   if(!pendingResumeId)return;
   const sid=pendingResumeId;
   closeResumeSheet();
+  resumeInProgress=true;
+
+  // Prepare chat area
+  streamingMsgEl=null;streamingText='';
+  activeSessionId='_resuming_'; // prevent handleSessionsUpdate from clearing
+  document.getElementById('welcome').style.display='none';
+  const m=document.getElementById('messages');m.style.display='flex';m.innerHTML='';
+  document.getElementById('composer').classList.remove('disabled');
+  document.getElementById('model-badge').textContent='';
 
   // Load history messages first, then resume
   loadHistoryMessages(sid).then(msgs=>{
-    wsSend({type:'resume',sid:sid});
-    // Show history in chat area
-    document.getElementById('welcome').style.display='none';
-    const m=document.getElementById('messages');m.style.display='flex';m.innerHTML='';
-    document.getElementById('composer').classList.remove('disabled');
     if(msgs&&msgs.length){
       addSystemMsg(`${msgs.length} messages loaded from history`);
       msgs.forEach(msg=>{
@@ -1144,9 +1323,11 @@ function confirmResume(){
         else if(msg.role==='assistant')addAIMsg(msg.content);
         else if(msg.role==='tool_use')addToolUseMsg(msg.tool_name,msg.tool_input);
         else if(msg.role==='tool_result')addToolResultMsg(msg.content);
+        else if(msg.role==='image'&&msg.images)addHistoryImages(msg.images);
       });
       scrollBottom();
     }
+    wsSend({type:'resume',sid:sid});
   });
 }
 
@@ -1227,6 +1408,76 @@ function openLightbox(src){
 }
 function closeLightbox(){
   document.getElementById('lightbox').classList.remove('show');
+}
+
+// ── Tool Visibility & Thinking ──
+
+function setThinking(on){
+  const el=document.getElementById('thinking');
+  if(on){el.classList.add('show');scrollBottomSmooth()}
+  else{el.classList.remove('show')}
+}
+
+function toggleSettingsPanel(){
+  const p=document.getElementById('settings-panel');
+  const b=document.getElementById('settings-backdrop');
+  const show=!p.classList.contains('show');
+  p.classList.toggle('show',show);
+  b.classList.toggle('show',show);
+}
+function closeSettingsPanel(){
+  document.getElementById('settings-panel').classList.remove('show');
+  document.getElementById('settings-backdrop').classList.remove('show');
+}
+
+function toggleTools(on){
+  showToolsMode=on;
+  document.getElementById('messages').classList.toggle('show-tools',on);
+}
+
+// ── Link Preview ──
+
+const URL_RE=/https?:\/\/[^\s<>"')\]]+/gi;
+
+async function fetchLinkPreview(url){
+  if(linkPreviewCache[url])return linkPreviewCache[url];
+  try{
+    const r=await fetch('/api/link-preview?url='+encodeURIComponent(url),{headers:{'Authorization':'Bearer '+TOKEN}});
+    if(!r.ok)return null;
+    const d=await r.json();
+    if(d.title){linkPreviewCache[url]=d;return d}
+  }catch(e){}
+  return null;
+}
+
+function renderLinkPreview(data,url){
+  const host=new URL(url).hostname.replace('www.','');
+  let img='';
+  if(data.image)img=`<img class="link-preview-img" src="${esc(data.image)}" alt="" onerror="this.style.display='none'" loading="lazy">`;
+  return `<a class="link-preview" href="${esc(url)}" target="_blank" rel="noopener">`+
+    `<div class="link-preview-text">`+
+    `<div class="link-preview-title">${esc(data.title)}</div>`+
+    (data.description?`<div class="link-preview-desc">${esc(data.description)}</div>`:'')+
+    `<div class="link-preview-host">${esc(host)}</div>`+
+    `</div>${img}</a>`;
+}
+
+// Scan a message element for URLs and inject link previews
+async function injectLinkPreviews(el){
+  const md=el.querySelector('.md');
+  if(!md)return;
+  const text=md.textContent||'';
+  const urls=[...new Set((text.match(URL_RE)||[]))].slice(0,3); // max 3 previews
+  for(const url of urls){
+    // Skip image/video URLs (already rendered by marked)
+    if(/\.(png|jpg|jpeg|gif|webp|svg|mp4|webm|mov)(\?|$)/i.test(url))continue;
+    const data=await fetchLinkPreview(url);
+    if(data){
+      const card=document.createElement('div');
+      card.innerHTML=renderLinkPreview(data,url);
+      md.appendChild(card.firstElementChild);
+    }
+  }
 }
 
 // ── Slash Commands ──
@@ -1351,6 +1602,32 @@ function handleSlashSend(text){
   return false; // not a built-in command, send as message
 }
 
+// ── Context Bar ──
+
+function getContextWindow(model){
+  if(!model)return 200000;
+  const m=model.toLowerCase();
+  if(m.includes('opus'))return 1000000;
+  if(m.includes('sonnet'))return 200000;
+  if(m.includes('haiku'))return 200000;
+  return 200000;
+}
+
+function updateContextBar(tokens){
+  const bar=document.getElementById('context-bar');
+  const fill=document.getElementById('context-fill');
+  const pct=document.getElementById('context-pct');
+  if(!contextMax){bar.classList.add('hidden');return}
+  const ratio=Math.min(tokens/contextMax,1);
+  const percent=Math.round(ratio*100);
+  fill.style.width=Math.max(ratio*100,1)+'%';
+  fill.classList.remove('warn','danger');
+  if(ratio>.8)fill.classList.add('danger');
+  else if(ratio>.6)fill.classList.add('warn');
+  pct.textContent=percent+'%';
+  bar.classList.remove('hidden');
+}
+
 // ── Helpers ──
 function esc(s){if(!s)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function shortId(id){return(id||'').slice(0,8)}
@@ -1377,7 +1654,7 @@ function relTime(iso){
 // ── Keyboard ──
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){
-    closeNewSheet();closeResumeSheet();closeDestroySheet();closeLightbox();
+    closeNewSheet();closeResumeSheet();closeDestroySheet();closeLightbox();closeSettingsPanel();
   }
 });
 

@@ -155,11 +155,19 @@ func serveSSE(w http.ResponseWriter, r *http.Request, broadcaster *sseBroadcaste
 // bridgeStdout reads Claude Code stdout and broadcasts as SSE events.
 // Also updates session status based on message types.
 // Blocks until the process stdout is closed.
-func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onResult func(json.RawMessage)) {
+func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage)) {
 	proc.readLines(func(msgType string, raw json.RawMessage) {
 		event := mapEventType(msgType, raw)
 		broadcaster.broadcast(sseEvent{Event: event, Data: raw})
 
+		if msgType == "system" && onInit != nil {
+			var peek struct {
+				Subtype string `json:"subtype"`
+			}
+			if json.Unmarshal(raw, &peek) == nil && peek.Subtype == "init" {
+				onInit(raw)
+			}
+		}
 		if msgType == "result" && onResult != nil {
 			onResult(raw)
 		}

@@ -41,6 +41,8 @@ var (
 
 	jiraToken string // read from config.json or JIRA_TOKEN env var
 
+	isServerMode bool // set to true when running as `weiran server`
+
 	// Skill directories
 	skillDirs []string
 

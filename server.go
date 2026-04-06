@@ -130,6 +130,7 @@ func (rl *rateLimiter) allow() bool {
 
 // handleServer is the main entry point for `weiran server`.
 func handleServer(args []string) {
+	isServerMode = true
 	cfg := loadServerConfig()
 
 	// Override from CLI flags
@@ -207,6 +208,22 @@ func handleServer(args []string) {
 			"workspace":        workspace,
 			"claude_bin":       claudeBin,
 		})
+	}))
+
+	// Link preview (OG tags)
+	mux.HandleFunc("GET /api/link-preview", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		url := r.URL.Query().Get("url")
+		if url == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url required"})
+			return
+		}
+		data := fetchOGTags(url)
+		if data == nil {
+			writeJSON(w, http.StatusNoContent, nil)
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		writeJSON(w, http.StatusOK, data)
 	}))
 
 	// List available skills

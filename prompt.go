@@ -674,5 +674,46 @@ func loadBootProtocol() string {
 	if err != nil {
 		return defaultBootProtocol()
 	}
-	return string(data) + "\n---\n\n"
+	content := string(data)
+
+	// In server mode, replace the environment section to indicate Web UI context
+	if isServerMode {
+		content = injectServerModeContext(content)
+	}
+
+	return content + "\n---\n\n"
+}
+
+const serverModeEnv = `## Current Environment
+
+You are running in **Weiran Server (Web UI)** mode, interacting with Kiyor via a browser.
+Available: file read/write, bash, git, jira-cli, curl, weiran CLI, all local tools.
+Limited: ` + "`weiran notify \"message\"`" + ` to send Telegram messages to Kiyor.
+Unavailable: IndexTTS voice, temperature control.
+
+### Web UI Specifics
+- **Images**: Use markdown image syntax ` + "`![caption](URL)`" + ` directly — the Web UI renders images inline. For selfie/image generation skills, send the S3 URL directly instead of downloading to /tmp and using Read tool.
+- **Link previews**: URLs in messages are automatically rendered with OG tag preview cards.
+- **Tool chain**: Hidden by default on mobile — only final results and a thinking animation are shown.
+
+Jira token is set via JIRA_TOKEN env var. Run ` + "`weiran --help`" + ` for all subcommands.`
+
+func injectServerModeContext(content string) string {
+	// Replace the environment section with server mode version
+	// Try both Chinese and English markers
+	for _, marker := range []string{"## 当前环境", "## Current Environment"} {
+		idx := strings.Index(content, marker)
+		if idx < 0 {
+			continue
+		}
+		// Find the end of the section (next ## heading or end of string)
+		rest := content[idx+len(marker):]
+		endIdx := strings.Index(rest, "\n## ")
+		if endIdx < 0 {
+			return content[:idx] + serverModeEnv + "\n"
+		}
+		return content[:idx] + serverModeEnv + "\n" + rest[endIdx+1:]
+	}
+	// No section found, append
+	return content + "\n" + serverModeEnv + "\n"
 }

@@ -162,32 +162,55 @@ func (sm *sessionManager) createSession(name, project, model string, soulEnabled
 	ensureServerSession(id, name)
 
 	// Start stdout → SSE/WS bridge
-	go bridgeStdout(proc, sess.broadcaster, func(raw json.RawMessage) {
-		var result ResultMessage
-		if json.Unmarshal(raw, &result) == nil {
-			sess.mu.Lock()
-			sess.TotalCost += result.TotalCostUSD
-			sess.NumTurns += result.NumTurns
-			if result.SessionID != "" {
-				sess.ClaudeSID = result.SessionID
-			}
-			newStatus := "idle"
-			if result.Subtype == "error" {
-				newStatus = "error"
-			}
-			sess.mu.Unlock()
-			sess.setStatus(newStatus) // notifies WS hub
-
-			// Track user turns for auto-rename (result = end of a turn)
-			if result.NumTurns > 0 {
-				turns, renamed := incrementUserTurns(sess.ID)
-				if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
-					go tryAutoRename(sess)
+	go bridgeStdout(proc, sess.broadcaster,
+		// onInit: sync session name from Claude Code metadata
+		func(raw json.RawMessage) {
+			var init InitMessage
+			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
+				sess.mu.Lock()
+				sess.ClaudeSID = init.SessionID
+				sess.mu.Unlock()
+				// Read Claude Code's session name (slug like "distributed-munching-kitten")
+				if ccName := readClaudeSessionName(init.SessionID); ccName != "" {
+					sess.mu.Lock()
+					if sess.Name == "" || strings.HasPrefix(sess.Name, "session-") || strings.HasPrefix(sess.Name, "resume-") {
+						sess.Name = ccName
+					}
+					sess.mu.Unlock()
+					ensureServerSession(sess.ID, ccName)
+					if sess.hub != nil {
+						sess.hub.notifySessions()
+					}
 				}
 			}
-		}
-		sess.touch()
-	})
+		},
+		// onResult
+		func(raw json.RawMessage) {
+			var result ResultMessage
+			if json.Unmarshal(raw, &result) == nil {
+				sess.mu.Lock()
+				sess.TotalCost += result.TotalCostUSD
+				sess.NumTurns += result.NumTurns
+				if result.SessionID != "" {
+					sess.ClaudeSID = result.SessionID
+				}
+				newStatus := "idle"
+				if result.Subtype == "error" {
+					newStatus = "error"
+				}
+				sess.mu.Unlock()
+				sess.setStatus(newStatus)
+
+				// Track user turns for auto-rename
+				if result.NumTurns > 0 {
+					turns, renamed := incrementUserTurns(sess.ID)
+					if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
+						go tryAutoRename(sess)
+					}
+				}
+			}
+			sess.touch()
+		})
 
 	// Watch for process exit
 	go func() {
@@ -417,32 +440,53 @@ func (sm *sessionManager) resumeSession(sessionID, message string) (*serverSessi
 	// Register in server DB
 	ensureServerSession(id, sess.Name)
 
-	go bridgeStdout(proc, sess.broadcaster, func(raw json.RawMessage) {
-		var res ResultMessage
-		if json.Unmarshal(raw, &res) == nil {
-			sess.mu.Lock()
-			sess.TotalCost += res.TotalCostUSD
-			sess.NumTurns += res.NumTurns
-			if res.SessionID != "" {
-				sess.ClaudeSID = res.SessionID
-			}
-			newStatus := "idle"
-			if res.Subtype == "error" {
-				newStatus = "error"
-			}
-			sess.mu.Unlock()
-			sess.setStatus(newStatus)
-
-			// Track user turns for auto-rename
-			if res.NumTurns > 0 {
-				turns, renamed := incrementUserTurns(sess.ID)
-				if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
-					go tryAutoRename(sess)
+	go bridgeStdout(proc, sess.broadcaster,
+		// onInit: sync session name
+		func(raw json.RawMessage) {
+			var init InitMessage
+			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
+				sess.mu.Lock()
+				sess.ClaudeSID = init.SessionID
+				sess.mu.Unlock()
+				if ccName := readClaudeSessionName(init.SessionID); ccName != "" {
+					sess.mu.Lock()
+					if sess.Name == "" || strings.HasPrefix(sess.Name, "session-") || strings.HasPrefix(sess.Name, "resume-") {
+						sess.Name = ccName
+					}
+					sess.mu.Unlock()
+					ensureServerSession(sess.ID, ccName)
+					if sess.hub != nil {
+						sess.hub.notifySessions()
+					}
 				}
 			}
-		}
-		sess.touch()
-	})
+		},
+		// onResult
+		func(raw json.RawMessage) {
+			var res ResultMessage
+			if json.Unmarshal(raw, &res) == nil {
+				sess.mu.Lock()
+				sess.TotalCost += res.TotalCostUSD
+				sess.NumTurns += res.NumTurns
+				if res.SessionID != "" {
+					sess.ClaudeSID = res.SessionID
+				}
+				newStatus := "idle"
+				if res.Subtype == "error" {
+					newStatus = "error"
+				}
+				sess.mu.Unlock()
+				sess.setStatus(newStatus)
+
+				if res.NumTurns > 0 {
+					turns, renamed := incrementUserTurns(sess.ID)
+					if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
+						go tryAutoRename(sess)
+					}
+				}
+			}
+			sess.touch()
+		})
 
 	go func() {
 		<-proc.done
@@ -483,6 +527,25 @@ func (sm *sessionManager) resumeSession(sessionID, message string) (*serverSessi
 	return sess, nil
 }
 
+// readClaudeSessionName reads the session name from Claude Code's session meta file.
+func readClaudeSessionName(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	metaPath := filepath.Join(home, ".claude", "sessions", sessionID+".json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(data, &meta) == nil {
+		return meta.Name
+	}
+	return ""
+}
+
 // ── JSONL History Parsing ──
 
 // findSessionJSONL locates the JSONL file for a given session ID.
@@ -507,11 +570,17 @@ func findSessionJSONL(sessionID string) string {
 
 // historyMessage is a parsed message from a session JSONL for the UI.
 type historyMessage struct {
-	Role      string `json:"role"`                 // user, assistant, system, tool_use, tool_result
-	Content   string `json:"content"`              // text content
-	ToolName  string `json:"tool_name,omitempty"`   // for tool_use
-	ToolInput string `json:"tool_input,omitempty"`  // for tool_use
-	Timestamp string `json:"timestamp,omitempty"`
+	Role      string           `json:"role"`                  // user, assistant, system, tool_use, tool_result, image
+	Content   string           `json:"content"`               // text content
+	ToolName  string           `json:"tool_name,omitempty"`   // for tool_use
+	ToolInput string           `json:"tool_input,omitempty"`  // for tool_use
+	Timestamp string           `json:"timestamp,omitempty"`
+	Images    []historyImage   `json:"images,omitempty"`      // base64 images from tool results
+}
+
+type historyImage struct {
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
 }
 
 // parseSessionMessages reads a JSONL file and extracts the last N messages for display.
@@ -548,6 +617,15 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 
 		switch ev.Type {
 		case "user":
+			// Check for images in tool_result content blocks
+			images := extractImages(ev.Message.Content)
+			if len(images) > 0 {
+				all = append(all, historyMessage{
+					Role:      "image",
+					Images:    images,
+					Timestamp: ev.Timestamp,
+				})
+			}
 			text := extractContentText(ev.Message.Content)
 			if text != "" {
 				all = append(all, historyMessage{
@@ -621,6 +699,48 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 		all = all[len(all)-limit:]
 	}
 	return all
+}
+
+// extractImages finds base64 image blocks in user message content (tool_result responses).
+func extractImages(raw json.RawMessage) []historyImage {
+	if len(raw) == 0 {
+		return nil
+	}
+	// content is an array of blocks like [{type:"tool_result", content:[{type:"image", source:{...}}]}]
+	var blocks []struct {
+		Type    string `json:"type"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return nil
+	}
+	var images []historyImage
+	for _, b := range blocks {
+		if b.Type != "tool_result" {
+			continue
+		}
+		// content can be string or array
+		var items []struct {
+			Type   string `json:"type"`
+			Source struct {
+				Type      string `json:"type"`
+				MediaType string `json:"media_type"`
+				Data      string `json:"data"`
+			} `json:"source"`
+		}
+		if json.Unmarshal(b.Content, &items) != nil {
+			continue
+		}
+		for _, item := range items {
+			if item.Type == "image" && item.Source.Type == "base64" && item.Source.Data != "" {
+				images = append(images, historyImage{
+					MediaType: item.Source.MediaType,
+					Data:      item.Source.Data,
+				})
+			}
+		}
+	}
+	return images
 }
 
 // extractContentText extracts text from a JSON content field (string or array of blocks).
