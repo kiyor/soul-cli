@@ -378,6 +378,7 @@ Usage:
   {{NAME}} --cron                memory consolidation mode (for scheduled tasks)
   {{NAME}} --heartbeat           heartbeat patrol mode
   {{NAME}} --evolve              self-evolution mode (daily cron, improves if inspired, skips otherwise)
+  {{NAME}} server                 HTTP API server (persistent Claude Code sessions)
 
 Subcommands:
   {{NAME}} build                 safe build: backup current version -> go build -> verify -> auto-rollback on failure
@@ -389,6 +390,10 @@ Subcommands:
   {{NAME}} diff                  show soul/memory file changes since last commit
   {{NAME}} config                show current config (workspace, agent, paths)
   {{NAME}} log [N]               view daily notes (N=day offset, default today, 1=yesterday)
+  {{NAME}} server                 start HTTP API server for persistent Claude Code sessions
+  {{NAME}} server --port 8080    custom port (default 9090)
+  {{NAME}} server --host 0.0.0.0 expose to network (default 127.0.0.1)
+  {{NAME}} server --token SECRET  set auth token (or use WEIRAN_SERVER_TOKEN env / config.json)
   {{NAME}} clean                 clean old session temp directories under /tmp
   {{NAME}} sessions [keyword]    search sessions (fuzzy match on title/content/project)
   {{NAME}} ss [keyword]          same as above (shorthand)
@@ -520,6 +525,9 @@ func main() {
 		return
 	case "new":
 		handleNew()
+		return
+	case "server":
+		handleServer(extra)
 		return
 	}
 
@@ -695,6 +703,10 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			return
 		case "new":
 			mode = "new"
+			return
+		case "server":
+			mode = "server"
+			extra = args[i+1:]
 			return
 		case "--cron":
 			mode = "cron"

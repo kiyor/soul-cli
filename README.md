@@ -232,9 +232,74 @@ myai rollback [N]            # Rollback to Nth previous version
 myai update                  # git pull + safe build
 ```
 
+## Server Mode
+
+`myai server` starts an HTTP API server that manages persistent Claude Code sessions. External clients (web UI, curl, other services) can create sessions, send messages, and receive real-time output via SSE.
+
+```bash
+# Start (token required)
+myai server --token my-secret
+
+# Or via env / config.json
+export MYAI_SERVER_TOKEN=my-secret
+myai server
+
+# Custom host/port
+myai server --host 0.0.0.0 --port 9847
+```
+
+**Web UI** — Open `http://host:port/?token=xxx` in a browser. Dark theme, session sidebar, message thread with streaming, history browser with fuzzy search.
+
+**API endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | Health check (no auth) |
+| GET | `/api/config` | Server config |
+| POST | `/api/sessions` | Create session |
+| GET | `/api/sessions` | List active sessions |
+| GET | `/api/sessions/:id` | Session details |
+| DELETE | `/api/sessions/:id` | Destroy session |
+| POST | `/api/sessions/:id/message` | Send message |
+| GET | `/api/sessions/:id/stream` | SSE real-time output |
+| POST | `/api/sessions/:id/control` | Control (interrupt, set_model) |
+| GET | `/api/history` | Historical sessions (for resume) |
+| POST | `/api/sessions/resume` | Resume a historical session |
+
+```bash
+# Create a session
+curl -X POST http://localhost:9847/api/sessions \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"name":"fix-bug","initial_message":"check the logs","soul_files":true}'
+
+# Send a follow-up message
+curl -X POST http://localhost:9847/api/sessions/$SID/message \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"message":"now restart the service"}'
+
+# Stream output (SSE)
+curl -N http://localhost:9847/api/sessions/$SID/stream?token=$TOKEN
+```
+
+Config in `config.json`:
+```json
+{
+  "server": {
+    "token": "your-secret",
+    "host": "0.0.0.0",
+    "port": 9847,
+    "maxSessions": 5,
+    "idleTimeoutMin": 30,
+    "maxLifetimeHours": 4
+  }
+}
+```
+
+Sessions are backed by real Claude Code processes with full tool access (file I/O, git, MCP). Soul files are injected automatically. Idle sessions are reaped after 30 minutes.
+
 ## Architecture
 
-~9k lines of Go (including tests), single package, no internal dependencies beyond stdlib + SQLite + [bubbletea](https://github.com/charmbracelet/bubbletea) TUI.
+~10k lines of Go (including tests), single package, no internal dependencies beyond stdlib + SQLite + [bubbletea](https://github.com/charmbracelet/bubbletea) TUI.
 
 | File | Responsibility |
 |------|----------------|
@@ -249,6 +314,11 @@ myai update                  # git pull + safe build
 | `tasks.go` | Heartbeat/cron/evolve task prompt generation |
 | `telegram.go` | Telegram notifications |
 | `claude.go` | Claude Code exec/subprocess, lock management |
+| `server.go` | HTTP server, auth middleware, API routes |
+| `server_session.go` | Server session lifecycle, TTL reaper |
+| `server_process.go` | Claude Code stream-json subprocess for server |
+| `server_stream.go` | SSE broadcaster, subscriber pattern |
+| `web/index.html` | Embedded web UI (dark theme, go:embed) |
 
 ### Key Design Decisions
 
