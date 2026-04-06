@@ -111,4 +111,3 @@ func TestWeeklyPreScan_ListsFiles(t *testing.T) {
 		t.Errorf("should reference today's note %s", today)
 	}
 }
-

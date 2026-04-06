@@ -43,7 +43,7 @@ func getTelegramToken() string {
 
 func sendTelegramPhoto(photoURL, caption string) {
 	if err := trySendTelegramPhoto(photoURL, caption); err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "]%v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"]%v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("photo sent")
@@ -51,7 +51,7 @@ func sendTelegramPhoto(photoURL, caption string) {
 
 func sendTelegram(text string) {
 	if err := trySendTelegram(text); err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "]%v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"]%v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("sent")

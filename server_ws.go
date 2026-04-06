@@ -291,6 +291,12 @@ func (c *wsClient) handleMessage(raw []byte) {
 		}
 		sess.touch()
 		sess.setStatus("running")
+		// Broadcast user message so it persists in history for session switching
+		userEvent, _ := json.Marshal(map[string]any{
+			"type":    "user",
+			"message": map[string]any{"role": "user", "content": msg.Message},
+		})
+		sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
 		if err := sess.process.sendMessage(msg.Message); err != nil {
 			c.sendJSON(map[string]string{"type": "error", "error": "send failed: " + err.Error()})
 			return
@@ -322,6 +328,11 @@ func (c *wsClient) handleMessage(raw []byte) {
 		}
 		if msg.InitMsg != "" {
 			time.Sleep(500 * time.Millisecond)
+			userEvent, _ := json.Marshal(map[string]any{
+				"type":    "user",
+				"message": map[string]any{"role": "user", "content": msg.InitMsg},
+			})
+			sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
 			sess.process.sendMessage(msg.InitMsg)
 		}
 		c.sendJSON(map[string]any{"type": "created", "session": sess.snapshot()})
@@ -365,7 +376,7 @@ func (c *wsClient) handleMessage(raw []byte) {
 			c.sendJSON(map[string]string{"type": "error", "error": "rate limit exceeded"})
 			return
 		}
-		sess, err := c.hub.sm.resumeSession(msg.SID, msg.Message)
+		sess, err := c.hub.sm.resumeSession(msg.SID, msg.Message, msg.Name)
 		if err != nil {
 			c.sendJSON(map[string]string{"type": "error", "error": err.Error()})
 			return

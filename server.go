@@ -307,6 +307,11 @@ func handleServer(args []string) {
 		if req.InitialMessage != "" {
 			// Wait briefly for Claude Code to initialize
 			time.Sleep(500 * time.Millisecond)
+			userEvent, _ := json.Marshal(map[string]any{
+				"type":    "user",
+				"message": map[string]any{"role": "user", "content": req.InitialMessage},
+			})
+			sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
 			if err := sess.process.sendMessage(req.InitialMessage); err != nil {
 				fmt.Fprintf(os.Stderr, "[%s] server: failed to send initial message: %v\n", appName, err)
 			}
@@ -350,6 +355,65 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "renamed", "name": req.Name})
 	}))
 
+	// Auto-rename session (calls Haiku to generate title from conversation)
+	mux.HandleFunc("POST /api/sessions/{id}/auto-rename", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		sess := sm.getSession(r.PathValue("id"))
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+		// Collect snippets from broadcaster history (same logic as tryAutoRename)
+		sess.broadcaster.mu.RLock()
+		var snippets []string
+		for _, ev := range sess.broadcaster.history {
+			if ev.Event == "assistant" {
+				var peek struct {
+					Message struct {
+						Content []struct {
+							Type string `json:"type"`
+							Text string `json:"text"`
+						} `json:"content"`
+					} `json:"message"`
+				}
+				if json.Unmarshal(ev.Data, &peek) == nil {
+					for _, c := range peek.Message.Content {
+						if c.Type == "text" && c.Text != "" {
+							text := c.Text
+							if len(text) > 200 {
+								text = text[:200]
+							}
+							snippets = append(snippets, text)
+						}
+					}
+				}
+			}
+		}
+		sess.broadcaster.mu.RUnlock()
+
+		if len(snippets) == 0 {
+			writeJSON(w, http.StatusOK, map[string]string{"error": "no conversation context for auto-rename"})
+			return
+		}
+		context := strings.Join(snippets, "\n---\n")
+		if len(context) > 1500 {
+			context = context[:1500]
+		}
+		title := callHaikuForTitle(context)
+		if title == "" {
+			writeJSON(w, http.StatusOK, map[string]string{"error": "no title generated"})
+			return
+		}
+		sess.mu.Lock()
+		sess.Name = title
+		sess.mu.Unlock()
+		markAutoNamed(sess.ID, title)
+		if hub != nil {
+			hub.notifySessions()
+		}
+		fmt.Fprintf(os.Stderr, "[%s] server: auto-renamed %s → %q\n", appName, shortID(sess.ID), title)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "renamed", "name": title})
+	}))
+
 	// Delete session
 	mux.HandleFunc("DELETE /api/sessions/{id}", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
@@ -389,6 +453,15 @@ func handleServer(args []string) {
 
 		sess.touch()
 		sess.setStatus("running")
+
+		// Broadcast user message to SSE/WS so it persists in history
+		// (without this, switching sessions and back loses user messages)
+		userEvent, _ := json.Marshal(map[string]any{
+			"type":    "user",
+			"message": map[string]any{"role": "user", "content": req.Message},
+		})
+		sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
+
 		if err := sess.process.sendMessage(req.Message); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -498,13 +571,14 @@ func handleServer(args []string) {
 		var req struct {
 			SessionID string `json:"session_id"`
 			Message   string `json:"message"`
+			Name      string `json:"name"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id is required"})
 			return
 		}
 
-		sess, err := sm.resumeSession(req.SessionID, req.Message)
+		sess, err := sm.resumeSession(req.SessionID, req.Message, req.Name)
 		if err != nil {
 			status := http.StatusInternalServerError
 			if strings.Contains(err.Error(), "max sessions") {

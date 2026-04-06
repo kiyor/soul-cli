@@ -271,7 +271,7 @@ func buildTelegramContext(tokenBudget int) (string, string) {
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB line buffer
-	firstLine := isTailed // need to skip first line (may be truncated from seek)
+	firstLine := isTailed                              // need to skip first line (may be truncated from seek)
 	for scanner.Scan() {
 		if firstLine {
 			firstLine = false
@@ -607,7 +607,7 @@ func writePrompt(result buildPromptResult) {
 	content := result.content
 	tokens := estimateTokens(content)
 	if tokens > promptTokenLimit {
-		fmt.Fprintf(os.Stderr, "[" + appName + "] ⚠ prompt too large: ~%dk tokens (limit %dk)\n", tokens/1000, promptTokenLimit/1000)
+		fmt.Fprintf(os.Stderr, "["+appName+"] ⚠ prompt too large: ~%dk tokens (limit %dk)\n", tokens/1000, promptTokenLimit/1000)
 		// List sections by size for debugging
 		for _, name := range []string{"SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"} {
 			if data, err := os.ReadFile(filepath.Join(workspace, name)); err == nil {
@@ -643,7 +643,7 @@ func writePrompt(result buildPromptResult) {
 	}
 
 	if err := os.WriteFile(promptOut, []byte(content), 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "] failed to write prompt file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"] failed to write prompt file: %v\n", err)
 		os.Exit(1)
 	}
 }

@@ -745,8 +745,8 @@ func printMetricsSummary() {
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 
 	type modeStats struct {
-		total   int
-		success int
+		total    int
+		success  int
 		totalDur float64
 	}
 	stats := make(map[string]*modeStats)

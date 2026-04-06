@@ -143,7 +143,7 @@ func handleDB(args []string) {
 	}
 	db, err := openDB()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "] %v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"] %v\n", err)
 		os.Exit(1)
 	}
 	defer db.Close()
@@ -152,7 +152,7 @@ func handleDB(args []string) {
 	case "save":
 		// weiran db save '{"path":"...","summary":"..."}'
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: " + appName + " db save '<json>'")
+			fmt.Fprintln(os.Stderr, "usage: "+appName+" db save '<json>'")
 			os.Exit(1)
 		}
 		var input struct {
@@ -331,7 +331,7 @@ func handleDB(args []string) {
 	case "search":
 		// weiran db search <keyword> — search session summaries
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: " + appName + " db search <keyword>")
+			fmt.Fprintln(os.Stderr, "usage: "+appName+" db search <keyword>")
 			os.Exit(1)
 		}
 		keyword := strings.Join(args[1:], " ")
@@ -367,7 +367,7 @@ func handleDB(args []string) {
 
 	case "pattern-save":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: " + appName + " db pattern-save '{\"name\":\"...\",\"description\":\"...\",\"example\":\"...\",\"source\":\"...\"}'")
+			fmt.Fprintln(os.Stderr, "usage: "+appName+" db pattern-save '{\"name\":\"...\",\"description\":\"...\",\"example\":\"...\",\"source\":\"...\"}'")
 			os.Exit(1)
 		}
 		var input patternInput
@@ -396,7 +396,7 @@ func handleDB(args []string) {
 
 	case "feedback":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: " + appName + " db feedback '{\"pattern\":\"...\",\"outcome\":\"success|failure|correction\",\"note\":\"...\",\"session\":\"...\"}'")
+			fmt.Fprintln(os.Stderr, "usage: "+appName+" db feedback '{\"pattern\":\"...\",\"outcome\":\"success|failure|correction\",\"note\":\"...\",\"session\":\"...\"}'")
 			os.Exit(1)
 		}
 		var input struct {
@@ -430,7 +430,7 @@ func handleDB(args []string) {
 
 	case "pattern-reject":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: " + appName + " db pattern-reject <name>")
+			fmt.Fprintln(os.Stderr, "usage: "+appName+" db pattern-reject <name>")
 			os.Exit(1)
 		}
 		res, err := db.Exec("UPDATE patterns SET status = 'rejected' WHERE name = ? AND status = 'candidate'", args[1])
@@ -463,7 +463,7 @@ func importSummaries() {
 		Summary string `json:"summary"`
 	}
 	if err := json.Unmarshal(data, &items); err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "] summaries JSON parse error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"] summaries JSON parse error: %v\n", err)
 		return
 	}
 
@@ -473,7 +473,7 @@ func importSummaries() {
 
 	db, err := openDB()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "] %v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"] %v\n", err)
 		return
 	}
 	defer db.Close()
@@ -490,7 +490,7 @@ func importSummaries() {
 		}
 		saved++
 	}
-	fmt.Fprintf(os.Stderr, "[" + appName + "] imported %d/%d summaries\n", saved, len(items))
+	fmt.Fprintf(os.Stderr, "["+appName+"] imported %d/%d summaries\n", saved, len(items))
 }
 
 // ── Pattern Cultivation ──
@@ -682,9 +682,9 @@ func handleCultivate(db *sql.DB, dryRun bool) {
 
 	// collect all candidates first, close rows before operating
 	type candidate struct {
-		id, seenCount          int
-		name, desc, example    string
-		sourcesJSON            string
+		id, seenCount       int
+		name, desc, example string
+		sourcesJSON         string
 	}
 	var candidates []candidate
 	for rows.Next() {
@@ -784,7 +784,7 @@ func importPatterns() {
 	}
 	var inputs []patternInput
 	if err := json.Unmarshal(data, &inputs); err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "] patterns JSON parse error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"] patterns JSON parse error: %v\n", err)
 		return
 	}
 	if len(inputs) == 0 {
@@ -792,12 +792,12 @@ func importPatterns() {
 	}
 	db, err := openDB()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "] %v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"] %v\n", err)
 		return
 	}
 	defer db.Close()
 	for _, input := range inputs {
 		upsertPattern(db, input)
 	}
-	fmt.Fprintf(os.Stderr, "[" + appName + "] imported %d patterns\n", len(inputs))
+	fmt.Fprintf(os.Stderr, "["+appName+"] imported %d patterns\n", len(inputs))
 }

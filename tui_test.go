@@ -157,9 +157,9 @@ func TestTUIModel_RenderRow(t *testing.T) {
 
 func TestTUIModel_RenderRow_LongDescription(t *testing.T) {
 	s := sessionInfo{
-		ID:    "abc12345",
-		Title: strings.Repeat("long title ", 20),
-		Size:  1024,
+		ID:      "abc12345",
+		Title:   strings.Repeat("long title ", 20),
+		Size:    1024,
 		ModTime: time.Now(),
 	}
 	m := newTUIModel([]sessionInfo{s})

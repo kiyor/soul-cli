@@ -27,12 +27,13 @@ type subscriber struct {
 
 // sseBroadcaster fans out events to all subscribers (SSE + WebSocket).
 type sseBroadcaster struct {
-	mu          sync.RWMutex
-	subscribers map[*subscriber]struct{}
-	history     []sseEvent // ring buffer of recent events for late joiners
-	historyMax  int
-	hub         *wsHub // also push to WebSocket hub (nil = SSE only)
-	sessionID   string // server session ID for WS routing
+	mu            sync.RWMutex
+	subscribers   map[*subscriber]struct{}
+	history       []sseEvent // ring buffer of recent events for late joiners
+	historyMax    int
+	hub           *wsHub // also push to WebSocket hub (nil = SSE only)
+	sessionID     string // server session ID for WS routing
+	lastEventTime time.Time // last event broadcast time (for activity detection)
 }
 
 func newBroadcaster() *sseBroadcaster {
@@ -84,6 +85,7 @@ func (b *sseBroadcaster) broadcast(ev sseEvent) {
 	if len(b.history) > b.historyMax {
 		b.history = b.history[len(b.history)-b.historyMax:]
 	}
+	b.lastEventTime = time.Now()
 
 	for sub := range b.subscribers {
 		select {
@@ -106,6 +108,27 @@ func (b *sseBroadcaster) count() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return len(b.subscribers)
+}
+
+// lastEventAt returns the time of the last broadcast event.
+func (b *sseBroadcaster) lastEventAt() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.lastEventTime.IsZero() {
+		return ""
+	}
+	return b.lastEventTime.Format(time.RFC3339)
+}
+
+// idleSeconds returns seconds since the last broadcast event.
+// Returns -1 if no events have been broadcast yet.
+func (b *sseBroadcaster) idleSeconds() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.lastEventTime.IsZero() {
+		return -1
+	}
+	return int(time.Since(b.lastEventTime).Seconds())
 }
 
 // ── SSE HTTP handler ──

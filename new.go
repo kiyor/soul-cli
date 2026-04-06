@@ -19,14 +19,14 @@ func handleNew() {
 
 	data, err := os.ReadFile(sessionsFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "] failed to read sessions.json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"] failed to read sessions.json: %v\n", err)
 		os.Exit(1)
 	}
 
 	// parse as map[string]json.RawMessage to preserve original structure
 	var sessions map[string]json.RawMessage
 	if err := json.Unmarshal(data, &sessions); err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "] failed to parse sessions.json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"] failed to parse sessions.json: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -49,7 +49,7 @@ func handleNew() {
 		// parse current entry
 		var entry map[string]interface{}
 		if err := json.Unmarshal(sessions[key], &entry); err != nil {
-			fmt.Fprintf(os.Stderr, "[" + appName + "] failed to parse session entry %s: %v\n", key, err)
+			fmt.Fprintf(os.Stderr, "["+appName+"] failed to parse session entry %s: %v\n", key, err)
 			continue
 		}
 
@@ -61,7 +61,7 @@ func handleNew() {
 
 		// create empty JSONL file
 		if err := os.WriteFile(newJSONL, []byte{}, 0600); err != nil {
-			fmt.Fprintf(os.Stderr, "[" + appName + "] failed to create %s: %v\n", newJSONL, err)
+			fmt.Fprintf(os.Stderr, "["+appName+"] failed to create %s: %v\n", newJSONL, err)
 			continue
 		}
 
@@ -77,7 +77,7 @@ func handleNew() {
 
 		updated, err := json.Marshal(entry)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[" + appName + "] failed to serialize session entry: %v\n", err)
+			fmt.Fprintf(os.Stderr, "["+appName+"] failed to serialize session entry: %v\n", err)
 			continue
 		}
 		sessions[key] = json.RawMessage(updated)
@@ -87,21 +87,21 @@ func handleNew() {
 			shortOld = shortOld[:8]
 		}
 		resetSummary = append(resetSummary, fmt.Sprintf("  %s: %s → %s", key, shortOld, shortID(newID)))
-		fmt.Printf("[" + appName + "] reset %s: %s → %s\n", key, shortOld, shortID(newID))
+		fmt.Printf("["+appName+"] reset %s: %s → %s\n", key, shortOld, shortID(newID))
 	}
 
 	// write back sessions.json
 	out, err := json.MarshalIndent(sessions, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "] failed to serialize sessions.json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"] failed to serialize sessions.json: %v\n", err)
 		os.Exit(1)
 	}
 	if err := os.WriteFile(sessionsFile, out, 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "[" + appName + "] failed to write sessions.json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "["+appName+"] failed to write sessions.json: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("[" + appName + "] ✅ reset %d Telegram direct sessions\n", len(resetSummary))
+	fmt.Printf("["+appName+"] ✅ reset %d Telegram direct sessions\n", len(resetSummary))
 
 	// notify Telegram
 	msg := fmt.Sprintf("🔄 Session reset (%d channels)\n%s", len(resetSummary), strings.Join(resetSummary, "\n"))

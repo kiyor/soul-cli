@@ -28,6 +28,7 @@ type serverSession struct {
 	TotalCost   float64   `json:"total_cost_usd"`
 	NumTurns    int       `json:"num_turns"`
 	ClaudeSID   string    `json:"claude_session_id,omitempty"` // Claude Code's own session ID
+	ResumedFrom string    `json:"resumed_from,omitempty"`      // Original session ID being resumed
 	StreamURL   string    `json:"stream_url"`
 	SoulEnabled bool      `json:"soul_enabled"`
 
@@ -72,9 +73,12 @@ func (s *serverSession) snapshot() map[string]any {
 		"total_cost_usd":    s.TotalCost,
 		"num_turns":         s.NumTurns,
 		"claude_session_id": s.ClaudeSID,
+		"resumed_from":      s.ResumedFrom,
 		"stream_url":        s.StreamURL,
 		"soul_enabled":      s.SoulEnabled,
 		"subscribers":       s.broadcaster.count(),
+		"last_event":        s.broadcaster.lastEventAt(),
+		"idle_seconds":      s.broadcaster.idleSeconds(),
 	}
 }
 
@@ -350,8 +354,20 @@ func (sm *sessionManager) reap() {
 // ── Resume Session ──
 
 // resumeSession creates a new active session wrapping `claude --resume <sessionID>`.
-func (sm *sessionManager) resumeSession(sessionID, message string) (*serverSession, error) {
+// If a session resuming the same Claude session ID is already active, return it.
+func (sm *sessionManager) resumeSession(sessionID, message, displayName string) (*serverSession, error) {
 	sm.mu.Lock()
+	// Dedup: check if already resumed (by ClaudeSID or ResumedFrom)
+	for _, s := range sm.sessions {
+		s.mu.Lock()
+		cid := s.ClaudeSID
+		rfrom := s.ResumedFrom
+		s.mu.Unlock()
+		if cid == sessionID || rfrom == sessionID {
+			sm.mu.Unlock()
+			return s, nil
+		}
+	}
 	if len(sm.sessions) >= sm.maxSessions {
 		sm.mu.Unlock()
 		return nil, fmt.Errorf("max sessions reached (%d)", sm.maxSessions)
@@ -361,13 +377,18 @@ func (sm *sessionManager) resumeSession(sessionID, message string) (*serverSessi
 	id := uuid.New().String()
 	now := time.Now()
 
+	if displayName == "" {
+		displayName = "resume-" + shortID(sessionID)
+	}
+
 	bc := newBroadcaster()
 	bc.hub = sm.hub
 	bc.sessionID = id
 
 	sess := &serverSession{
 		ID:          id,
-		Name:        "resume-" + shortID(sessionID),
+		Name:        displayName,
+		ResumedFrom: sessionID,
 		Project:     workspace,
 		Status:      "starting",
 		CreatedAt:   now,
@@ -520,6 +541,11 @@ func (sm *sessionManager) resumeSession(sessionID, message string) (*serverSessi
 	// Send initial message if provided
 	if message != "" {
 		time.Sleep(500 * time.Millisecond)
+		userEvent, _ := json.Marshal(map[string]any{
+			"type":    "user",
+			"message": map[string]any{"role": "user", "content": message},
+		})
+		sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
 		proc.sendMessage(message)
 	}
 
@@ -532,16 +558,28 @@ func readClaudeSessionName(sessionID string) string {
 	if sessionID == "" {
 		return ""
 	}
-	metaPath := filepath.Join(home, ".claude", "sessions", sessionID+".json")
-	data, err := os.ReadFile(metaPath)
+	// Claude Code stores session meta as numeric-ID .json files,
+	// each containing a "sessionId" (UUID) and optional "name".
+	sessDir := filepath.Join(home, ".claude", "sessions")
+	entries, err := os.ReadDir(sessDir)
 	if err != nil {
 		return ""
 	}
-	var meta struct {
-		Name string `json:"name"`
-	}
-	if json.Unmarshal(data, &meta) == nil {
-		return meta.Name
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(sessDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var meta struct {
+			SessionID string `json:"sessionId"`
+			Name      string `json:"name"`
+		}
+		if json.Unmarshal(data, &meta) == nil && meta.SessionID == sessionID && meta.Name != "" {
+			return meta.Name
+		}
 	}
 	return ""
 }
@@ -570,12 +608,12 @@ func findSessionJSONL(sessionID string) string {
 
 // historyMessage is a parsed message from a session JSONL for the UI.
 type historyMessage struct {
-	Role      string           `json:"role"`                  // user, assistant, system, tool_use, tool_result, image
-	Content   string           `json:"content"`               // text content
-	ToolName  string           `json:"tool_name,omitempty"`   // for tool_use
-	ToolInput string           `json:"tool_input,omitempty"`  // for tool_use
-	Timestamp string           `json:"timestamp,omitempty"`
-	Images    []historyImage   `json:"images,omitempty"`      // base64 images from tool results
+	Role      string         `json:"role"`                 // user, assistant, system, tool_use, tool_result, image
+	Content   string         `json:"content"`              // text content
+	ToolName  string         `json:"tool_name,omitempty"`  // for tool_use
+	ToolInput string         `json:"tool_input,omitempty"` // for tool_use
+	Timestamp string         `json:"timestamp,omitempty"`
+	Images    []historyImage `json:"images,omitempty"` // base64 images from tool results
 }
 
 type historyImage struct {
@@ -637,10 +675,10 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 
 		case "assistant":
 			var blocks []struct {
-				Type    string          `json:"type"`
-				Text    string          `json:"text"`
-				Name    string          `json:"name"`
-				Input   json.RawMessage `json:"input"`
+				Type  string          `json:"type"`
+				Text  string          `json:"text"`
+				Name  string          `json:"name"`
+				Input json.RawMessage `json:"input"`
 			}
 			if json.Unmarshal(ev.Message.Content, &blocks) != nil {
 				continue
@@ -708,7 +746,7 @@ func extractImages(raw json.RawMessage) []historyImage {
 	}
 	// content is an array of blocks like [{type:"tool_result", content:[{type:"image", source:{...}}]}]
 	var blocks []struct {
-		Type    string `json:"type"`
+		Type    string          `json:"type"`
 		Content json.RawMessage `json:"content"`
 	}
 	if json.Unmarshal(raw, &blocks) != nil {

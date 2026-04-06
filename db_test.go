@@ -404,7 +404,7 @@ func TestCultivate_Promotes(t *testing.T) {
 			Name:        "mature-skill",
 			Description: "A well-tested pattern",
 			Example:     "do the thing",
-			Source:       filepath.Join(dir, fmt.Sprintf("s%d.jsonl", i%3)), // 3 unique sources
+			Source:      filepath.Join(dir, fmt.Sprintf("s%d.jsonl", i%3)), // 3 unique sources
 		})
 	}
 

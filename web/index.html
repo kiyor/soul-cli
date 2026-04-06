@@ -985,6 +985,9 @@ function handleSessionEvent(event,data){
       finalizeStream();
       if(data.is_error)addErrorMsg(data.result||'error');
       break;
+    case 'user':
+      if(data.message&&data.message.content)addUserMsg(typeof data.message.content==='string'?data.message.content:JSON.stringify(data.message.content));
+      break;
     case 'system':
     case 'task_progress':
       break;
@@ -999,7 +1002,10 @@ function handleSessionEvent(event,data){
 // ── Session Selection ──
 function selectSession(id){
   if(activeSessionId===id)return;
-  streamingMsgEl=null;streamingText='';
+  // Clean up all streaming/typing state from previous session
+  if(typeRAF){cancelAnimationFrame(typeRAF);typeRAF=null}
+  streamingMsgEl=null;streamingText='';typeBuf='';typeRendered='';
+  setThinking(false);
   activeSessionId=id;
   document.getElementById('model-badge').textContent='';
   document.getElementById('context-bar').classList.add('hidden');
@@ -1230,7 +1236,8 @@ function sendMessage(){
   slashDropdownIdx=-1;
   // Handle built-in slash commands client-side
   if(text.startsWith('/')&&handleSlashSend(text))return;
-  addUserMsg(text);
+  // Don't render user message here — it will come back via broadcast event
+  // This ensures messages persist when switching sessions
   wsSend({type:'send',sid:activeSessionId,message:text});
 }
 
@@ -1300,10 +1307,8 @@ function closeResumeSheet(){
 }
 var resumeInProgress=false;
 
-function confirmResume(){
-  if(!pendingResumeId)return;
-  const sid=pendingResumeId;
-  closeResumeSheet();
+function doResume(sid,displayName){
+  if(isMobile)closeSidebar();
   resumeInProgress=true;
 
   // Prepare chat area
@@ -1327,8 +1332,15 @@ function confirmResume(){
       });
       scrollBottom();
     }
-    wsSend({type:'resume',sid:sid});
+    wsSend({type:'resume',sid:sid,name:displayName||''});
   });
+}
+
+function confirmResume(){
+  if(!pendingResumeId)return;
+  const sid=pendingResumeId;
+  closeResumeSheet();
+  doResume(sid);
 }
 
 async function loadHistoryMessages(sid){
@@ -1358,11 +1370,18 @@ function renderHistory(query){
   if(!filtered.length){listEl.innerHTML='<div class="empty-hint" style="padding:12px">No matches</div>';return}
   filtered.forEach(s=>{
     const el=document.createElement('div');el.className='hi';
-    const d=s.title||s.name||s.first_msg||shortId(s.id);
+    const d=s.name||s.title||s.first_msg||shortId(s.id);
     const model=(s.model||'').replace(/^claude-/,'');
     const meta=[shortId(s.id),relTime(s.mod_time),(s.messages||'?')+'msg',model].filter(Boolean).join(' \u00b7 ');
+    // Check if this history session is already active (by id or resumed_from)
+    let activeSid=null;
+    if(sessions[s.id]){activeSid=s.id}
+    else{for(const[aid,as] of Object.entries(sessions)){if(as.resumed_from===s.id||as.claude_session_id===s.id){activeSid=aid;break}}}
     el.innerHTML=`<div class="hi-title" title="${esc(d)}">${esc(d)}</div><div class="hi-meta">${esc(meta)}</div>${s.summary?'<div class="hi-summary">'+esc(s.summary)+'</div>':''}`;
-    el.onclick=()=>openResumeSheet(s.id,d,meta);
+    el.onclick=()=>{
+      if(activeSid){selectSession(activeSid);if(isMobile)closeSidebar();return}
+      doResume(s.id,d);
+    };
     listEl.appendChild(el);
   });
 }
@@ -1489,7 +1508,7 @@ async function loadSkills(){
     // Built-in commands
     slashCommands=[
       {name:'model',desc:'Switch model (e.g. /model opus)',builtin:true},
-      {name:'rename',desc:'Rename current session',builtin:true},
+      {name:'rename',desc:'Rename session (no args = auto)',builtin:true},
     ];
     // Skills from server
     if(skills&&skills.length){
@@ -1598,6 +1617,25 @@ function handleSlashSend(text){
       }).catch(e=>addErrorMsg('Failed: '+e.message));
     }
     return true; // handled
+  }
+  // /rename [name] — rename current session (no args = auto-rename via Haiku)
+  const renameMatch=text.match(/^\/rename(?:\s+(.+))?$/i);
+  if(renameMatch&&activeSessionId){
+    const name=(renameMatch[1]||'').trim();
+    if(name){
+      wsSend({type:'rename',sid:activeSessionId,name:name});
+      addSystemMsg('Renamed → '+name);
+    }else{
+      addSystemMsg('Auto-renaming...');
+      fetch(`/api/sessions/${activeSessionId}/auto-rename`,{
+        method:'POST',
+        headers:{'Authorization':'Bearer '+TOKEN}
+      }).then(r=>r.json()).then(d=>{
+        if(d.name)addSystemMsg('Renamed → '+d.name);
+        else addErrorMsg('Auto-rename failed: '+(d.error||'no title generated'));
+      }).catch(e=>addErrorMsg('Auto-rename failed: '+e.message));
+    }
+    return true;
   }
   return false; // not a built-in command, send as message
 }

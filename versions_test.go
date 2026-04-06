@@ -152,7 +152,7 @@ func TestRotateVersions(t *testing.T) {
 	origDir := versionsDir
 	origBin := appBin
 	versionsDir = dir
-	appBin = filepath.Join(dir, appName + "-current")
+	appBin = filepath.Join(dir, appName+"-current")
 	defer func() {
 		versionsDir = origDir
 		appBin = origBin
@@ -192,7 +192,7 @@ func TestRotateVersions_DropsOldest(t *testing.T) {
 	origBin := appBin
 	origMax := maxVersions
 	versionsDir = dir
-	appBin = filepath.Join(dir, appName + "-current")
+	appBin = filepath.Join(dir, appName+"-current")
 	maxVersions = 2 // smaller for test
 	defer func() {
 		versionsDir = origDir

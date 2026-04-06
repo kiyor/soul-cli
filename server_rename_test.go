@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -246,35 +247,33 @@ func TestServerDBFile_Created(t *testing.T) {
 	}
 }
 
-func TestGetAnthropicAPIKey_FromEnv(t *testing.T) {
-	t.Setenv("ANTHROPIC_API_KEY", "test-key-123")
-	key := getAnthropicAPIKey()
-	if key != "test-key-123" {
-		t.Errorf("got %q, want test-key-123", key)
+func TestFilterNestedClaudeEnv(t *testing.T) {
+	env := []string{
+		"HOME=/Users/test",
+		"CLAUDE_CODE_SESSION=abc123",
+		"PATH=/usr/bin",
+		"CLAUDE_CODE_ENTRY_POINT=cli",
+		"TERM=xterm",
+	}
+	filtered := filterNestedClaudeEnv(env)
+	if len(filtered) != 3 {
+		t.Errorf("expected 3 vars, got %d: %v", len(filtered), filtered)
+	}
+	for _, e := range filtered {
+		if strings.HasPrefix(e, "CLAUDE_CODE_") {
+			t.Errorf("should have filtered out %q", e)
+		}
 	}
 }
 
-func TestGetAnthropicAPIKey_NoKey(t *testing.T) {
-	t.Setenv("ANTHROPIC_API_KEY", "")
-	origHome := home
-	home = t.TempDir() // no auth profiles here
-	defer func() { home = origHome }()
-
-	key := getAnthropicAPIKey()
-	if key != "" {
-		t.Errorf("expected empty key, got %q", key)
-	}
-}
-
-func TestCallHaikuForTitle_NoAPIKey(t *testing.T) {
-	t.Setenv("ANTHROPIC_API_KEY", "")
-	origHome := home
-	home = t.TempDir()
-	defer func() { home = origHome }()
+func TestCallHaikuForTitle_NoClaude(t *testing.T) {
+	origBin := claudeBin
+	claudeBin = "/nonexistent/claude"
+	defer func() { claudeBin = origBin }()
 
 	title := callHaikuForTitle("some conversation context")
 	if title != "" {
-		t.Errorf("expected empty title without API key, got %q", title)
+		t.Errorf("expected empty title when claude binary missing, got %q", title)
 	}
 }
 

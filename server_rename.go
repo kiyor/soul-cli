@@ -1,13 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -196,112 +194,43 @@ func tryAutoRename(sess *serverSession) {
 	fmt.Fprintf(os.Stderr, "[%s] server: auto-renamed %s → %q\n", appName, shortID(sess.ID), title)
 }
 
-// callHaikuForTitle calls Claude Haiku to generate a short session title.
+// callHaikuForTitle calls claude CLI in one-shot mode to generate a short session title.
+// Uses the same model routing as the rest of the system (OpenClaw gateway).
 func callHaikuForTitle(context string) string {
-	// Use claude CLI in one-shot mode with haiku
-	// Simpler approach: call the Anthropic API directly via the proxy or local claude binary
 	prompt := fmt.Sprintf(`Based on this conversation snippet, generate a very short title (3-8 words, no quotes, no punctuation at end). Just output the title, nothing else.
 
 Conversation:
 %s`, context)
 
-	type haikuMsg struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-
-	apiKey := getAnthropicAPIKey()
-	if apiKey == "" {
-		fmt.Fprintf(os.Stderr, "[%s] server: auto-rename: no Anthropic API key found\n", appName)
-		return ""
-	}
-
-	reqBody, _ := json.Marshal(struct {
-		Model     string     `json:"model"`
-		MaxTokens int        `json:"max_tokens"`
-		Messages  []haikuMsg `json:"messages"`
-	}{
-		Model:     "claude-haiku-4-5-20251001",
-		MaxTokens: 30,
-		Messages: []haikuMsg{
-			{Role: "user", Content: prompt},
-		},
-	})
-
-	req, err := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(reqBody))
+	cmd := exec.Command(claudeBin, "-p", prompt, "--model", "haiku", "--max-turns", "1", "--no-input")
+	cmd.Env = filterNestedClaudeEnv(os.Environ())
+	out, err := cmd.Output()
 	if err != nil {
-		return ""
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] server: auto-rename API error: %v\n", appName, err)
-		return ""
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		fmt.Fprintf(os.Stderr, "[%s] server: auto-rename API %d: %s\n", appName, resp.StatusCode, string(body))
+		fmt.Fprintf(os.Stderr, "[%s] server: auto-rename claude error: %v\n", appName, err)
 		return ""
 	}
 
-	var result struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
+	title := strings.TrimSpace(string(out))
+	title = strings.Trim(title, `"'`)
+	if len(title) > 60 {
+		title = title[:60]
 	}
-	if json.Unmarshal(body, &result) != nil {
+	if title == "" {
 		return ""
 	}
-
-	for _, c := range result.Content {
-		if c.Type == "text" {
-			title := strings.TrimSpace(c.Text)
-			// Sanitize: remove quotes, limit length
-			title = strings.Trim(title, `"'`)
-			if len(title) > 60 {
-				title = title[:60]
-			}
-			return title
-		}
-	}
-	return ""
+	return title
 }
 
-// getAnthropicAPIKey reads the API key from auth profiles.
-func getAnthropicAPIKey() string {
-	// Check env first
-	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		return key
-	}
-
-	// Read from openclaw auth profiles
-	paths := []string{
-		home + "/.openclaw/agents/main/agent/auth-profiles.json",
-	}
-	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if err != nil {
+// filterNestedClaudeEnv removes env vars that would confuse a nested claude subprocess.
+func filterNestedClaudeEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		// Skip vars that indicate we're already inside a claude session
+		if strings.HasPrefix(e, "CLAUDE_CODE_SESSION=") ||
+			strings.HasPrefix(e, "CLAUDE_CODE_ENTRY_POINT=") {
 			continue
 		}
-		// Try array format
-		var profiles []struct {
-			Provider string `json:"provider"`
-			APIKey   string `json:"apiKey"`
-		}
-		if json.Unmarshal(data, &profiles) == nil {
-			for _, prof := range profiles {
-				if strings.Contains(strings.ToLower(prof.Provider), "anthropic") && prof.APIKey != "" {
-					return prof.APIKey
-				}
-			}
-		}
+		filtered = append(filtered, e)
 	}
-	return ""
+	return filtered
 }

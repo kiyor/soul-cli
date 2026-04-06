@@ -333,11 +333,11 @@ func TestPrintSessionTable_Empty(t *testing.T) {
 func TestPrintSessionTable_WithData(t *testing.T) {
 	sessions := []sessionInfo{
 		{
-			ID:      "abc12345-6789-0000-0000-000000000000",
-			Title:   "Test Session",
-			Project: "~/test",
-			Size:    1024,
-			ModTime: time.Now(),
+			ID:       "abc12345-6789-0000-0000-000000000000",
+			Title:    "Test Session",
+			Project:  "~/test",
+			Size:     1024,
+			ModTime:  time.Now(),
 			Messages: 5,
 		},
 	}

@@ -86,6 +86,9 @@ Source code is at: {{.SrcDir}}
 ` + "`cd {{.SrcDir}} && go test ./... -timeout 60s`" + `
 If tests pass: ` + "`{{.CLI}} build`" + `
 If tests fail: fix the failure, don't skip tests.
+If server is running (curl -s localhost:9847/api/health returns ok), also run the e2e API test:
+` + "`cd {{.SrcDir}} && ./tests/server-api-e2e.sh`" + `
+This validates the full API lifecycle (create/message/rename/delete) with a real Claude session.
 
 **3d. Commit** — Stage and commit with a descriptive message:
 ` + "`cd {{.SrcDir}} && git add -A && git commit -m \"evolve: <what changed>\"`" + `
