@@ -25,12 +25,14 @@ type subscriber struct {
 	closed chan struct{}
 }
 
-// sseBroadcaster fans out events to all subscribers.
+// sseBroadcaster fans out events to all subscribers (SSE + WebSocket).
 type sseBroadcaster struct {
 	mu          sync.RWMutex
 	subscribers map[*subscriber]struct{}
 	history     []sseEvent // ring buffer of recent events for late joiners
 	historyMax  int
+	hub         *wsHub // also push to WebSocket hub (nil = SSE only)
+	sessionID   string // server session ID for WS routing
 }
 
 func newBroadcaster() *sseBroadcaster {
@@ -91,6 +93,11 @@ func (b *sseBroadcaster) broadcast(ev sseEvent) {
 			delete(b.subscribers, sub)
 			close(sub.closed)
 		}
+	}
+
+	// Also push to WebSocket hub for bidirectional sync
+	if b.hub != nil && b.sessionID != "" {
+		b.hub.broadcastSessionEvent(b.sessionID, ev.Event, ev.Data)
 	}
 }
 

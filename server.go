@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"sort"
 	"strconv"
@@ -15,8 +14,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 //go:embed web/index.html
@@ -181,6 +178,11 @@ func handleServer(args []string) {
 
 	rl := newRateLimiter(cfg.RateLimitPerMin)
 
+	// WebSocket hub for bidirectional real-time sync
+	hub := newWSHub(cfg.Token, rl)
+	hub.sm = sm
+	sm.hub = hub
+
 	mux := http.NewServeMux()
 
 	// Health (no auth required)
@@ -205,6 +207,43 @@ func handleServer(args []string) {
 			"workspace":        workspace,
 			"claude_bin":       claudeBin,
 		})
+	}))
+
+	// List available skills
+	mux.HandleFunc("GET /api/skills", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		var skills []map[string]string
+		for _, dir := range skillDirs {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				skillMd := dir + "/" + e.Name() + "/SKILL.md"
+				if _, err := os.Stat(skillMd); err != nil {
+					continue
+				}
+				name, desc := parseSkillFrontmatter(skillMd)
+				if name == "" {
+					name = e.Name()
+				}
+				// truncate description
+				for _, cut := range []string{"Trigger", "trigger", "触发"} {
+					if idx := strings.Index(desc, cut); idx > 0 {
+						desc = strings.TrimSpace(desc[:idx])
+						desc = strings.TrimRight(desc, "。.\n :：,，")
+						break
+					}
+				}
+				if len(desc) > 80 {
+					desc = desc[:80] + "…"
+				}
+				skills = append(skills, map[string]string{"name": name, "description": desc})
+			}
+		}
+		writeJSON(w, http.StatusOK, skills)
 	}))
 
 	// List sessions
@@ -267,6 +306,31 @@ func handleServer(args []string) {
 			return
 		}
 		writeJSON(w, http.StatusOK, sess.snapshot())
+	}))
+
+	// Rename session
+	mux.HandleFunc("PATCH /api/sessions/{id}/rename", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		sess := sm.getSession(r.PathValue("id"))
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+			return
+		}
+		sess.mu.Lock()
+		sess.Name = req.Name
+		sess.mu.Unlock()
+		markRenamed(sess.ID, req.Name)
+		if hub != nil {
+			hub.notifySessions()
+		}
+		fmt.Fprintf(os.Stderr, "[%s] server: session %s renamed to %q\n", appName, shortID(sess.ID), req.Name)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "renamed", "name": req.Name})
 	}))
 
 	// Delete session
@@ -423,146 +487,21 @@ func handleServer(args []string) {
 			return
 		}
 
-		sm.mu.Lock()
-		if len(sm.sessions) >= sm.maxSessions {
-			sm.mu.Unlock()
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": fmt.Sprintf("max sessions reached (%d)", sm.maxSessions)})
-			return
-		}
-		sm.mu.Unlock()
-
-		id := uuid.New().String()
-		now := time.Now()
-
-		sess := &serverSession{
-			ID:          id,
-			Name:        "resume-" + shortID(req.SessionID),
-			Project:     workspace,
-			Status:      "starting",
-			CreatedAt:   now,
-			LastActive:  now,
-			SoulEnabled: true,
-			StreamURL:   fmt.Sprintf("/api/sessions/%s/stream", id),
-			broadcaster: newBroadcaster(),
-		}
-
-		// Build soul prompt
-		initSessionDir()
-		result := buildPrompt()
-		writePrompt(result)
-		sess.promptFile = promptOut
-
-		// Spawn Claude Code with --resume
-		args := []string{
-			"-p",
-			"--input-format", "stream-json",
-			"--output-format", "stream-json",
-			"--verbose",
-			"--permission-mode", "bypassPermissions",
-			"--append-system-prompt-file", promptOut,
-			"--resume", req.SessionID,
-		}
-
-		cmd := exec.Command(claudeBin, args...)
-		cmd.Dir = workspace
-		env := filterEnv(os.Environ(), "CLAUDECODE")
-		env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
-		cmd.Env = env
-
-		stdin, err := cmd.StdinPipe()
+		sess, err := sm.resumeSession(req.SessionID, req.Message)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			status := http.StatusInternalServerError
+			if strings.Contains(err.Error(), "max sessions") {
+				status = http.StatusServiceUnavailable
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
 
-		if err := cmd.Start(); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "spawn: " + err.Error()})
-			return
-		}
-
-		proc := &claudeProcess{
-			cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
-			done: make(chan struct{}),
-		}
-		go func() {
-			err := cmd.Wait()
-			if err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok {
-					proc.exitCode = exitErr.ExitCode()
-				} else {
-					proc.exitCode = 1
-				}
-			}
-			close(proc.done)
-		}()
-
-		sess.process = proc
-		sess.setStatus("running")
-
-		go bridgeStdout(proc, sess.broadcaster, func(raw json.RawMessage) {
-			var res ResultMessage
-			if json.Unmarshal(raw, &res) == nil {
-				sess.mu.Lock()
-				sess.TotalCost += res.TotalCostUSD
-				sess.NumTurns += res.NumTurns
-				if res.Subtype == "error" {
-					sess.Status = "error"
-				} else {
-					sess.Status = "idle"
-				}
-				if res.SessionID != "" {
-					sess.ClaudeSID = res.SessionID
-				}
-				sess.mu.Unlock()
-			}
-			sess.touch()
-		})
-
-		go func() {
-			<-proc.done
-			sess.mu.Lock()
-			if sess.Status != "stopped" {
-				if proc.exitCode != 0 {
-					sess.Status = "error"
-				} else {
-					sess.Status = "stopped"
-				}
-			}
-			sess.mu.Unlock()
-		}()
-
-		go func() {
-			buf := make([]byte, 4096)
-			for {
-				if _, err := proc.stderr.Read(buf); err != nil {
-					return
-				}
-			}
-		}()
-
-		sm.mu.Lock()
-		sm.sessions[id] = sess
-		sm.mu.Unlock()
-
-		// Send initial message if provided
-		if req.Message != "" {
-			time.Sleep(500 * time.Millisecond)
-			proc.sendMessage(req.Message)
-		}
-
-		fmt.Fprintf(os.Stderr, "[%s] server: resumed session %s as %s\n", appName, shortID(req.SessionID), shortID(id))
 		writeJSON(w, http.StatusCreated, sess.snapshot())
 	}))
+
+	// WebSocket endpoint for bidirectional real-time sync
+	mux.HandleFunc("GET /api/ws", hub.serveWS)
 
 	// Serve UI
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {

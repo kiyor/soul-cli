@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -33,6 +34,7 @@ type serverSession struct {
 	process     *claudeProcess
 	broadcaster *sseBroadcaster
 	promptFile  string // temp file for soul prompt
+	hub         *wsHub // for WS notifications on status change
 	mu          sync.Mutex
 }
 
@@ -43,11 +45,16 @@ func (s *serverSession) touch() {
 	s.mu.Unlock()
 }
 
-// setStatus atomically updates session status.
+// setStatus atomically updates session status and notifies WS clients.
 func (s *serverSession) setStatus(status string) {
 	s.mu.Lock()
+	changed := s.Status != status
 	s.Status = status
+	hub := s.hub
 	s.mu.Unlock()
+	if changed && hub != nil {
+		hub.notifySessions()
+	}
 }
 
 // snapshot returns a JSON-safe copy of session state.
@@ -81,6 +88,7 @@ type sessionManager struct {
 	maxLifetime time.Duration
 	mu          sync.RWMutex
 	stopReaper  chan struct{}
+	hub         *wsHub // WebSocket hub for real-time notifications
 }
 
 // newSessionManager creates a session manager and starts the TTL reaper.
@@ -108,6 +116,10 @@ func (sm *sessionManager) createSession(name, project, model string, soulEnabled
 	id := uuid.New().String()
 	now := time.Now()
 
+	bc := newBroadcaster()
+	bc.hub = sm.hub
+	bc.sessionID = id
+
 	sess := &serverSession{
 		ID:          id,
 		Name:        name,
@@ -118,7 +130,8 @@ func (sm *sessionManager) createSession(name, project, model string, soulEnabled
 		LastActive:  now,
 		SoulEnabled: soulEnabled,
 		StreamURL:   fmt.Sprintf("/api/sessions/%s/stream", id),
-		broadcaster: newBroadcaster(),
+		broadcaster: bc,
+		hub:         sm.hub,
 	}
 
 	// Build soul prompt if enabled
@@ -145,23 +158,33 @@ func (sm *sessionManager) createSession(name, project, model string, soulEnabled
 	sess.process = proc
 	sess.setStatus("running")
 
-	// Start stdout → SSE bridge
+	// Register in server DB
+	ensureServerSession(id, name)
+
+	// Start stdout → SSE/WS bridge
 	go bridgeStdout(proc, sess.broadcaster, func(raw json.RawMessage) {
-		// Parse result message to update session stats
 		var result ResultMessage
 		if json.Unmarshal(raw, &result) == nil {
 			sess.mu.Lock()
 			sess.TotalCost += result.TotalCostUSD
 			sess.NumTurns += result.NumTurns
-			if result.Subtype == "error" {
-				sess.Status = "error"
-			} else {
-				sess.Status = "idle"
-			}
 			if result.SessionID != "" {
 				sess.ClaudeSID = result.SessionID
 			}
+			newStatus := "idle"
+			if result.Subtype == "error" {
+				newStatus = "error"
+			}
 			sess.mu.Unlock()
+			sess.setStatus(newStatus) // notifies WS hub
+
+			// Track user turns for auto-rename (result = end of a turn)
+			if result.NumTurns > 0 {
+				turns, renamed := incrementUserTurns(sess.ID)
+				if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
+					go tryAutoRename(sess)
+				}
+			}
 		}
 		sess.touch()
 	})
@@ -170,14 +193,16 @@ func (sm *sessionManager) createSession(name, project, model string, soulEnabled
 	go func() {
 		<-proc.done
 		sess.mu.Lock()
-		if sess.Status != "stopped" {
-			if proc.exitCode != 0 {
-				sess.Status = "error"
-			} else {
-				sess.Status = "stopped"
-			}
-		}
+		alreadyStopped := sess.Status == "stopped"
 		sess.mu.Unlock()
+		if alreadyStopped {
+			return
+		}
+		if proc.exitCode != 0 {
+			sess.setStatus("error")
+		} else {
+			sess.setStatus("stopped")
+		}
 	}()
 
 	// Drain stderr in background (prevent pipe deadlock)
@@ -238,6 +263,9 @@ func (sm *sessionManager) destroySession(id string) error {
 		os.Remove(sess.promptFile)
 	}
 
+	if sm.hub != nil {
+		sm.hub.notifySessions()
+	}
 	return nil
 }
 
@@ -294,6 +322,165 @@ func (sm *sessionManager) reap() {
 		fmt.Fprintf(os.Stderr, "[%s] server: reaping session %s\n", appName, shortID(id))
 		sm.destroySession(id)
 	}
+}
+
+// ── Resume Session ──
+
+// resumeSession creates a new active session wrapping `claude --resume <sessionID>`.
+func (sm *sessionManager) resumeSession(sessionID, message string) (*serverSession, error) {
+	sm.mu.Lock()
+	if len(sm.sessions) >= sm.maxSessions {
+		sm.mu.Unlock()
+		return nil, fmt.Errorf("max sessions reached (%d)", sm.maxSessions)
+	}
+	sm.mu.Unlock()
+
+	id := uuid.New().String()
+	now := time.Now()
+
+	bc := newBroadcaster()
+	bc.hub = sm.hub
+	bc.sessionID = id
+
+	sess := &serverSession{
+		ID:          id,
+		Name:        "resume-" + shortID(sessionID),
+		Project:     workspace,
+		Status:      "starting",
+		CreatedAt:   now,
+		LastActive:  now,
+		SoulEnabled: true,
+		StreamURL:   fmt.Sprintf("/api/sessions/%s/stream", id),
+		broadcaster: bc,
+		hub:         sm.hub,
+	}
+
+	// Build soul prompt
+	initSessionDir()
+	result := buildPrompt()
+	writePrompt(result)
+	sess.promptFile = promptOut
+
+	// Spawn Claude Code with --resume
+	args := []string{
+		"-p",
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--permission-mode", "bypassPermissions",
+		"--append-system-prompt-file", promptOut,
+		"--resume", sessionID,
+	}
+
+	cmd := exec.Command(claudeBin, args...)
+	cmd.Dir = workspace
+	env := filterEnv(os.Environ(), "CLAUDECODE")
+	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+	cmd.Env = env
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("spawn: %w", err)
+	}
+
+	proc := &claudeProcess{
+		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
+		done: make(chan struct{}),
+	}
+	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				proc.exitCode = exitErr.ExitCode()
+			} else {
+				proc.exitCode = 1
+			}
+		}
+		close(proc.done)
+	}()
+
+	sess.process = proc
+	sess.setStatus("running")
+
+	// Register in server DB
+	ensureServerSession(id, sess.Name)
+
+	go bridgeStdout(proc, sess.broadcaster, func(raw json.RawMessage) {
+		var res ResultMessage
+		if json.Unmarshal(raw, &res) == nil {
+			sess.mu.Lock()
+			sess.TotalCost += res.TotalCostUSD
+			sess.NumTurns += res.NumTurns
+			if res.SessionID != "" {
+				sess.ClaudeSID = res.SessionID
+			}
+			newStatus := "idle"
+			if res.Subtype == "error" {
+				newStatus = "error"
+			}
+			sess.mu.Unlock()
+			sess.setStatus(newStatus)
+
+			// Track user turns for auto-rename
+			if res.NumTurns > 0 {
+				turns, renamed := incrementUserTurns(sess.ID)
+				if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
+					go tryAutoRename(sess)
+				}
+			}
+		}
+		sess.touch()
+	})
+
+	go func() {
+		<-proc.done
+		sess.mu.Lock()
+		alreadyStopped := sess.Status == "stopped"
+		sess.mu.Unlock()
+		if alreadyStopped {
+			return
+		}
+		if proc.exitCode != 0 {
+			sess.setStatus("error")
+		} else {
+			sess.setStatus("stopped")
+		}
+	}()
+
+	// Drain stderr
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := proc.stderr.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	sm.mu.Lock()
+	sm.sessions[id] = sess
+	sm.mu.Unlock()
+
+	// Send initial message if provided
+	if message != "" {
+		time.Sleep(500 * time.Millisecond)
+		proc.sendMessage(message)
+	}
+
+	fmt.Fprintf(os.Stderr, "[%s] server: resumed session %s as %s\n", appName, shortID(sessionID), shortID(id))
+	return sess, nil
 }
 
 // ── JSONL History Parsing ──
