@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -302,6 +303,8 @@ func helpText() string {
 Usage:
   {{NAME}}                       interactive session (with soul prompt)
   {{NAME}} -p "task"             one-shot task, exits when done
+  {{NAME}} -r                    resume session (opens TUI picker if no ID given)
+  {{NAME}} -r <session-id>       resume specific session
   {{NAME}} --cron                memory consolidation mode (for scheduled tasks)
   {{NAME}} --heartbeat           heartbeat patrol mode
   {{NAME}} --evolve              self-evolution mode (daily cron, improves if inspired, skips otherwise)
@@ -460,11 +463,32 @@ func main() {
 	case "interactive":
 		// -c (continue) / -r (resume) resumes an existing session, skip --name
 		isResume := false
-		for _, a := range extra {
+		hasResumeID := false
+		for i, a := range extra {
 			if a == "-c" || a == "--continue" || a == "-r" || a == "--resume" {
 				isResume = true
+				// check if next arg looks like a session ID (not another flag)
+				if i+1 < len(extra) && !strings.HasPrefix(extra[i+1], "-") {
+					hasResumeID = true
+				}
 				break
 			}
+		}
+		// bare -r without session ID: open TUI to pick a session
+		if isResume && !hasResumeID {
+			sessions := scanAllSessions()
+			sort.Slice(sessions, func(i, j int) bool {
+				return sessions[i].ModTime.After(sessions[j].ModTime)
+			})
+			chosen := runSessionsTUI(sessions)
+			if chosen == nil {
+				fmt.Fprintln(os.Stderr, "["+appName+"] no session selected")
+				return
+			}
+			// resume chosen session with soul prompt
+			args := append(base, "--resume", chosen.ID)
+			execClaude(args)
+			return
 		}
 		args := base
 		if !isResume {
