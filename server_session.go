@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -291,4 +294,174 @@ func (sm *sessionManager) reap() {
 		fmt.Fprintf(os.Stderr, "[%s] server: reaping session %s\n", appName, shortID(id))
 		sm.destroySession(id)
 	}
+}
+
+// ── JSONL History Parsing ──
+
+// findSessionJSONL locates the JSONL file for a given session ID.
+func findSessionJSONL(sessionID string) string {
+	claudeProjects := filepath.Join(home, ".claude", "projects")
+	entries, err := os.ReadDir(claudeProjects)
+	if err != nil {
+		return ""
+	}
+	fname := sessionID + ".jsonl"
+	for _, projEntry := range entries {
+		if !projEntry.IsDir() {
+			continue
+		}
+		path := filepath.Join(claudeProjects, projEntry.Name(), fname)
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+// historyMessage is a parsed message from a session JSONL for the UI.
+type historyMessage struct {
+	Role      string `json:"role"`                 // user, assistant, system, tool_use, tool_result
+	Content   string `json:"content"`              // text content
+	ToolName  string `json:"tool_name,omitempty"`   // for tool_use
+	ToolInput string `json:"tool_input,omitempty"`  // for tool_use
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
+// parseSessionMessages reads a JSONL file and extracts the last N messages for display.
+func parseSessionMessages(path string, limit int) []historyMessage {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var all []historyMessage
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 512*1024), 512*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+
+		var ev struct {
+			Type      string `json:"type"`
+			Timestamp string `json:"timestamp"`
+			Message   struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+				Model   string          `json:"model"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+
+		switch ev.Type {
+		case "user":
+			text := extractContentText(ev.Message.Content)
+			if text != "" {
+				all = append(all, historyMessage{
+					Role:      "user",
+					Content:   text,
+					Timestamp: ev.Timestamp,
+				})
+			}
+
+		case "assistant":
+			var blocks []struct {
+				Type    string          `json:"type"`
+				Text    string          `json:"text"`
+				Name    string          `json:"name"`
+				Input   json.RawMessage `json:"input"`
+			}
+			if json.Unmarshal(ev.Message.Content, &blocks) != nil {
+				continue
+			}
+
+			var textParts []string
+			for _, b := range blocks {
+				switch b.Type {
+				case "text":
+					if b.Text != "" {
+						textParts = append(textParts, b.Text)
+					}
+				case "tool_use":
+					// Flush any accumulated text first
+					if len(textParts) > 0 {
+						all = append(all, historyMessage{
+							Role:      "assistant",
+							Content:   strings.Join(textParts, "\n"),
+							Timestamp: ev.Timestamp,
+						})
+						textParts = nil
+					}
+					inputStr := string(b.Input)
+					if len(inputStr) > 500 {
+						inputStr = inputStr[:500] + "..."
+					}
+					all = append(all, historyMessage{
+						Role:      "tool_use",
+						ToolName:  b.Name,
+						ToolInput: inputStr,
+						Timestamp: ev.Timestamp,
+					})
+				case "tool_result":
+					resultText := extractContentText(b.Input)
+					if len(resultText) > 500 {
+						resultText = resultText[:500] + "..."
+					}
+					all = append(all, historyMessage{
+						Role:    "tool_result",
+						Content: resultText,
+					})
+				}
+			}
+			if len(textParts) > 0 {
+				all = append(all, historyMessage{
+					Role:      "assistant",
+					Content:   strings.Join(textParts, "\n"),
+					Timestamp: ev.Timestamp,
+				})
+			}
+		}
+	}
+
+	// Return only last N messages
+	if len(all) > limit {
+		all = all[len(all)-limit:]
+	}
+	return all
+}
+
+// extractContentText extracts text from a JSON content field (string or array of blocks).
+func extractContentText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	// Try string first
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+
+	// Try array of content blocks
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) == nil {
+		var parts []string
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+
+	return ""
 }

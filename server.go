@@ -385,6 +385,28 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, items)
 	}))
 
+	// Get messages from a historical session JSONL file
+	mux.HandleFunc("GET /api/history/{id}/messages", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.PathValue("id")
+
+		// Find the JSONL file
+		path := findSessionJSONL(sessionID)
+		if path == "" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session file not found"})
+			return
+		}
+
+		limit := 200
+		if l := r.URL.Query().Get("limit"); l != "" {
+			if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 1000 {
+				limit = v
+			}
+		}
+
+		messages := parseSessionMessages(path, limit)
+		writeJSON(w, http.StatusOK, messages)
+	}))
+
 	// Resume a historical session (creates a server session wrapping --resume)
 	mux.HandleFunc("POST /api/sessions/resume", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		if !rl.allow() {

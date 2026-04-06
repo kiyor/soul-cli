@@ -908,7 +908,44 @@ async function resumeSession(sessionId,displayName){
     const s=await api('/sessions/resume',{method:'POST',body:JSON.stringify({session_id:sessionId})});
     if(s.error){alert(s.error);return;}
     await refreshSessions();
-    selectSession(s.id);
+
+    // Select and load history before connecting SSE
+    activeSessionId=s.id;
+    document.getElementById('welcome').style.display='none';
+    const msgs=document.getElementById('messages');
+    msgs.style.display='flex';
+    msgs.innerHTML='';
+    document.getElementById('composer').classList.remove('disabled');
+
+    // Load historical messages
+    try{
+      const history=await api(`/history/${sessionId}/messages?limit=200`);
+      if(history&&history.length>0){
+        addSystemMsg(`Loaded ${history.length} messages from history`);
+        history.forEach(m=>{
+          switch(m.role){
+            case 'user':
+              addUserMsg(m.content);
+              break;
+            case 'assistant':
+              addAIMsg(m.content);
+              break;
+            case 'tool_use':
+              addToolUseMsg(m.tool_name,m.tool_input);
+              break;
+            case 'tool_result':
+              addToolResultMsg(m.content);
+              break;
+          }
+        });
+        scrollBottom();
+      }
+    }catch(e){console.warn('history load:',e)}
+
+    // Now connect SSE for new messages
+    connectSSE(s.id);
+    updateSessionChip();
+    refreshSessions();
   }catch(e){alert('Resume failed: '+e.message)}
 }
 
