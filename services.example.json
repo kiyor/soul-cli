@@ -1,0 +1,4 @@
+[
+  {"name": "My App", "url": "http://localhost:8080"},
+  {"name": "Database Admin", "url": "http://localhost:5432"}
+]

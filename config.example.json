@@ -1,0 +1,9 @@
+{
+  "jiraToken": "",
+  "telegramChatID": "",
+  "agentName": "",
+  "projectRoots": [
+    "~/my-projects",
+    "~/work"
+  ]
+}
