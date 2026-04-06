@@ -86,8 +86,8 @@ func handleNew() {
 		if len(shortOld) > 8 {
 			shortOld = shortOld[:8]
 		}
-		resetSummary = append(resetSummary, fmt.Sprintf("  %s: %s → %s", key, shortOld, newID[:8]))
-		fmt.Printf("[" + appName + "] reset %s: %s → %s\n", key, shortOld, newID[:8])
+		resetSummary = append(resetSummary, fmt.Sprintf("  %s: %s → %s", key, shortOld, shortID(newID)))
+		fmt.Printf("[" + appName + "] reset %s: %s → %s\n", key, shortOld, shortID(newID))
 	}
 
 	// write back sessions.json

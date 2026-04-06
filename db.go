@@ -555,7 +555,9 @@ func upsertPattern(db *sql.DB, input patternInput) {
 
 	// update existing
 	var srcList []string
-	json.Unmarshal([]byte(existing.sources), &srcList)
+	if err := json.Unmarshal([]byte(existing.sources), &srcList); err != nil {
+		srcList = nil // reset on bad JSON
+	}
 	if input.Source != "" {
 		found := false
 		for _, s := range srcList {

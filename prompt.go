@@ -239,7 +239,6 @@ func buildTelegramContext(tokenBudget int) (string, string) {
 			bestID = v.SessionID
 		}
 	}
-	_ = bestKey
 	if bestID == "" {
 		return "", ""
 	}
@@ -522,7 +521,7 @@ func buildCCSessionContext(n int, charBudget int) string {
 			s.title = title
 		}
 
-		header := fmt.Sprintf("### %s", s.id[:8])
+		header := fmt.Sprintf("### %s", shortID(s.id))
 		if s.title != "" {
 			header += " — " + s.title
 		}

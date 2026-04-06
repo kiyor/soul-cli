@@ -176,7 +176,7 @@ func printSessionTable(filtered []sessionInfo, query string) {
 	fmt.Printf("%-8s  %-19s  %-8s  %-4s  %-22s  %s\n", "ID", "Time", "Size", "Msgs", "Project", "Title")
 	fmt.Println(strings.Repeat("─", 110))
 	for _, s := range filtered {
-		id := s.ID[:8]
+		id := shortID(s.ID)
 		t := s.ModTime.Format("2006-01-02 15:04:05")
 		sz := humanSize(s.Size)
 		proj := s.Project

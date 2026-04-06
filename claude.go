@@ -84,7 +84,7 @@ func execClaude(args []string) {
 // execClaudeResume directly resumes a session (no soul prompt added, already in session)
 func execClaudeResume(sessionID string) {
 	args := []string{"--dangerously-skip-permissions", "--resume", sessionID}
-	fmt.Fprintf(os.Stderr, "["+appName+"] resuming session %s...\n", sessionID[:8])
+	fmt.Fprintf(os.Stderr, "["+appName+"] resuming session %s...\n", shortID(sessionID))
 	execClaude(args)
 }
 

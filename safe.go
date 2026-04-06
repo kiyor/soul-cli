@@ -7,6 +7,18 @@ import (
 	"syscall"
 )
 
+// shortID safely truncates an ID string to n chars (default 8).
+func shortID(id string, n ...int) string {
+	limit := 8
+	if len(n) > 0 && n[0] > 0 {
+		limit = n[0]
+	}
+	if len(id) <= limit {
+		return id
+	}
+	return id[:limit]
+}
+
 // ── Symlink Protection ──
 
 // isSymlink checks if path is a symlink (does not follow)
