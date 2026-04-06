@@ -17,7 +17,7 @@ var evolveTemplate = template.Must(template.New("evolve").Parse(`# Self-Evolutio
 This is your daily self-evolution cycle.
 
 ## Goal
-Based on recent interactions, code state, and memory, find areas to improve — then **make the changes directly**.
+Based on recent interactions and memory, find areas to improve — then **make the changes directly**.
 If there's no inspiration or improvement needed today, notify the user "No evolution needed today" and exit.
 
 ## Checklist
@@ -37,7 +37,35 @@ Ask yourself:
 - Run ` + "`{{.CLI}} doctor`" + ` for quick diagnostics
 - Run ` + "`{{.CLI}} db stats`" + ` — any large backlog?
 - Run ` + "`{{.CLI}} db gc`" + ` and ` + "`{{.CLI}} clean`" + ` — clean stale data
+{{.CodeBlock}}
+### {{.SoulStepNum}}. Soul & Memory Evolution
+- Update outdated memory topics
+- Fine-tune SOUL.md / USER.md if new understanding emerged
+- Update AGENTS.md / TOOLS.md if rules changed
+- Improve skills (better prompts, new parameters)
 
+### {{.WrapStepNum}}. Wrap Up
+- Record what was evolved today in daily notes ({{.Workspace}}/memory/{{.Today}}.md)
+- **Write report file** (auto-sends via Telegram after exit):
+` + "```bash" + `
+cat > {{.ReportPath}} << 'RPTEOF'
+🧬 Evolution report:{{if .IsDev}}
+- [code] what changed and why (if any){{end}}
+- [soul/memory] what changed and why (if any)
+RPTEOF
+` + "```" + `
+If no evolution needed, write "No evolution inspiration today, system running normally" in the report.
+
+## Principles
+- **Do it or skip it** — don't evolve for the sake of evolving
+- **Small steps, fast pace** — change a little, but change it right{{if .IsDev}}
+- **Code first** — code improvements are the highest-value evolution
+- **Safety first** — tests must pass, code must compile, ` + "`{{.CLI}} build`" + ` must succeed{{end}}
+- **Leave a trace** — daily notes, every change documented
+`))
+
+// codeEvolutionBlock is injected into evolve template only when source code is present
+var codeEvolutionBlock = template.Must(template.New("code").Parse(`
 ### 3. Code Evolution (primary focus)
 Source code is at: {{.SrcDir}}
 
@@ -63,36 +91,16 @@ If tests fail: fix the failure, don't skip tests.
 ` + "`cd {{.SrcDir}} && git add -A && git commit -m \"evolve: <what changed>\"`" + `
 Do NOT push — the user decides when to push.
 
-### 4. Memory & Soul Evolution (secondary)
-- Update outdated memory topics
-- Fine-tune SOUL.md / USER.md if new understanding emerged
-- Update AGENTS.md / TOOLS.md if rules changed
-- Improve skills (better prompts, new parameters)
-
-### 5. Documentation Sync (if code changed)
+### 4. Documentation Sync (if code changed)
 - CLAUDE.md in the source directory: update architecture table, line counts, feature descriptions if they drifted
 - README.md: only if a user-visible feature was added/removed
-
-### 6. Wrap Up
-- Record what was evolved today in daily notes ({{.Workspace}}/memory/{{.Today}}.md)
-- **Write report file** (auto-sends via Telegram after exit):
-` + "```bash" + `
-cat > {{.ReportPath}} << 'RPTEOF'
-🧬 Evolution report:
-- [code] what changed and why (if any)
-- [soul/memory] what changed and why (if any)
-- Test results / build status
-RPTEOF
-` + "```" + `
-If no evolution needed, write "No evolution inspiration today, system running normally" in the report.
-
-## Principles
-- **Code first** — code improvements are the highest-value evolution
-- **Do it or skip it** — don't evolve for the sake of evolving
-- **Small steps, fast pace** — change a little, but change it right
-- **Safety first** — tests must pass, code must compile, ` + "`{{.CLI}} build`" + ` must succeed
-- **Leave a trace** — commit message + daily notes, every change documented
 `))
+
+// hasSourceCode checks if the appDir contains buildable Go source (go.mod exists)
+func hasSourceCode() bool {
+	_, err := os.Stat(filepath.Join(appDir, "go.mod"))
+	return err == nil
+}
 
 func evolveTask() string {
 	today := time.Now().Format("2006-01-02")
@@ -119,14 +127,32 @@ func evolveTask() string {
 		sessionsPart = formatSessionList(sessions)
 	}
 
-	data := map[string]string{
-		"Today":      today,
-		"Notes":      notesList.String(),
-		"Sessions":   sessionsPart,
-		"CLI":        appName,
-		"SrcDir":     appDir,
-		"Workspace":  workspace,
-		"ReportPath": sessionTmp("report.txt"),
+	// Detect developer mode: source code present → include code evolution steps
+	isDev := hasSourceCode()
+	codeBlock := ""
+	soulStep := "3"
+	wrapStep := "4"
+	if isDev {
+		cData := map[string]string{"SrcDir": appDir, "CLI": appName}
+		var cBuf bytes.Buffer
+		codeEvolutionBlock.Execute(&cBuf, cData)
+		codeBlock = cBuf.String()
+		soulStep = "5"
+		wrapStep = "6"
+	}
+
+	data := map[string]interface{}{
+		"Today":       today,
+		"Notes":       notesList.String(),
+		"Sessions":    sessionsPart,
+		"CLI":         appName,
+		"SrcDir":      appDir,
+		"Workspace":   workspace,
+		"ReportPath":  sessionTmp("report.txt"),
+		"IsDev":       isDev,
+		"CodeBlock":   codeBlock,
+		"SoulStepNum": soulStep,
+		"WrapStepNum": wrapStep,
 	}
 
 	var buf bytes.Buffer
