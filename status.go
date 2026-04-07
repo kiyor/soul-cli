@@ -368,7 +368,18 @@ func handleDoctor() {
 		ok("all soul files intact (%d files)", len(soulFiles))
 	}
 
-	// 9. Temp files
+	// 9. Markdown format validation
+	fmt.Println("\n── Markdown Formats ──")
+	mdWarnings := validateMdFormats()
+	if len(mdWarnings) == 0 {
+		ok("all md files properly formatted")
+	} else {
+		for _, w := range mdWarnings {
+			warn("%s", w)
+		}
+	}
+
+	// 10. Temp files
 	fmt.Println("\n── Temp Files ──")
 	tmpDirs := findAppTmpDirs()
 	if len(tmpDirs) == 0 {

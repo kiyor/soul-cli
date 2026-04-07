@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"os/signal"
 	"sort"
 	"strconv"
@@ -263,9 +264,21 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, skills)
 	}))
 
-	// List sessions
+	// List sessions (optional ?category=interactive to filter)
 	mux.HandleFunc("GET /api/sessions", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, sm.listSessions())
+		all := sm.listSessions()
+		cat := r.URL.Query().Get("category")
+		if cat == "" {
+			writeJSON(w, http.StatusOK, all)
+			return
+		}
+		filtered := make([]map[string]any, 0)
+		for _, s := range all {
+			if s["category"] == cat {
+				filtered = append(filtered, s)
+			}
+		}
+		writeJSON(w, http.StatusOK, filtered)
 	}))
 
 	// Create session
@@ -276,12 +289,15 @@ func handleServer(args []string) {
 		}
 
 		var req struct {
-			Name           string `json:"name"`
-			Project        string `json:"project"`
-			Model          string `json:"model"`
-			InitialMessage string `json:"initial_message"`
-			SoulFiles      bool   `json:"soul_files"`
-			MCPConfig      string `json:"mcp_config"`
+			Name           string   `json:"name"`
+			Project        string   `json:"project"`
+			Model          string   `json:"model"`
+			InitialMessage string   `json:"initial_message"`
+			SoulFiles      bool     `json:"soul_files"`
+			MCPConfig      string   `json:"mcp_config"`
+			GalID          string   `json:"gal_id"`
+			Category       string   `json:"category"`
+			Tags           []string `json:"tags"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -295,7 +311,16 @@ func handleServer(args []string) {
 			req.Project = workspace
 		}
 
-		sess, err := sm.createSession(req.Name, req.Project, req.Model, req.SoulFiles, req.MCPConfig)
+		sess, err := sm.createSessionWithOpts(sessionCreateOpts{
+			Name:     req.Name,
+			Project:  req.Project,
+			Model:    req.Model,
+			Soul:     req.SoulFiles,
+			MCP:      req.MCPConfig,
+			GalID:    req.GalID,
+			Category: req.Category,
+			Tags:     req.Tags,
+		})
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			return
@@ -505,7 +530,46 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 	}))
 
+	// Toggle chrome (--chrome flag) — reloads the underlying claude proc.
+	mux.HandleFunc("POST /api/sessions/{id}/chrome", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		sess := sm.getSession(r.PathValue("id"))
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		if err := sm.setChrome(sess.ID, req.Enabled); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "chrome_enabled": req.Enabled})
+	}))
+
+	// Context usage — fire control request, response comes via SSE
+	mux.HandleFunc("POST /api/sessions/{id}/usage", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		sess := sm.getSession(r.PathValue("id"))
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+
+		if err := sess.process.controlRequest("get_context_usage", nil); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+	}))
+
 	// Historical sessions (from JSONL files, for resume)
+	// ?category=interactive — filter by category (looks up server_sessions DB)
+	// ?category=all — show all including heartbeat/cron (default: interactive only)
 	mux.HandleFunc("GET /api/history", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		limit := 30
 		if l := r.URL.Query().Get("limit"); l != "" {
@@ -513,22 +577,39 @@ func handleServer(args []string) {
 				limit = v
 			}
 		}
+		catFilter := r.URL.Query().Get("category")
+		if catFilter == "" {
+			catFilter = CategoryInteractive // default: hide ephemeral
+		}
 
 		all := scanAllSessions()
 		sort.Slice(all, func(i, j int) bool { return all[i].ModTime.After(all[j].ModTime) })
-		if len(all) > limit {
-			all = all[:limit]
-		}
 
-		// Convert to JSON-friendly format
+		// Convert to JSON-friendly format, applying category filter
 		items := make([]map[string]any, 0, len(all))
 		for _, s := range all {
+			// Look up category from DB via Claude session ID
+			cat := getSessionCategoryByClaudeSID(s.ID)
+			if cat == "" {
+				cat = CategoryInteractive // sessions without DB records are legacy interactive
+			}
+
+			// Filter by category (unless "all" is requested)
+			if catFilter != "all" && cat != catFilter {
+				continue
+			}
+
+			if len(items) >= limit {
+				break
+			}
+
 			items = append(items, map[string]any{
 				"id":        s.ID,
 				"name":      s.Name,
 				"title":     s.Title,
 				"project":   s.Project,
 				"model":     s.Model,
+				"category":  cat,
 				"first_msg": s.FirstMsg,
 				"summary":   s.Summary,
 				"size":      s.Size,
@@ -543,8 +624,19 @@ func handleServer(args []string) {
 	mux.HandleFunc("GET /api/history/{id}/messages", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		sessionID := r.PathValue("id")
 
-		// Find the JSONL file
+		// Find the JSONL file — try direct ID first, then check active sessions
+		// for ClaudeSID or ResumedFrom mapping
 		path := findSessionJSONL(sessionID)
+		if path == "" {
+			if sess := sm.getSession(sessionID); sess != nil {
+				if sess.ClaudeSID != "" {
+					path = findSessionJSONL(sess.ClaudeSID)
+				}
+				if path == "" && sess.ResumedFrom != "" {
+					path = findSessionJSONL(sess.ResumedFrom)
+				}
+			}
+		}
 		if path == "" {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session file not found"})
 			return
@@ -590,6 +682,110 @@ func handleServer(args []string) {
 
 		writeJSON(w, http.StatusCreated, sess.snapshot())
 	}))
+
+	// GAL save endpoints
+	mux.HandleFunc("GET /api/gal", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		galDir := filepath.Join(workspace, "memory", "gal")
+		entries, err := os.ReadDir(galDir)
+		if err != nil {
+			writeJSON(w, http.StatusOK, []any{})
+			return
+		}
+		var saves []map[string]any
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(galDir, e.Name()))
+			if err != nil {
+				continue
+			}
+			var save map[string]any
+			if json.Unmarshal(data, &save) == nil {
+				saves = append(saves, save)
+			}
+		}
+		if saves == nil {
+			saves = []map[string]any{}
+		}
+		writeJSON(w, http.StatusOK, saves)
+	}))
+
+	mux.HandleFunc("GET /api/gal/{id}", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		galPath := filepath.Join(workspace, "memory", "gal", id+".json")
+		data, err := os.ReadFile(galPath)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "save not found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(data)
+	}))
+
+	// Wake API — trigger a heartbeat session (replaces OpenClaw /hooks/wake)
+	// Body: {"text": "reason", "soul": true/false}
+	// soul=true (default) → full soul prompt; soul=false → bare claude, lighter context
+	// No auth required — Jira calls this from Docker container
+	mux.HandleFunc("POST /api/wake", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Text string `json:"text"`
+			Soul *bool  `json:"soul"` // pointer to distinguish missing from false
+		}
+		json.NewDecoder(r.Body).Decode(&req) // optional body, ignore errors
+
+		reason := req.Text
+		if reason == "" {
+			reason = "jira-wake"
+		}
+
+		// Default: soul enabled (未然). Caller can explicitly disable.
+		soulEnabled := true
+		if req.Soul != nil {
+			soulEnabled = *req.Soul
+		}
+
+		// Build heartbeat task
+		hb := heartbeatTask()
+		taskMsg := hb
+		if reason != "jira-wake" {
+			taskMsg = fmt.Sprintf("Context: %s\n\n%s", reason, hb)
+		}
+
+		sessName := fmt.Sprintf("heartbeat-%s", time.Now().Format("0102-1504"))
+		sess, err := sm.createSessionWithOpts(sessionCreateOpts{
+			Name:     sessName,
+			Project:  workspace,
+			Soul:     soulEnabled,
+			Category: CategoryHeartbeat,
+			Tags:     []string{"auto"},
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] server: wake failed to create session: %v\n", appName, err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Send heartbeat task as initial message
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			if err := sess.process.sendMessage(taskMsg); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] server: wake failed to send task: %v\n", appName, err)
+			}
+		}()
+
+		soulLabel := "with soul"
+		if !soulEnabled {
+			soulLabel = "no soul"
+		}
+		fmt.Fprintf(os.Stderr, "[%s] server: wake triggered: %s (%s, session %s)\n", appName, reason, soulLabel, shortID(sess.ID))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":         true,
+			"session_id": sess.ID,
+			"reason":     reason,
+			"soul":       soulEnabled,
+		})
+	})
 
 	// WebSocket endpoint for bidirectional real-time sync
 	mux.HandleFunc("GET /api/ws", hub.serveWS)

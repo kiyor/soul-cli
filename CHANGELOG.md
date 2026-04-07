@@ -1,5 +1,62 @@
 # Changelog
 
+## v1.8.0
+
+### Session Categories & Lifecycle
+
+- **Session categories**: `interactive`, `heartbeat`, `cron`, `evolve` — ephemeral categories (heartbeat/cron/evolve) auto-destroy on completion, don't count toward maxSessions
+- **Session tags**: Freeform labels for filtering, stored in DB as JSON array
+- **Category filter API**: `GET /api/sessions?category=interactive` filters session list
+- **DB migrations**: Added `chrome_enabled`, `gal_id`, `category`, `claude_session_id`, `tags` columns (idempotent ALTER TABLE)
+
+### GAL (Visual Novel) System
+
+- **GAL session support**: `gal_id` field on session create/snapshot, links sessions to GAL save files
+- **GAL replay mode**: `skip_replay` WS flag lets frontend handle history display for muted replay styling
+- **GAL context injection**: `galContext` global for injecting save JSON into prompt
+
+### Chrome Remote Debugging
+
+- **`--chrome` flag**: Pass-through to Claude Code for Playwright browser control
+- **Runtime chrome toggle**: `POST /api/sessions/{id}/chrome` reloads process with `--chrome` (suppressClose prevents UI disruption)
+- **Chrome flag persistence**: `ChromeEnabled` field on session struct, passed through on resume/reload
+
+### Prompt System
+
+- **`weiran prompt`**: New subcommand prints full assembled prompt to stdout with section stats on stderr
+- **`weiran lint`**: Validates markdown frontmatter formats across topics, skills, and CLAUDE.md files
+- **CORE.md loading**: Read-only rules file loaded before soul files, auto-restored if modified
+- **Feedback auto-injection**: Scans `memory/topics/feedback_*.md`, extracts frontmatter name+description, injects as behavioral rules section
+- **Dynamic content boundary**: Explicit split between static (soul/identity/tools) and dynamic (daily notes/TG/sessions) prompt sections, mirroring Claude Code's prompt caching concept
+- **Launch directory capture**: Records original CWD before chdir, available for context
+- **Current time injection**: Agent prompt includes `Current time` with time + day of week
+
+### Safety & Hooks
+
+- **CORE.md integrity guard**: Safety check auto-restores CORE.md from git HEAD if modified
+- **Soul file shrinkage detection**: Warns if any protected file (SOUL/IDENTITY/USER/AGENTS/BOOT) shrinks >20% — prevents accidental content deletion during "optimization"
+- **Markdown format validation**: `validateMdFormats()` checks topic/skill frontmatter and CLAUDE.md structure
+
+### Server Mode
+
+- **Haiku naming pool**: `server_haiku_pool.go` — pool of Haiku instances for fast session auto-naming
+- **Session create refactor**: `createSessionWithOpts` replaces positional args with `sessionCreateOpts` struct
+- **Control response routing**: `bridgeStdout` routes `control_response` messages to sync waiters via `deliverResponse`
+- **Suppress close on reload**: `suppressClose` atomic bool prevents "Session ended" on intentional process restart (chrome toggle)
+- **Resume flag passthrough**: `-r` TUI picker now passes through extra flags (e.g. `--chrome`) to the resumed session
+
+### Web UI
+
+- **GAL interactive components**: Choice cards, quick reply chips, star rating, image gallery — all rendered from markdown code fences (`weiran-choices`, `weiran-chips`, `weiran-rating`, `weiran-gallery`)
+- **GAL replay styling**: Muted left-border + "回放" label for replayed history messages
+- **Category chip filter**: Session list filterable by category chips
+- **Model badge repositioning**: Moved to accommodate hamburger menu button
+
+### Code Quality
+
+- **Project roots**: `workspace/scripts` added to default project scan roots
+- Removed unused `os/exec` import from `server_rename.go`
+
 ## v1.7.0
 
 ### Server Mode

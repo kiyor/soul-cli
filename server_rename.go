@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +35,17 @@ func openServerDB() (*sql.DB, error) {
 			created_at   TEXT NOT NULL,
 			updated_at   TEXT NOT NULL
 		)`)
+		if err != nil {
+			return
+		}
+		// Migration: add chrome_enabled column (idempotent — ignore "duplicate column" error)
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN chrome_enabled INTEGER NOT NULL DEFAULT 0`)
+		// Migration: add gal_id column for GAL save resume
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN gal_id TEXT NOT NULL DEFAULT ''`)
+		// Migration: add category and claude_session_id for session classification
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN category TEXT NOT NULL DEFAULT 'interactive'`)
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN claude_session_id TEXT NOT NULL DEFAULT ''`)
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`)
 	})
 	if err != nil {
 		return nil, err
@@ -45,15 +55,45 @@ func openServerDB() (*sql.DB, error) {
 
 // ensureServerSession creates or updates the DB record for a session.
 func ensureServerSession(sessionID, name string) {
+	ensureServerSessionFull(sessionID, name, CategoryInteractive, nil)
+}
+
+// ensureServerSessionFull creates or updates with category and tags.
+func ensureServerSessionFull(sessionID, name, category string, tags []string) {
 	db, err := openServerDB()
 	if err != nil {
 		return
 	}
 	now := time.Now().Format(time.RFC3339)
-	db.Exec(`INSERT INTO server_sessions (session_id, name, created_at, updated_at)
-		VALUES (?, ?, ?, ?)
+	tagsJSON, _ := json.Marshal(tags)
+	if category == "" {
+		category = CategoryInteractive
+	}
+	db.Exec(`INSERT INTO server_sessions (session_id, name, category, tags, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id) DO UPDATE SET updated_at=?`,
-		sessionID, name, now, now, now)
+		sessionID, name, category, string(tagsJSON), now, now, now)
+}
+
+// setClaudeSessionID records the Claude Code session ID for a weiran session.
+func setClaudeSessionID(sessionID, claudeSID string) {
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	db.Exec(`UPDATE server_sessions SET claude_session_id=?, updated_at=? WHERE session_id=?`,
+		claudeSID, time.Now().Format(time.RFC3339), sessionID)
+}
+
+// getSessionCategory returns the category for a session by its Claude session ID.
+func getSessionCategoryByClaudeSID(claudeSID string) string {
+	db, err := openServerDB()
+	if err != nil {
+		return ""
+	}
+	var cat string
+	db.QueryRow(`SELECT category FROM server_sessions WHERE claude_session_id=?`, claudeSID).Scan(&cat)
+	return cat
 }
 
 // markRenamed sets the renamed flag so Haiku won't auto-rename.
@@ -95,6 +135,60 @@ func markAutoNamed(sessionID, newName string) {
 		newName, now, sessionID)
 }
 
+// setChromeEnabled persists the chrome flag for a session.
+func setChromeEnabled(sessionID string, enabled bool) {
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	v := 0
+	if enabled {
+		v = 1
+	}
+	now := time.Now().Format(time.RFC3339)
+	db.Exec(`UPDATE server_sessions SET chrome_enabled=?, updated_at=? WHERE session_id=?`,
+		v, now, sessionID)
+}
+
+// setGalID persists the gal_id for a session.
+func setGalID(sessionID, galID string) {
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	now := time.Now().Format(time.RFC3339)
+	db.Exec(`UPDATE server_sessions SET gal_id=?, updated_at=? WHERE session_id=?`,
+		galID, now, sessionID)
+}
+
+// getGalID reads the gal_id for a session.
+func getGalID(sessionID string) string {
+	db, err := openServerDB()
+	if err != nil {
+		return ""
+	}
+	var v string
+	db.QueryRow(`SELECT gal_id FROM server_sessions WHERE session_id=?`, sessionID).Scan(&v)
+	return v
+}
+
+// getChromeEnabled reads the chrome flag for a session.
+func getChromeEnabled(sessionID string) bool {
+	db, err := openServerDB()
+	if err != nil {
+		return false
+	}
+	var v int
+	db.QueryRow(`SELECT chrome_enabled FROM server_sessions WHERE session_id=?`, sessionID).Scan(&v)
+	return v == 1
+}
+
+// clearSessionRow is a no-op now — we keep session rows for history/category lookup.
+// Previously deleted the row; now we preserve it so history can filter by category.
+func clearSessionRow(sessionID string) {
+	// Intentionally kept empty — session metadata persists for history queries.
+}
+
 // isAutoNamed checks if session was already auto-named by Haiku.
 func isAutoNamed(sessionID string) bool {
 	db, err := openServerDB()
@@ -104,6 +198,19 @@ func isAutoNamed(sessionID string) bool {
 	var autoNamed int
 	db.QueryRow(`SELECT auto_named FROM server_sessions WHERE session_id=?`, sessionID).Scan(&autoNamed)
 	return autoNamed == 1
+}
+
+// isManuallyRenamed reports whether the user has explicitly renamed the session
+// via the rename API. Used to decide whether name sync from Claude Code's
+// session metadata is allowed to overwrite the current name.
+func isManuallyRenamed(sessionID string) bool {
+	db, err := openServerDB()
+	if err != nil {
+		return false
+	}
+	var renamed int
+	db.QueryRow(`SELECT renamed FROM server_sessions WHERE session_id=?`, sessionID).Scan(&renamed)
+	return renamed == 1
 }
 
 // ── Haiku Auto-Rename ──
@@ -194,23 +301,20 @@ func tryAutoRename(sess *serverSession) {
 	fmt.Fprintf(os.Stderr, "[%s] server: auto-renamed %s → %q\n", appName, shortID(sess.ID), title)
 }
 
-// callHaikuForTitle calls claude CLI in one-shot mode to generate a short session title.
-// Uses the same model routing as the rest of the system (OpenClaw gateway).
+// callHaikuForTitle uses the persistent haiku pool to generate a short session title.
 func callHaikuForTitle(context string) string {
 	prompt := fmt.Sprintf(`Based on this conversation snippet, generate a very short title (3-8 words, no quotes, no punctuation at end). Just output the title, nothing else.
 
 Conversation:
 %s`, context)
 
-	cmd := exec.Command(claudeBin, "-p", prompt, "--model", "haiku", "--max-turns", "1", "--no-input")
-	cmd.Env = filterNestedClaudeEnv(os.Environ())
-	out, err := cmd.Output()
+	result, err := getHaikuPool().query(prompt, haikuPoolQueryTimeout)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] server: auto-rename claude error: %v\n", appName, err)
+		fmt.Fprintf(os.Stderr, "[%s] server: auto-rename haiku pool error: %v\n", appName, err)
 		return ""
 	}
 
-	title := strings.TrimSpace(string(out))
+	title := strings.TrimSpace(result)
 	title = strings.Trim(title, `"'`)
 	if len(title) > 60 {
 		title = title[:60]

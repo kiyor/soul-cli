@@ -190,6 +190,46 @@ func safetyCheck(mode string) {
 		}
 	}
 
+	// 1.5. CORE.md integrity — auto-restore if modified
+	corePath := filepath.Join(workspace, "CORE.md")
+	coreCommitted, coreErr := exec.Command("git", "-C", workspace, "show", "HEAD:CORE.md").Output()
+	if coreErr == nil {
+		currentCore, readErr := os.ReadFile(corePath)
+		if readErr != nil || string(currentCore) != string(coreCommitted) {
+			// Auto-restore from git
+			if restoreErr := os.WriteFile(corePath, coreCommitted, 0644); restoreErr == nil {
+				warnings = append(warnings, "🚨 CORE.md was modified — auto-restored from git. This file is read-only for agents.")
+			} else {
+				warnings = append(warnings, fmt.Sprintf("🚨 CORE.md was modified and auto-restore FAILED: %v", restoreErr))
+			}
+		}
+	}
+
+	// 1.6. soul file content shrinkage detection — compare working tree vs last commit
+	// Prevents "optimization" that silently deletes personality/ability/relationship content
+	protectedFiles := []string{"SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "BOOT.md"}
+	for _, f := range protectedFiles {
+		currentPath := filepath.Join(workspace, f)
+		currentData, err := os.ReadFile(currentPath)
+		if err != nil {
+			continue
+		}
+		// Get committed version size via git
+		committed, err := exec.Command("git", "-C", workspace, "show", "HEAD:"+f).Output()
+		if err != nil {
+			continue // file not tracked or no commits
+		}
+		currentSize := len(currentData)
+		committedSize := len(committed)
+		if committedSize == 0 {
+			continue
+		}
+		shrinkPct := float64(committedSize-currentSize) / float64(committedSize) * 100
+		if shrinkPct > 20 {
+			warnings = append(warnings, fmt.Sprintf("🚨 soul file shrank %.0f%%: %s (%d → %d bytes) — content may have been over-trimmed", shrinkPct, f, committedSize, currentSize))
+		}
+	}
+
 	// 2. memory file sanity check — bloat or wipe
 	memDir := filepath.Join(workspace, "memory")
 	if entries, err := os.ReadDir(memDir); err == nil {
@@ -300,6 +340,9 @@ func safetyCheck(mode string) {
 		}
 	}
 
+	// 6. Markdown format validation (topics, skills, CLAUDE.md)
+	warnings = append(warnings, validateMdFormats()...)
+
 	// summary
 	if len(warnings) == 0 {
 		fmt.Fprint(os.Stderr, "["+appName+"] safety check passed ✓\n")
@@ -374,4 +417,210 @@ func deliverReport(mode string) {
 		return
 	}
 	fmt.Fprint(os.Stderr, "["+appName+"] report sent to Telegram\n")
+}
+
+// parseMdFrontmatter extracts key-value pairs from YAML frontmatter in a markdown file.
+// Returns nil if no frontmatter found.
+func parseMdFrontmatter(content string) map[string]string {
+	if !strings.HasPrefix(content, "---") {
+		return nil
+	}
+	end := strings.Index(content[3:], "---")
+	if end < 0 {
+		return nil
+	}
+	result := make(map[string]string)
+	for _, line := range strings.Split(content[3:3+end], "\n") {
+		line = strings.TrimSpace(line)
+		if idx := strings.Index(line, ":"); idx > 0 {
+			key := strings.TrimSpace(line[:idx])
+			val := strings.TrimSpace(line[idx+1:])
+			val = strings.Trim(val, "\"'")
+			if key != "" {
+				result[key] = val
+			}
+		}
+	}
+	return result
+}
+
+// validateMdFormats validates frontmatter/format of all structured md files:
+// memory topics, skills, project CLAUDE.md files, and core soul files.
+func validateMdFormats() []string {
+	var warnings []string
+
+	// 0. CORE.md integrity check
+	corePath := filepath.Join(workspace, "CORE.md")
+	coreCommitted, coreErr := exec.Command("git", "-C", workspace, "show", "HEAD:CORE.md").Output()
+	if coreErr == nil {
+		currentCore, readErr := os.ReadFile(corePath)
+		if readErr != nil {
+			warnings = append(warnings, "📝 CORE.md missing or unreadable")
+		} else if string(currentCore) != string(coreCommitted) {
+			warnings = append(warnings, "📝 CORE.md differs from committed version (should be read-only for agents)")
+		}
+	}
+
+	// 1. Core soul files: existence, non-empty, no cross-file duplication
+	soulFiles := map[string]int64{} // path → size
+	for _, name := range []string{"BOOT.md", "SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"} {
+		path := filepath.Join(workspace, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("📝 missing soul file: %s", name))
+		} else if info.Size() == 0 {
+			warnings = append(warnings, fmt.Sprintf("📝 empty soul file: %s", name))
+		} else {
+			soulFiles[name] = info.Size()
+		}
+	}
+
+	// Check MEMORY.md index consistency: entries should point to existing files
+	memoryMdPath := filepath.Join(workspace, "MEMORY.md")
+	if data, err := os.ReadFile(memoryMdPath); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			// Match markdown links like [Title](memory/topics/foo.md)
+			if idx := strings.Index(line, "](memory/topics/"); idx > 0 {
+				endIdx := strings.Index(line[idx+2:], ")")
+				if endIdx > 0 {
+					relPath := line[idx+2 : idx+2+endIdx]
+					fullPath := filepath.Join(workspace, relPath)
+					if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+						warnings = append(warnings, fmt.Sprintf("📝 MEMORY.md broken link: %s (file not found)", relPath))
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Memory topic files: must have frontmatter with name, description, type
+	topicsDir := filepath.Join(workspace, "memory", "topics")
+	if entries, err := os.ReadDir(topicsDir); err == nil {
+		validTypes := map[string]bool{"feedback": true, "user": true, "project": true, "reference": true}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			label := "topics/" + e.Name()
+			data, err := os.ReadFile(filepath.Join(topicsDir, e.Name()))
+			if err != nil {
+				continue
+			}
+			fm := parseMdFrontmatter(string(data))
+			if fm == nil {
+				warnings = append(warnings, fmt.Sprintf("📝 missing frontmatter: %s", label))
+				continue
+			}
+			if fm["name"] == "" {
+				warnings = append(warnings, fmt.Sprintf("📝 missing name: %s", label))
+			}
+			if fm["description"] == "" {
+				warnings = append(warnings, fmt.Sprintf("📝 missing description: %s", label))
+			}
+			if t := fm["type"]; t == "" {
+				warnings = append(warnings, fmt.Sprintf("📝 missing type: %s", label))
+			} else if !validTypes[t] {
+				warnings = append(warnings, fmt.Sprintf("📝 invalid type %q: %s (expected feedback|user|project|reference)", t, label))
+			}
+		}
+	}
+
+	// 3. Skill SKILL.md files: must have frontmatter with name, description
+	for _, dir := range skillDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			skillMd := filepath.Join(dir, e.Name(), "SKILL.md")
+			data, err := os.ReadFile(skillMd)
+			if err != nil {
+				continue
+			}
+			label := fmt.Sprintf("skill/%s/SKILL.md", e.Name())
+			fm := parseMdFrontmatter(string(data))
+			if fm == nil {
+				warnings = append(warnings, fmt.Sprintf("📝 missing frontmatter: %s", label))
+				continue
+			}
+			if fm["name"] == "" {
+				warnings = append(warnings, fmt.Sprintf("📝 missing name: %s", label))
+			}
+			if fm["description"] == "" {
+				warnings = append(warnings, fmt.Sprintf("📝 missing description: %s (invisible in skill index)", label))
+			}
+		}
+	}
+
+	// 4. CLAUDE.md files in projects: should have substantive content and structure
+	for _, root := range projectRoots {
+		for _, f := range findCLAUDEMDs(root, 2) {
+			info, err := os.Stat(f)
+			if err != nil {
+				continue
+			}
+			shortPath := strings.Replace(f, home, "~", 1)
+			if info.Size() == 0 {
+				warnings = append(warnings, fmt.Sprintf("📝 empty CLAUDE.md: %s", shortPath))
+				continue
+			}
+			if info.Size() < 20 {
+				warnings = append(warnings, fmt.Sprintf("📝 CLAUDE.md too short (%d bytes): %s", info.Size(), shortPath))
+				continue
+			}
+			// Check for at least one markdown heading (structural content)
+			data, err := os.ReadFile(f)
+			if err != nil {
+				continue
+			}
+			content := string(data)
+			hasHeading := false
+			for _, line := range strings.Split(content, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "#") {
+					hasHeading = true
+					break
+				}
+			}
+			if !hasHeading {
+				warnings = append(warnings, fmt.Sprintf("📝 CLAUDE.md has no markdown headings: %s", shortPath))
+			}
+		}
+	}
+
+	// 5. Reverse index: topic files that exist but are not indexed in MEMORY.md
+	memoryMdContent, memErr := os.ReadFile(filepath.Join(workspace, "MEMORY.md"))
+	if memErr == nil {
+		memIdx := string(memoryMdContent)
+		if entries, err := os.ReadDir(filepath.Join(workspace, "memory", "topics")); err == nil {
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+					continue
+				}
+				// Check if this file is referenced in MEMORY.md
+				relPath := "memory/topics/" + e.Name()
+				if !strings.Contains(memIdx, relPath) {
+					warnings = append(warnings, fmt.Sprintf("📝 topic not indexed: %s (missing from MEMORY.md)", e.Name()))
+				}
+			}
+		}
+	}
+
+	return warnings
+}
+
+// handleLint runs md format validation and prints results
+func handleLint() {
+	warnings := validateMdFormats()
+	if len(warnings) == 0 {
+		fmt.Println("✅ all md files properly formatted")
+		return
+	}
+	fmt.Printf("found %d issues:\n\n", len(warnings))
+	for _, w := range warnings {
+		fmt.Printf("  %s\n", w)
+	}
+	os.Exit(1)
 }

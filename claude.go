@@ -81,10 +81,16 @@ func execClaude(args []string) {
 	}
 }
 
-// execClaudeResume directly resumes a session (no soul prompt added, already in session)
-func execClaudeResume(sessionID string) {
+// execClaudeResume directly resumes a session (no soul prompt added, already in session).
+// Any extra args (e.g. --chrome) are passed through to claude.
+func execClaudeResume(sessionID string, passthrough ...string) {
 	args := []string{"--dangerously-skip-permissions", "--resume", sessionID}
-	fmt.Fprintf(os.Stderr, "["+appName+"] resuming session %s...\n", shortID(sessionID))
+	args = append(args, passthrough...)
+	if len(passthrough) > 0 {
+		fmt.Fprintf(os.Stderr, "["+appName+"] resuming session %s with %v...\n", shortID(sessionID), passthrough)
+	} else {
+		fmt.Fprintf(os.Stderr, "["+appName+"] resuming session %s...\n", shortID(sessionID))
+	}
 	execClaude(args)
 }
 

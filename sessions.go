@@ -38,8 +38,12 @@ func handleSessions(args []string) {
 	showList := false
 	projectFilter := ""
 	daysFilter := 0
+	var passthrough []string // flags forwarded to claude after resume (e.g. --chrome)
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--chrome":
+			passthrough = append(passthrough, "--chrome")
+			continue
 		case "-n":
 			if i+1 < len(args) {
 				limit, _ = strconv.Atoi(args[i+1])
@@ -72,6 +76,7 @@ Options:
   -d <days>      last N days only
   -P <project>   filter by project (fuzzy match)
   -j, --json     JSON output
+  --chrome       launch resumed session with --chrome (browser tools)
   -h, --help     help
 
 TUI shortcuts:
@@ -153,12 +158,12 @@ Examples:
 		// pass query as initial filter in TUI
 		chosen := runSessionsTUIWithQuery(filtered, query)
 		if chosen != nil {
-			execClaudeResume(chosen.ID)
+			execClaudeResume(chosen.ID, passthrough...)
 		}
 	} else {
 		chosen := runSessionsTUI(filtered)
 		if chosen != nil {
-			execClaudeResume(chosen.ID)
+			execClaudeResume(chosen.ID, passthrough...)
 		}
 	}
 }

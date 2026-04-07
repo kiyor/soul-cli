@@ -44,13 +44,14 @@ The prompt is assembled from your workspace:
 
 ```
 workspace/
+├── BOOT.md          ← custom boot protocol (optional)
+├── CORE.md          ← read-only rules the AI must not modify (optional)
 ├── SOUL.md          ← personality, values, inner world
 ├── IDENTITY.md      ← name, appearance, role
 ├── USER.md          ← who your human is
 ├── AGENTS.md        ← behavioral rules
 ├── TOOLS.md         ← available tools & credentials reference
 ├── MEMORY.md        ← long-term memory index (pointers to topics/)
-├── BOOT.md          ← custom boot protocol (optional)
 ├── memory/
 │   ├── 2026-04-05.md    ← today's daily notes
 │   ├── 2026-04-04.md    ← yesterday's
@@ -232,6 +233,23 @@ myai rollback [N]            # Rollback to Nth previous version
 myai update                  # git pull + safe build
 ```
 
+### Passthrough flags
+
+Any flag `myai` doesn't recognize is forwarded verbatim to the underlying
+`claude` invocation in `interactive` / `-p` / `--cron` / `--heartbeat` /
+`--evolve` modes. So you can opt into Claude Code features without any
+wrapper changes:
+
+```bash
+myai --chrome                       # interactive session with Claude-in-Chrome
+myai -p "screenshot example.com" --chrome
+myai -r --chrome                    # resume + chrome
+```
+
+(`myai server` is the exception — its arg parser owns `--port` / `--host` /
+`--token`. Inside server mode, chrome is a per-session toggle in the Web UI's
+settings panel, persisted to sqlite.)
+
 ## Server Mode
 
 `myai server` starts an HTTP API server that manages persistent Claude Code sessions. External clients (web UI, curl, other services) can create sessions, send messages, and receive real-time output via SSE.
@@ -263,6 +281,7 @@ myai server --host 0.0.0.0 --port 9847
 | POST | `/api/sessions/:id/message` | Send message |
 | GET | `/api/sessions/:id/stream` | SSE real-time output |
 | POST | `/api/sessions/:id/control` | Control (interrupt, set_model) |
+| POST | `/api/sessions/:id/chrome` | Toggle `--chrome` (reloads claude proc) |
 | GET | `/api/history` | Historical sessions (for resume) |
 | POST | `/api/sessions/resume` | Resume a historical session |
 
@@ -335,6 +354,10 @@ The soul files are just markdown. There's no schema, no DSL — write what you w
 
 The launcher reads them, concatenates them into a system prompt, and hands them to Claude Code via `--append-system-prompt-file`. Claude Code's own system prompt stays intact; your soul files are additive.
 
+**BOOT.md** — Custom boot protocol. The first text injected into the prompt. If absent, a built-in default is used.
+
+**CORE.md** — Read-only rules defined by the owner. The AI is instructed not to modify this file; a post-hook automatically restores it if changed. Use this for identity boundaries, capability definitions, or optimization constraints that the AI must respect even during self-evolution.
+
 **SOUL.md** — Personality, values, emotional model, speaking style. This is the core of who the AI is.
 
 **IDENTITY.md** — Name, role, appearance (if applicable). The facts.
@@ -344,8 +367,6 @@ The launcher reads them, concatenates them into a system prompt, and hands them 
 **AGENTS.md** — Behavioral rules. Security policy, file editing discipline, memory management protocols. The guardrails.
 
 **TOOLS.md** — Reference for available tools, API endpoints, credentials. Not injected as capabilities — just a cheat sheet the AI can consult.
-
-**BOOT.md** — Custom boot protocol. The first text injected into the prompt. If absent, a built-in default is used.
 
 **MEMORY.md** — Index of long-term memory topics. Points to `memory/topics/*.md` files that are lazy-loaded when relevant.
 

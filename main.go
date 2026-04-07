@@ -43,6 +43,9 @@ var (
 
 	isServerMode bool // set to true when running as `weiran server`
 
+	launchDir  string // original working directory before chdir to workspace
+	galContext string // GAL save JSON injected into prompt for resume
+
 	// Skill directories
 	skillDirs []string
 
@@ -202,10 +205,10 @@ func initWorkspace() {
 	}
 	hooksDir = filepath.Join(appDir, "hooks")
 
-	// projectRoots: workspace/projects is always included, extras from config.json
+	// projectRoots: workspace/projects + scripts always included, extras from config.json
 	projectRoots = []string{
 		filepath.Join(workspace, "projects"),
-		filepath.Join(workspace, "familydash"),
+		filepath.Join(workspace, "scripts"),
 	}
 	projectRoots = append(projectRoots, extraProjectRoots...)
 }
@@ -349,6 +352,8 @@ func init() {
 	if buildVersion == "" {
 		buildVersion = strings.TrimSpace(embeddedVersion)
 	}
+	// Capture original working directory before any chdir
+	launchDir, _ = os.Getwd()
 	initAppName()
 	initWorkspace()
 }
@@ -389,6 +394,8 @@ Subcommands:
   {{NAME}} update                self-update: git pull -> {{NAME}} build (safe build)
   {{NAME}} status                quick health check (without launching claude)
   {{NAME}} doctor                deep diagnostics (claude version, processes, DB, disk, model endpoints, metrics anomalies)
+  {{NAME}} prompt                 print the full assembled system prompt to stdout
+  {{NAME}} lint                   validate md file formats (topics, skills, CLAUDE.md)
   {{NAME}} diff                  show soul/memory file changes since last commit
   {{NAME}} config                show current config (workspace, agent, paths)
   {{NAME}} log [N]               view daily notes (N=day offset, default today, 1=yesterday)
@@ -525,6 +532,12 @@ func main() {
 	case "diff":
 		handleDiff()
 		return
+	case "prompt":
+		handlePrompt()
+		return
+	case "lint":
+		handleLint()
+		return
 	case "new":
 		handleNew()
 		return
@@ -556,6 +569,14 @@ func main() {
 		}
 		// bare -r without session ID: open TUI to pick a session
 		if isResume && !hasResumeID {
+			// strip resume flags from extra; the rest (e.g. --chrome) is passed through
+			var passthrough []string
+			for _, a := range extra {
+				if a == "-c" || a == "--continue" || a == "-r" || a == "--resume" {
+					continue
+				}
+				passthrough = append(passthrough, a)
+			}
 			sessions := scanAllSessions()
 			sort.Slice(sessions, func(i, j int) bool {
 				return sessions[i].ModTime.After(sessions[j].ModTime)
@@ -565,8 +586,9 @@ func main() {
 				fmt.Fprintln(os.Stderr, "["+appName+"] no session selected")
 				return
 			}
-			// resume chosen session with soul prompt
+			// resume chosen session with soul prompt + passthrough flags
 			args := append(base, "--resume", chosen.ID)
+			args = append(args, passthrough...)
 			execClaude(args)
 			return
 		}
@@ -702,6 +724,12 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			return
 		case "diff":
 			mode = "diff"
+			return
+		case "prompt":
+			mode = "prompt"
+			return
+		case "lint":
+			mode = "lint"
 			return
 		case "new":
 			mode = "new"

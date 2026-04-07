@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -99,6 +100,7 @@ type sessionOpts struct {
 	MCPConfig        string
 	Model            string
 	MaxTurns         int
+	Chrome           bool
 }
 
 // claudeProcess wraps a running Claude Code subprocess with stream-json pipes.
@@ -110,6 +112,15 @@ type claudeProcess struct {
 	done     chan struct{}
 	exitCode int
 	mu       sync.Mutex // protects stdin writes
+
+	// suppressClose, when true, makes bridgeStdout skip the trailing "close"
+	// SSE event on process exit. Used during intentional reload (e.g. chrome
+	// toggle) so the UI doesn't see "Session ended."
+	suppressClose atomic.Bool
+
+	// Response waiters for synchronous control requests
+	waitersMu sync.Mutex
+	waiters   map[string]chan json.RawMessage
 }
 
 // spawnClaude starts a Claude Code subprocess in stream-json mode.
@@ -133,6 +144,9 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 	}
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(opts.MaxTurns))
+	}
+	if opts.Chrome {
+		args = append(args, "--chrome")
 	}
 
 	cmd := exec.Command(claudeBin, args...)
@@ -165,11 +179,12 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 	}
 
 	proc := &claudeProcess{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: stdout,
-		stderr: stderr,
-		done:   make(chan struct{}),
+		cmd:     cmd,
+		stdin:   stdin,
+		stdout:  stdout,
+		stderr:  stderr,
+		done:    make(chan struct{}),
+		waiters: make(map[string]chan json.RawMessage),
 	}
 
 	// Monitor process exit in background
@@ -231,6 +246,81 @@ func (p *claudeProcess) controlRequest(subtype string, extra map[string]any) err
 	})
 	_, err := p.stdin.Write(append(payload, '\n'))
 	return err
+}
+
+// controlRequestSync sends a control request and waits for the matching response.
+func (p *claudeProcess) controlRequestSync(subtype string, extra map[string]any, timeout time.Duration) (json.RawMessage, error) {
+	reqID := fmt.Sprintf("req_%d_%s", time.Now().UnixMilli(), randHex(4))
+
+	// Register waiter before sending
+	ch := make(chan json.RawMessage, 1)
+	p.waitersMu.Lock()
+	p.waiters[reqID] = ch
+	p.waitersMu.Unlock()
+
+	defer func() {
+		p.waitersMu.Lock()
+		delete(p.waiters, reqID)
+		p.waitersMu.Unlock()
+	}()
+
+	// Send request
+	p.mu.Lock()
+	select {
+	case <-p.done:
+		p.mu.Unlock()
+		return nil, fmt.Errorf("process already exited")
+	default:
+	}
+	req := map[string]any{"subtype": subtype}
+	for k, v := range extra {
+		req[k] = v
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"type":       "control_request",
+		"request_id": reqID,
+		"request":    req,
+	})
+	_, err := p.stdin.Write(append(payload, '\n'))
+	p.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+
+	// Wait for response
+	select {
+	case resp := <-ch:
+		return resp, nil
+	case <-p.done:
+		return nil, fmt.Errorf("process exited while waiting")
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout waiting for response")
+	}
+}
+
+// deliverResponse routes a control_response to the matching waiter (if any).
+// Claude Code format: {"type":"control_response","response":{"subtype":"success","request_id":"req_xxx","response":{...}}}
+// Returns true if a waiter consumed it.
+func (p *claudeProcess) deliverResponse(raw json.RawMessage) bool {
+	var peek struct {
+		Response struct {
+			RequestID string `json:"request_id"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(raw, &peek) != nil || peek.Response.RequestID == "" {
+		return false
+	}
+	p.waitersMu.Lock()
+	ch, ok := p.waiters[peek.Response.RequestID]
+	p.waitersMu.Unlock()
+	if ok {
+		select {
+		case ch <- raw:
+		default:
+		}
+		return true
+	}
+	return false
 }
 
 // shutdown gracefully stops the Claude Code process.

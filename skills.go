@@ -160,8 +160,8 @@ func buildSkillIndex() string {
 					break
 				}
 			}
-			if len(desc) > 100 {
-				desc = desc[:100] + "…"
+			if runes := []rune(desc); len(runes) > 100 {
+				desc = string(runes[:100]) + "…"
 			}
 
 			seen[skillName] = true
@@ -213,6 +213,11 @@ func extractProjectDesc(path string) string {
 		}
 		// strip markdown heading prefix
 		line = strings.TrimLeft(line, "# ")
+		// skip generic headings that don't describe the project
+		lower := strings.ToLower(line)
+		if lower == "what this is" || lower == "what is this" || lower == "overview" || lower == "project overview" {
+			continue
+		}
 		if len(line) > 120 {
 			line = line[:120] + "…"
 		}

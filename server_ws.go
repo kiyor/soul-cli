@@ -225,14 +225,16 @@ func (c *wsClient) writePump() {
 
 func (c *wsClient) handleMessage(raw []byte) {
 	var msg struct {
-		Type      string `json:"type"`
-		SID       string `json:"sid"`
-		Message   string `json:"message"`
-		Name      string `json:"name"`
-		Project   string `json:"project"`
-		Model     string `json:"model"`
-		SoulFiles *bool  `json:"soul_files"`
-		InitMsg   string `json:"initial_message"`
+		Type       string `json:"type"`
+		SID        string `json:"sid"`
+		Message    string `json:"message"`
+		Name       string `json:"name"`
+		Project    string `json:"project"`
+		Model      string `json:"model"`
+		SoulFiles  *bool  `json:"soul_files"`
+		InitMsg    string `json:"initial_message"`
+		SkipReplay bool   `json:"skip_replay"`
+		GalID      string `json:"gal_id"`
 	}
 	if json.Unmarshal(raw, &msg) != nil {
 		c.sendJSON(map[string]string{"type": "error", "error": "invalid JSON"})
@@ -247,22 +249,24 @@ func (c *wsClient) handleMessage(raw []byte) {
 		c.mu.Lock()
 		c.subSID = msg.SID
 		c.mu.Unlock()
-		// Replay history events for catch-up
-		if sess := c.hub.sm.getSession(msg.SID); sess != nil {
-			sess.broadcaster.mu.RLock()
-			for _, ev := range sess.broadcaster.history {
-				evMsg, _ := json.Marshal(map[string]any{
-					"type":       "event",
-					"session_id": msg.SID,
-					"event":      ev.Event,
-					"data":       json.RawMessage(ev.Data),
-				})
-				select {
-				case c.send <- evMsg:
-				default:
+		// Replay history events for catch-up (skip if client already loaded via HTTP)
+		if !msg.SkipReplay {
+			if sess := c.hub.sm.getSession(msg.SID); sess != nil {
+				sess.broadcaster.mu.RLock()
+				for _, ev := range sess.broadcaster.history {
+					evMsg, _ := json.Marshal(map[string]any{
+						"type":       "event",
+						"session_id": msg.SID,
+						"event":      ev.Event,
+						"data":       json.RawMessage(ev.Data),
+					})
+					select {
+					case c.send <- evMsg:
+					default:
+					}
 				}
+				sess.broadcaster.mu.RUnlock()
 			}
-			sess.broadcaster.mu.RUnlock()
 		}
 		c.sendJSON(map[string]string{"type": "subscribed", "sid": msg.SID})
 
@@ -321,7 +325,14 @@ func (c *wsClient) handleMessage(raw []byte) {
 		if msg.SoulFiles != nil {
 			soul = *msg.SoulFiles
 		}
-		sess, err := c.hub.sm.createSession(name, project, msg.Model, soul, "")
+		sess, err := c.hub.sm.createSessionWithOpts(sessionCreateOpts{
+			Name:     name,
+			Project:  project,
+			Model:    msg.Model,
+			Soul:     soul,
+			GalID:    msg.GalID,
+			Category: CategoryInteractive,
+		})
 		if err != nil {
 			c.sendJSON(map[string]string{"type": "error", "error": err.Error()})
 			return
@@ -335,6 +346,10 @@ func (c *wsClient) handleMessage(raw []byte) {
 			sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
 			sess.process.sendMessage(msg.InitMsg)
 		}
+		// Auto-subscribe client to the new session
+		c.mu.Lock()
+		c.subSID = sess.ID
+		c.mu.Unlock()
 		c.sendJSON(map[string]any{"type": "created", "session": sess.snapshot()})
 		c.hub.notifySessions()
 
@@ -381,6 +396,10 @@ func (c *wsClient) handleMessage(raw []byte) {
 			c.sendJSON(map[string]string{"type": "error", "error": err.Error()})
 			return
 		}
+		// Auto-subscribe client to the new session before sending resumed
+		c.mu.Lock()
+		c.subSID = sess.ID
+		c.mu.Unlock()
 		c.sendJSON(map[string]any{"type": "resumed", "session": sess.snapshot()})
 		c.hub.notifySessions()
 

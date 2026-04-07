@@ -16,25 +16,43 @@ import (
 
 // ── Session ──
 
+// Session categories determine lifecycle behavior.
+const (
+	CategoryInteractive = "interactive" // Web UI manual sessions — subject to maxSessions, normal TTL
+	CategoryHeartbeat   = "heartbeat"   // Wake/heartbeat — auto-destroy on completion, not counted toward maxSessions
+	CategoryCron        = "cron"        // Scheduled tasks — auto-destroy on completion
+	CategoryEvolve      = "evolve"      // Daily self-evolution — auto-destroy on completion
+)
+
+// isEphemeralCategory returns true if sessions in this category should auto-destroy when done.
+func isEphemeralCategory(cat string) bool {
+	return cat == CategoryHeartbeat || cat == CategoryCron || cat == CategoryEvolve
+}
+
 // serverSession represents one active Claude Code session.
 type serverSession struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Project     string    `json:"project"`
-	Model       string    `json:"model,omitempty"`
-	Status      string    `json:"status"` // starting, running, idle, stopped, error
-	CreatedAt   time.Time `json:"created_at"`
-	LastActive  time.Time `json:"last_active"`
-	TotalCost   float64   `json:"total_cost_usd"`
-	NumTurns    int       `json:"num_turns"`
-	ClaudeSID   string    `json:"claude_session_id,omitempty"` // Claude Code's own session ID
-	ResumedFrom string    `json:"resumed_from,omitempty"`      // Original session ID being resumed
-	StreamURL   string    `json:"stream_url"`
-	SoulEnabled bool      `json:"soul_enabled"`
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Project       string    `json:"project"`
+	Model         string    `json:"model,omitempty"`
+	Status        string    `json:"status"` // starting, running, idle, stopped, error
+	Category      string    `json:"category"`            // interactive, heartbeat, cron, evolve
+	Tags          []string  `json:"tags,omitempty"`       // freeform labels for filtering
+	CreatedAt     time.Time `json:"created_at"`
+	LastActive    time.Time `json:"last_active"`
+	TotalCost     float64   `json:"total_cost_usd"`
+	NumTurns      int       `json:"num_turns"`
+	ClaudeSID     string    `json:"claude_session_id,omitempty"` // Claude Code's own session ID
+	ResumedFrom   string    `json:"resumed_from,omitempty"`      // Original session ID being resumed
+	StreamURL     string    `json:"stream_url"`
+	SoulEnabled   bool      `json:"soul_enabled"`
+	ChromeEnabled bool      `json:"chrome_enabled"`
+	GalID         string    `json:"gal_id,omitempty"` // GAL save id this session was resumed from
 
 	process     *claudeProcess
 	broadcaster *sseBroadcaster
 	promptFile  string // temp file for soul prompt
+	mcpConfig   string // remembered for reload
 	hub         *wsHub // for WS notifications on status change
 	mu          sync.Mutex
 }
@@ -62,12 +80,22 @@ func (s *serverSession) setStatus(status string) {
 func (s *serverSession) snapshot() map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	galID := s.GalID
+	if galID == "" {
+		galID = getGalID(s.ID)
+	}
+	tags := s.Tags
+	if tags == nil {
+		tags = []string{}
+	}
 	return map[string]any{
 		"id":                s.ID,
 		"name":              s.Name,
 		"project":           s.Project,
 		"model":             s.Model,
 		"status":            s.Status,
+		"category":          s.Category,
+		"tags":              tags,
 		"created_at":        s.CreatedAt.Format(time.RFC3339),
 		"last_active":       s.LastActive.Format(time.RFC3339),
 		"total_cost_usd":    s.TotalCost,
@@ -76,6 +104,8 @@ func (s *serverSession) snapshot() map[string]any {
 		"resumed_from":      s.ResumedFrom,
 		"stream_url":        s.StreamURL,
 		"soul_enabled":      s.SoulEnabled,
+		"chrome_enabled":    s.ChromeEnabled,
+		"gal_id":            galID,
 		"subscribers":       s.broadcaster.count(),
 		"last_event":        s.broadcaster.lastEventAt(),
 		"idle_seconds":      s.broadcaster.idleSeconds(),
@@ -108,12 +138,51 @@ func newSessionManager(maxSessions int, idleTimeout, maxLifetime time.Duration) 
 	return sm
 }
 
+// sessionCreateOpts holds options for creating a new session.
+type sessionCreateOpts struct {
+	Name     string
+	Project  string
+	Model    string
+	Soul     bool
+	MCP      string
+	GalID    string
+	Category string   // interactive, heartbeat, cron, evolve (default: interactive)
+	Tags     []string // freeform labels
+}
+
 // createSession spawns a new Claude Code session.
-func (sm *sessionManager) createSession(name, project, model string, soulEnabled bool, mcpConfig string) (*serverSession, error) {
+func (sm *sessionManager) createSession(name, project, model string, soulEnabled bool, mcpConfig string, galID string) (*serverSession, error) {
+	return sm.createSessionWithOpts(sessionCreateOpts{
+		Name:     name,
+		Project:  project,
+		Model:    model,
+		Soul:     soulEnabled,
+		MCP:      mcpConfig,
+		GalID:    galID,
+		Category: CategoryInteractive,
+	})
+}
+
+// createSessionWithOpts spawns a new Claude Code session with full options.
+func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*serverSession, error) {
+	category := opts.Category
+	if category == "" {
+		category = CategoryInteractive
+	}
+
+	// Only count interactive sessions toward maxSessions limit
 	sm.mu.Lock()
-	if len(sm.sessions) >= sm.maxSessions {
-		sm.mu.Unlock()
-		return nil, fmt.Errorf("max sessions reached (%d)", sm.maxSessions)
+	if !isEphemeralCategory(category) {
+		interactiveCount := 0
+		for _, s := range sm.sessions {
+			if !isEphemeralCategory(s.Category) {
+				interactiveCount++
+			}
+		}
+		if interactiveCount >= sm.maxSessions {
+			sm.mu.Unlock()
+			return nil, fmt.Errorf("max interactive sessions reached (%d)", sm.maxSessions)
+		}
 	}
 	sm.mu.Unlock()
 
@@ -124,23 +193,40 @@ func (sm *sessionManager) createSession(name, project, model string, soulEnabled
 	bc.hub = sm.hub
 	bc.sessionID = id
 
+	tags := opts.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+
 	sess := &serverSession{
 		ID:          id,
-		Name:        name,
-		Project:     project,
-		Model:       model,
+		Name:        opts.Name,
+		Project:     opts.Project,
+		Model:       opts.Model,
 		Status:      "starting",
+		Category:    category,
+		Tags:        tags,
 		CreatedAt:   now,
 		LastActive:  now,
-		SoulEnabled: soulEnabled,
+		SoulEnabled: opts.Soul,
 		StreamURL:   fmt.Sprintf("/api/sessions/%s/stream", id),
+		mcpConfig:   opts.MCP,
 		broadcaster: bc,
 		hub:         sm.hub,
+		GalID:       opts.GalID,
+	}
+
+	// Load GAL save for resume if provided
+	if opts.GalID != "" {
+		galPath := filepath.Join(workspace, "memory", "gal", opts.GalID+".json")
+		if data, err := os.ReadFile(galPath); err == nil {
+			galContext = string(data)
+		}
 	}
 
 	// Build soul prompt if enabled
 	var promptFile string
-	if soulEnabled {
+	if opts.Soul {
 		initSessionDir()
 		result := buildPrompt()
 		writePrompt(result)
@@ -149,21 +235,24 @@ func (sm *sessionManager) createSession(name, project, model string, soulEnabled
 	}
 
 	// Spawn Claude Code process
-	opts := sessionOpts{
-		WorkDir:          project,
+	spawnOpts := sessionOpts{
+		WorkDir:          opts.Project,
 		SystemPromptFile: promptFile,
-		Model:            model,
-		MCPConfig:        mcpConfig,
+		Model:            opts.Model,
+		MCPConfig:        opts.MCP,
 	}
-	proc, err := spawnClaude(opts)
+	proc, err := spawnClaude(spawnOpts)
 	if err != nil {
 		return nil, fmt.Errorf("spawn claude: %w", err)
 	}
 	sess.process = proc
 	sess.setStatus("running")
 
-	// Register in server DB
-	ensureServerSession(id, name)
+	// Register in server DB with category and tags
+	ensureServerSessionFull(id, opts.Name, category, opts.Tags)
+	if opts.GalID != "" {
+		setGalID(id, opts.GalID)
+	}
 
 	// Start stdout → SSE/WS bridge
 	go bridgeStdout(proc, sess.broadcaster,
@@ -174,6 +263,8 @@ func (sm *sessionManager) createSession(name, project, model string, soulEnabled
 				sess.mu.Lock()
 				sess.ClaudeSID = init.SessionID
 				sess.mu.Unlock()
+				// Record Claude session ID → weiran session mapping for history lookup
+				setClaudeSessionID(sess.ID, init.SessionID)
 				// Read Claude Code's session name (slug like "distributed-munching-kitten")
 				if ccName := readClaudeSessionName(init.SessionID); ccName != "" {
 					sess.mu.Lock()
@@ -205,7 +296,26 @@ func (sm *sessionManager) createSession(name, project, model string, soulEnabled
 				sess.mu.Unlock()
 				sess.setStatus(newStatus)
 
-				// Track user turns for auto-rename
+				// Sync session name from Claude Code metadata.
+				// CC may rename sessions multiple times as conversation evolves,
+				// so keep syncing as long as the user hasn't manually renamed.
+				sess.mu.Lock()
+				claudeSID := sess.ClaudeSID
+				currentName := sess.Name
+				sess.mu.Unlock()
+				if claudeSID != "" && !isManuallyRenamed(sess.ID) {
+					if ccName := readClaudeSessionName(claudeSID); ccName != "" && ccName != currentName {
+						sess.mu.Lock()
+						sess.Name = ccName
+						sess.mu.Unlock()
+						markAutoNamed(sess.ID, ccName)
+						if sess.hub != nil {
+							sess.hub.notifySessions()
+						}
+					}
+				}
+
+				// Track user turns for auto-rename (fallback if CC doesn't name it)
 				if result.NumTurns > 0 {
 					turns, renamed := incrementUserTurns(sess.ID)
 					if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
@@ -269,6 +379,120 @@ func (sm *sessionManager) listSessions() []map[string]any {
 	return list
 }
 
+// setChrome reloads a session's underlying claude process with --chrome
+// toggled on/off. The serverSession (broadcaster, history, name, etc.) is
+// preserved across the reload — only the subprocess is swapped.
+func (sm *sessionManager) setChrome(id string, enabled bool) error {
+	sess := sm.getSession(id)
+	if sess == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	sess.mu.Lock()
+	if sess.ChromeEnabled == enabled && sess.process != nil && sess.process.alive() {
+		sess.mu.Unlock()
+		return nil // no-op
+	}
+	oldProc := sess.process
+	opts := sessionOpts{
+		WorkDir:          sess.Project,
+		SystemPromptFile: sess.promptFile,
+		Model:            sess.Model,
+		MCPConfig:        sess.mcpConfig,
+		Chrome:           enabled,
+	}
+	sess.mu.Unlock()
+
+	// Mark the old process so its bridgeStdout doesn't broadcast a "close"
+	// SSE event when it exits — this is an intentional reload.
+	if oldProc != nil {
+		oldProc.suppressClose.Store(true)
+		if oldProc.alive() {
+			oldProc.shutdown()
+		}
+	}
+
+	sess.setStatus("starting")
+
+	// Spawn replacement
+	newProc, err := spawnClaude(opts)
+	if err != nil {
+		sess.setStatus("error")
+		return fmt.Errorf("respawn claude: %w", err)
+	}
+
+	sess.mu.Lock()
+	sess.process = newProc
+	sess.ChromeEnabled = enabled
+	// Reset Claude session ID — the new subprocess will report its own.
+	sess.ClaudeSID = ""
+	sess.mu.Unlock()
+
+	setChromeEnabled(id, enabled)
+	sess.setStatus("running")
+
+	// Re-attach stdout bridge with the same callbacks as createSession.
+	go bridgeStdout(newProc, sess.broadcaster,
+		func(raw json.RawMessage) {
+			var init InitMessage
+			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
+				sess.mu.Lock()
+				sess.ClaudeSID = init.SessionID
+				sess.mu.Unlock()
+			}
+		},
+		func(raw json.RawMessage) {
+			var result ResultMessage
+			if json.Unmarshal(raw, &result) == nil {
+				sess.mu.Lock()
+				sess.TotalCost += result.TotalCostUSD
+				sess.NumTurns += result.NumTurns
+				if result.SessionID != "" {
+					sess.ClaudeSID = result.SessionID
+				}
+				newStatus := "idle"
+				if result.Subtype == "error" {
+					newStatus = "error"
+				}
+				sess.mu.Unlock()
+				sess.setStatus(newStatus)
+			}
+			sess.touch()
+		})
+
+	// Watch for process exit
+	go func() {
+		<-newProc.done
+		sess.mu.Lock()
+		alreadyStopped := sess.Status == "stopped"
+		sess.mu.Unlock()
+		if alreadyStopped {
+			return
+		}
+		if newProc.exitCode != 0 {
+			sess.setStatus("error")
+		} else {
+			sess.setStatus("stopped")
+		}
+	}()
+
+	// Drain stderr
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := newProc.stderr.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	if sm.hub != nil {
+		sm.hub.notifySessions()
+	}
+	fmt.Fprintf(os.Stderr, "[%s] server: session %s chrome=%v reloaded\n", appName, shortID(id), enabled)
+	return nil
+}
+
 // destroySession gracefully shuts down and removes a session.
 func (sm *sessionManager) destroySession(id string) error {
 	sm.mu.Lock()
@@ -289,6 +513,9 @@ func (sm *sessionManager) destroySession(id string) error {
 	if sess.promptFile != "" {
 		os.Remove(sess.promptFile)
 	}
+
+	// Clean up persistent per-session state (chrome flag, rename meta, etc.)
+	clearSessionRow(id)
 
 	if sm.hub != nil {
 		sm.hub.notifySessions()
@@ -337,8 +564,16 @@ func (sm *sessionManager) reap() {
 		idle := now.Sub(sess.LastActive) > sm.idleTimeout
 		expired := now.Sub(sess.CreatedAt) > sm.maxLifetime
 		dead := sess.process != nil && !sess.process.alive()
+		category := sess.Category
 		sess.mu.Unlock()
 
+		// Ephemeral sessions (heartbeat/cron/evolve): destroy as soon as process exits
+		if isEphemeralCategory(category) && dead {
+			toDestroy = append(toDestroy, id)
+			continue
+		}
+
+		// Interactive sessions: normal TTL rules
 		if idle || expired || dead {
 			toDestroy = append(toDestroy, id)
 		}
@@ -357,20 +592,28 @@ func (sm *sessionManager) reap() {
 // If a session resuming the same Claude session ID is already active, return it.
 func (sm *sessionManager) resumeSession(sessionID, message, displayName string) (*serverSession, error) {
 	sm.mu.Lock()
-	// Dedup: check if already resumed (by ClaudeSID or ResumedFrom)
+	// Dedup: check if already resumed (by ClaudeSID or ResumedFrom), only if alive
 	for _, s := range sm.sessions {
 		s.mu.Lock()
 		cid := s.ClaudeSID
 		rfrom := s.ResumedFrom
+		alive := s.process != nil && s.process.alive()
 		s.mu.Unlock()
-		if cid == sessionID || rfrom == sessionID {
+		if alive && (cid == sessionID || rfrom == sessionID) {
 			sm.mu.Unlock()
 			return s, nil
 		}
 	}
-	if len(sm.sessions) >= sm.maxSessions {
+	// Only count interactive sessions toward maxSessions
+	interactiveCount := 0
+	for _, s := range sm.sessions {
+		if !isEphemeralCategory(s.Category) {
+			interactiveCount++
+		}
+	}
+	if interactiveCount >= sm.maxSessions {
 		sm.mu.Unlock()
-		return nil, fmt.Errorf("max sessions reached (%d)", sm.maxSessions)
+		return nil, fmt.Errorf("max interactive sessions reached (%d)", sm.maxSessions)
 	}
 	sm.mu.Unlock()
 
@@ -391,6 +634,7 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName string) 
 		ResumedFrom: sessionID,
 		Project:     workspace,
 		Status:      "starting",
+		Category:    CategoryInteractive,
 		CreatedAt:   now,
 		LastActive:  now,
 		SoulEnabled: true,
@@ -498,6 +742,24 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName string) 
 				}
 				sess.mu.Unlock()
 				sess.setStatus(newStatus)
+
+				// Sync session name from Claude Code metadata as long as the
+				// user hasn't manually renamed the session.
+				sess.mu.Lock()
+				claudeSID := sess.ClaudeSID
+				currentName := sess.Name
+				sess.mu.Unlock()
+				if claudeSID != "" && !isManuallyRenamed(sess.ID) {
+					if ccName := readClaudeSessionName(claudeSID); ccName != "" && ccName != currentName {
+						sess.mu.Lock()
+						sess.Name = ccName
+						sess.mu.Unlock()
+						markAutoNamed(sess.ID, ccName)
+						if sess.hub != nil {
+							sess.hub.notifySessions()
+						}
+					}
+				}
 
 				if res.NumTurns > 0 {
 					turns, renamed := incrementUserTurns(sess.ID)

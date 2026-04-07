@@ -28,6 +28,29 @@ type buildPromptResult struct {
 	sections []promptSection
 }
 
+// handlePrompt prints the full assembled system prompt to stdout with section stats on stderr.
+func handlePrompt() {
+	result := buildPrompt()
+
+	// Print prompt content to stdout
+	fmt.Print(result.content)
+
+	// Print section breakdown to stderr
+	totalTokens := estimateTokens(result.content)
+	fmt.Fprintf(os.Stderr, "\n--- prompt stats ---\n")
+	fmt.Fprintf(os.Stderr, "total: ~%dk tokens (%d chars)\n", totalTokens/1000, len(result.content))
+	if len(result.sections) > 0 {
+		for _, s := range result.sections {
+			pct := 0
+			if totalTokens > 0 {
+				pct = s.tokens * 100 / totalTokens
+			}
+			bar := strings.Repeat("█", pct/5)
+			fmt.Fprintf(os.Stderr, "  %-16s %5dk  %2d%%  %s\n", s.name, s.tokens/1000, pct, bar)
+		}
+	}
+}
+
 // ── Prompt assembly ──
 
 func buildPrompt() buildPromptResult {
@@ -35,9 +58,18 @@ func buildPrompt() buildPromptResult {
 	var b strings.Builder
 
 	// Boot protocol: prefer workspace/BOOT.md, fallback to built-in default
+	secStart := b.Len()
 	bootContent := loadBootProtocol()
 	b.WriteString(bootContent)
 	b.WriteString("\n")
+	sections = append(sections, promptSection{name: "BOOT.md", tokens: estimateTokens(b.String()[secStart:])})
+
+	// CORE.md: read-only rules defined by Kiyor (loaded before soul files)
+	if content, ok := loadFileWithBudget(filepath.Join(workspace, "CORE.md"), maxBootstrapFileChars); ok {
+		secStart = b.Len()
+		fmt.Fprintf(&b, "\n# === CORE.md (read-only, do not modify) ===\n\n%s\n", content)
+		sections = append(sections, promptSection{name: "CORE.md", tokens: estimateTokens(b.String()[secStart:])})
+	}
 
 	// Core identity files (with per-file truncation)
 	totalChars := 0
@@ -66,12 +98,72 @@ func buildPrompt() buildPromptResult {
 		}
 	}
 
-	// Today + yesterday daily notes
+	// Feedback memories (high-priority behavioral rules from memory/topics/feedback_*.md)
+	// Uses frontmatter name+description for concise one-liners; full details in the files.
+	feedbackDir := filepath.Join(workspace, "memory", "topics")
+	if entries, err := os.ReadDir(feedbackDir); err == nil {
+		var feedbackBuf strings.Builder
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasPrefix(e.Name(), "feedback_") || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			content, ok := loadFileWithBudget(filepath.Join(feedbackDir, e.Name()), 2000)
+			if !ok {
+				continue
+			}
+			name, desc := parseFeedbackFrontmatter(content)
+			if name == "" && desc == "" {
+				continue
+			}
+			if desc != "" {
+				feedbackBuf.WriteString(fmt.Sprintf("- **%s**: %s\n", name, desc))
+			} else {
+				feedbackBuf.WriteString(fmt.Sprintf("- **%s**\n", name))
+			}
+		}
+		if feedbackBuf.Len() > 0 {
+			secStart := b.Len()
+			fmt.Fprintf(&b, "\n# === Feedback (behavioral rules) ===\n\nHigh-priority rules from past corrections. Details in `memory/topics/feedback_*.md`.\n\n%s\n", feedbackBuf.String())
+			sections = append(sections, promptSection{name: "Feedback", tokens: estimateTokens(b.String()[secStart:])})
+		}
+	}
+
+	// ── Dynamic boundary ──
+	// Everything above (BOOT + SOUL + IDENTITY + USER + AGENTS + TOOLS + MEMORY.md)
+	// is static across sessions and changes infrequently.
+	// Everything below (daily notes, TG context, CC sessions, skills, projects)
+	// is dynamic and changes every session/turn.
+	// This boundary mirrors Claude Code's SYSTEM_PROMPT_DYNAMIC_BOUNDARY concept.
+	// Future optimization: split into two --append-system-prompt-file calls
+	// so the static portion benefits from API prompt caching.
+	b.WriteString("\n# ── 以下为动态内容（每次 session 重新计算）──\n")
+
+	// Current time so the agent knows what time of day it is
+	now := time.Now()
+	fmt.Fprintf(&b, "\n> **Current time**: %s (%s)\n", now.Format("2006-01-02 15:04 MST"), now.Weekday())
+
+	// Launch directory: where the user ran weiran from (before chdir to workspace)
+	if launchDir != "" && launchDir != workspace {
+		fmt.Fprintf(&b, "\n> **Launch directory**: `%s` — the user launched you from this directory, which may indicate their current project of interest.\n", launchDir)
+	}
+
+	// GAL resume context: injected when session is created with gal_id
+	if galContext != "" {
+		secStart := b.Len()
+		fmt.Fprintf(&b, "\n# === GAL Resume Context ===\n\n")
+		fmt.Fprintf(&b, "A GAL (visual novel) save has been loaded for this session. Read the save data below, then offer to resume from the bookmark or start a new playthrough. Use the interactive components (weiran-choices, weiran-gallery, etc.) to continue the story. Refer to `/gal` skill (skills/gal/SKILL.md) for narrative rules.\n\n")
+		fmt.Fprintf(&b, "```json\n%s\n```\n", galContext)
+		sections = append(sections, promptSection{name: "GAL context", tokens: estimateTokens(b.String()[secStart:])})
+		galContext = "" // clear after use
+	}
+
+	// Today + yesterday daily notes (tail-first: newest content preserved on truncation)
 	today := time.Now().Format("2006-01-02")
 	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	dailyBudget := 15000 // per-file budget for daily notes (less than general maxBootstrapFileChars)
 	for _, day := range []string{today, yesterday} {
 		p := filepath.Join(workspace, "memory", day+".md")
-		content, ok := loadFileWithBudget(p, maxBootstrapFileChars)
+		content, ok := loadFileTailWithBudget(p, dailyBudget)
 		if !ok {
 			continue
 		}
@@ -190,6 +282,36 @@ func loadFileWithBudget(path string, maxChars int) (string, bool) {
 	}
 	warning := fmt.Sprintf("\n\n⚠️ [file truncated: original %d chars, showing first %d]\n", len(content), len(truncated))
 	return truncated + warning, true
+}
+
+// parseFeedbackFrontmatter extracts name and description from a feedback memory file's YAML frontmatter.
+func parseFeedbackFrontmatter(content string) (name, desc string) {
+	fm := parseMdFrontmatter(content)
+	if fm == nil {
+		return "", ""
+	}
+	return fm["name"], fm["description"]
+}
+
+// loadFileTailWithBudget reads a file, keeping the TAIL (most recent content) within maxChars.
+// For chronological files like daily notes, the newest entries are at the bottom.
+func loadFileTailWithBudget(path string, maxChars int) (string, bool) {
+	data, err := safeReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	content := string(data)
+	if len(content) <= maxChars {
+		return content, true
+	}
+	// Keep the tail, try to cut at a newline boundary
+	start := len(content) - maxChars
+	tail := content[start:]
+	if idx := strings.Index(tail, "\n"); idx >= 0 && idx < maxChars/4 {
+		tail = tail[idx+1:]
+	}
+	warning := fmt.Sprintf("⚠️ [showing last %d of %d chars — older content trimmed]\n\n", len(tail), len(content))
+	return warning + tail, true
 }
 
 // ── Telegram conversation history ──
@@ -361,8 +483,27 @@ func buildTelegramContext(tokenBudget int) (string, string) {
 		}
 
 		// Filter out too short or meaningless
-		if len(strings.TrimSpace(text)) < 2 {
+		trimmed := strings.TrimSpace(text)
+		if len(trimmed) < 2 {
 			continue
+		}
+
+		// Skip assistant NO_REPLY placeholder messages
+		if role == "assistant" && trimmed == "NO_REPLY" {
+			continue
+		}
+
+		// Strip Sender metadata block from user messages (OpenClaw injects these)
+		if role == "user" && strings.Contains(text, "Sender (untrusted metadata)") {
+			// Find the actual user message after the metadata JSON block
+			parts := strings.Split(text, "```")
+			if len(parts) >= 3 {
+				// Content after the closing ``` of the JSON block
+				after := strings.TrimSpace(parts[len(parts)-1])
+				if after != "" {
+					text = after
+				}
+			}
 		}
 
 		msgs = append(msgs, chatMsg{role: role, text: text})
@@ -497,12 +638,12 @@ func buildCCSessionContext(n int, charBudget int) string {
 		if isOwnSession(s.path) {
 			continue
 		}
-		// Skip too small sessions (< 2KB, usually tests or single messages)
+		// Skip small sessions (< 10KB, usually tests or single-message sessions)
 		info, err := os.Stat(s.path)
 		if err != nil {
 			continue
 		}
-		if info.Size() < 2048 {
+		if info.Size() < 10240 {
 			continue
 		}
 		picked = append(picked, s)
@@ -521,17 +662,17 @@ func buildCCSessionContext(n int, charBudget int) string {
 			s.title = title
 		}
 
+		// Skip sessions with fewer than 2 user messages (likely tests)
+		if len(userPrompts) < 2 {
+			continue
+		}
+
 		header := fmt.Sprintf("### %s", shortID(s.id))
 		if s.title != "" {
 			header += " — " + s.title
 		}
 		header += fmt.Sprintf(" (%s, %s)", s.project, s.modTime.Format("01-02 15:04"))
 		out.WriteString(header + "\n")
-
-		if len(userPrompts) == 0 {
-			out.WriteString("_(no user messages)_\n\n")
-			continue
-		}
 
 		totalChars := 0
 		for i, p := range userPrompts {
@@ -544,8 +685,8 @@ func buildCCSessionContext(n int, charBudget int) string {
 			if len(text) > remaining {
 				text = text[:remaining] + "…"
 			}
-			if len(text) > 300 {
-				text = text[:300] + "…"
+			if len(text) > 500 {
+				text = text[:500] + "…"
 			}
 			out.WriteString("- " + strings.ReplaceAll(text, "\n", " ") + "\n")
 			totalChars += len(text)
@@ -594,9 +735,16 @@ func extractCCSessionUserPrompts(path string, _ int) (string, []string) {
 		if ev.Type == "user" && ev.Message.Role == "user" {
 			text := extractText(ev.Message.Content)
 			text = strings.TrimSpace(text)
-			if text != "" {
-				prompts = append(prompts, text)
+			if text == "" {
+				continue
 			}
+			// Skip tool execution results and terminal context (JMS/automation noise)
+			if strings.HasPrefix(text, "Tool execution results:") ||
+				strings.HasPrefix(text, "Terminal context") ||
+				strings.HasPrefix(text, "System:") {
+				continue
+			}
+			prompts = append(prompts, text)
 		}
 	}
 

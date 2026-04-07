@@ -180,6 +180,11 @@ func serveSSE(w http.ResponseWriter, r *http.Request, broadcaster *sseBroadcaste
 // Blocks until the process stdout is closed.
 func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage)) {
 	proc.readLines(func(msgType string, raw json.RawMessage) {
+		// Route control_response to sync waiters
+		if msgType == "control_response" {
+			proc.deliverResponse(raw)
+		}
+
 		event := mapEventType(msgType, raw)
 		broadcaster.broadcast(sseEvent{Event: event, Data: raw})
 
@@ -196,11 +201,14 @@ func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(
 		}
 	})
 
-	// Process exited — notify subscribers
-	broadcaster.broadcast(sseEvent{
-		Event: "close",
-		Data:  []byte(`{"reason":"process_exited"}`),
-	})
+	// Process exited — notify subscribers, unless this exit was an
+	// intentional reload (e.g. chrome toggle).
+	if !proc.suppressClose.Load() {
+		broadcaster.broadcast(sseEvent{
+			Event: "close",
+			Data:  []byte(`{"reason":"process_exited"}`),
+		})
+	}
 }
 
 // mapEventType maps stream-json type to SSE event name.
