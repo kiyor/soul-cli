@@ -20,8 +20,8 @@ func TestHeartbeatTask(t *testing.T) {
 	if !strings.Contains(task, "heartbeat patrol") {
 		t.Error("missing 'heartbeat patrol' in task text")
 	}
-	if !strings.Contains(task, "jira-cli checkin main") {
-		t.Error("missing jira checkin instruction")
+	if !strings.Contains(task, "HEARTBEAT.md") {
+		t.Error("missing HEARTBEAT.md reference")
 	}
 	if !strings.Contains(task, "report.txt") {
 		t.Error("missing report file instruction")

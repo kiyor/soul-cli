@@ -85,7 +85,18 @@ func setClaudeSessionID(sessionID, claudeSID string) {
 		claudeSID, time.Now().Format(time.RFC3339), sessionID)
 }
 
-// getSessionCategory returns the category for a session by its Claude session ID.
+// getSessionCategory returns the category for a session by its weiran session ID or Claude session ID.
+func getSessionCategory(id string) string {
+	db, err := openServerDB()
+	if err != nil {
+		return ""
+	}
+	var cat string
+	db.QueryRow(`SELECT category FROM server_sessions WHERE session_id=? OR claude_session_id=?`, id, id).Scan(&cat)
+	return cat
+}
+
+// getSessionCategoryByClaudeSID returns the category for a session by its Claude session ID.
 func getSessionCategoryByClaudeSID(claudeSID string) string {
 	db, err := openServerDB()
 	if err != nil {

@@ -1,5 +1,70 @@
 # Changelog
 
+## v1.9.0
+
+### Spawn System
+
+- **`weiran spawn <agent> "task"`**: Dispatch tasks to other agents asynchronously, with `--wait` for synchronous mode
+- **`weiran spawn list`**: Show running/recent spawn processes
+- **Per-agent mutex**: Prevents concurrent spawns for the same agent (checks PID liveness, auto-marks stale as failed)
+- **DB persistence**: `spawns` table tracks agent, task, PID, exit code, duration, output tail
+- **Model passthrough**: Spawned agents use model from config.json (not hardcoded Opus)
+- **TG notifications**: Completion/failure notifications with duration sent via Telegram
+
+### Telegram Bridge
+
+- **Native Telegram bot integration**: `pkg/im/telegram.go` — pure Go Telegram Bot API client with long-polling
+- **`server_telegram.go`**: Bridges Telegram DM to Claude Code sessions — persistent per-chat sessions with auto-resume
+- **Per-session environment override**: Telegram sessions get Telegram-specific prompt (concise messaging, photo handling, component conversion)
+- **Photo support**: User photos downloaded locally, path injected as `[User sent a photo: /tmp/tg-photo-xxx.jpg]`
+- **Message edit debounce**: 800ms debounce to avoid Telegram rate limits on streaming edits
+- **Summary generation**: Auto-generates conversation summaries every 20 turns, stored in `memory/telegram/`
+- **Allowed chat ID filtering**: Config-based whitelist for Telegram chat access
+
+### Sniff Proxy (API Traffic Inspector)
+
+- **`server_proxy.go`**: Transparent reverse proxy for Anthropic API — captures rate-limit headers, token usage, request/response metadata
+- **Usage dashboard**: Real-time input/output token tracking with timeline visualization and "now" indicator
+- **Request log**: Paginated, filterable request history (model, status, tokens, duration)
+- **`ANTHROPIC_BASE_URL` injection**: `injectProxyEnv` automatically routes Claude Code through the sniff proxy
+- **Config**: `server.proxy.enabled/port/upstream` in config.json
+
+### Heartbeat Delegation
+
+- **`delegateToServer`**: Heartbeat cron detects running server and delegates via `POST /api/wake` instead of spawning a subprocess — fixes session category misclassification
+- **Conflict handling**: Returns 409 if heartbeat session already running, cron gracefully skips
+
+### File Upload
+
+- **Multipart upload API**: `POST /api/sessions/{id}/upload` — 32MB max, saves to `workspace/uploads/`
+- **Web UI**: Drag-drop, paste, and button upload with thumbnail preview
+- **Static file serving**: `/uploads/` route serves uploaded files
+- **Unique filenames**: Crypto-random hex prefix prevents collisions
+
+### Prompt System
+
+- **Conditional HEARTBEAT.md**: Only injected in heartbeat/cron modes, not interactive/server sessions (reduces noise)
+- **`injectServerModeContext2`**: Per-session environment override for Telegram vs Web UI context
+
+### Database & Concurrency
+
+- **SQLite WAL mode**: `PRAGMA journal_mode=WAL` for better concurrent read/write
+- **Busy timeout**: `PRAGMA busy_timeout=5000` — wait 5s for lock instead of failing
+- **`session_agents` table**: Maps Claude session IDs to agent identities
+- **`spawns` table**: Persistent spawn process tracking
+
+### Notify
+
+- **`--dry-run` flag**: `weiran notify --dry-run` and `weiran notify-photo --dry-run` preview without sending
+
+### Web UI
+
+- **Sniff panel**: Usage stats + request log as a new tab alongside sessions
+- **Upload button**: Paperclip icon in chat input, with thumbnail preview strip
+- **CWD badge**: Shows session working directory
+- **Hash routing**: `#/usage`, `#/logs` deep links
+- **Fix**: Chat input no longer disabled after closing usage/log panel
+
 ## v1.8.0
 
 ### Session Categories & Lifecycle

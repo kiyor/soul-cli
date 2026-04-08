@@ -159,6 +159,7 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 	// Filter environment: remove CLAUDECODE to prevent nested detection
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+	env = injectProxyEnv(env)
 	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()

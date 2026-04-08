@@ -20,6 +20,10 @@ func openDB() (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open DB: %w", err)
 	}
+	// WAL mode: allows concurrent readers while writing, much better for multi-process access
+	db.Exec("PRAGMA journal_mode=WAL")
+	// Busy timeout: wait up to 5s for lock instead of failing immediately
+	db.Exec("PRAGMA busy_timeout=5000")
 	schemas := []string{
 		`CREATE TABLE IF NOT EXISTS sessions (
 			path       TEXT PRIMARY KEY,
@@ -47,6 +51,28 @@ func openDB() (*sql.DB, error) {
 			session    TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS session_agents (
+			claude_session_id TEXT PRIMARY KEY,
+			agent_id          TEXT NOT NULL DEFAULT 'main',
+			agent_name        TEXT NOT NULL DEFAULT '',
+			source            TEXT NOT NULL DEFAULT '',
+			created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+		`CREATE TABLE IF NOT EXISTS spawns (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			agent       TEXT NOT NULL,
+			agent_name  TEXT NOT NULL DEFAULT '',
+			task        TEXT NOT NULL,
+			session     TEXT NOT NULL DEFAULT '',
+			pid         INTEGER NOT NULL DEFAULT 0,
+			exit_code   INTEGER DEFAULT NULL,
+			duration_s  REAL DEFAULT NULL,
+			log_path    TEXT NOT NULL DEFAULT '',
+			output_tail TEXT NOT NULL DEFAULT '',
+			status      TEXT NOT NULL DEFAULT 'running',
+			started_at  TEXT NOT NULL,
+			finished_at TEXT DEFAULT NULL
+		)`,
 	}
 	for _, s := range schemas {
 		if _, err := db.Exec(s); err != nil {
@@ -55,6 +81,50 @@ func openDB() (*sql.DB, error) {
 		}
 	}
 	return db, nil
+}
+
+// recordSessionAgent stores the agent identity for a Claude session ID.
+func recordSessionAgent(claudeSID, agentID, agentName, source string) {
+	db, err := openDB()
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	db.Exec(`INSERT OR REPLACE INTO session_agents (claude_session_id, agent_id, agent_name, source, created_at) VALUES (?, ?, ?, ?, ?)`,
+		claudeSID, agentID, agentName, source, time.Now().Format(time.RFC3339))
+}
+
+// getSessionAgent returns the agent ID for a Claude session ID, or "" if unknown.
+func getSessionAgent(claudeSID string) string {
+	db, err := openDB()
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	var agent string
+	db.QueryRow(`SELECT agent_id FROM session_agents WHERE claude_session_id=?`, claudeSID).Scan(&agent)
+	return agent
+}
+
+// loadSpawnAgentMap returns a map of session_name → agent_id from the spawns table.
+func loadSpawnAgentMap() map[string]string {
+	db, err := openDB()
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT session, agent FROM spawns`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	m := make(map[string]string)
+	for rows.Next() {
+		var session, agent string
+		rows.Scan(&session, &agent)
+		m[session] = agent
+	}
+	return m
 }
 
 func fileHash(path string) (string, int64) {

@@ -73,7 +73,7 @@ func execClaude(args []string) {
 	}
 
 	argv := append([]string{"claude"}, args...)
-	env := os.Environ()
+	env := injectProxyEnv(os.Environ())
 
 	if err := syscall.Exec(bin, argv, env); err != nil {
 		fmt.Fprintf(os.Stderr, "["+appName+"] exec failed: %v\n", err)
@@ -103,7 +103,7 @@ func runClaude(args []string) int {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
+	cmd.Env = injectProxyEnv(os.Environ())
 
 	// timeout protection: set timeout for cron/heartbeat modes
 	timeout := cronTimeout()

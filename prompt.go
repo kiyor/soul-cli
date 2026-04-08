@@ -98,6 +98,18 @@ func buildPrompt() buildPromptResult {
 		}
 	}
 
+	// Heartbeat rules — only injected in heartbeat/cron modes, not interactive/server
+	if includeHeartbeat {
+		if content, ok := loadFileWithBudget(filepath.Join(workspace, "HEARTBEAT.md"), 4000); ok {
+			if totalChars+len(content) <= maxBootstrapTotalChars {
+				totalChars += len(content)
+				secStart := b.Len()
+				fmt.Fprintf(&b, "\n# === HEARTBEAT.md ===\n\n%s\n", content)
+				sections = append(sections, promptSection{name: "HEARTBEAT.md", tokens: estimateTokens(b.String()[secStart:])})
+			}
+		}
+	}
+
 	// Feedback memories (high-priority behavioral rules from memory/topics/feedback_*.md)
 	// Uses frontmatter name+description for concise one-liners; full details in the files.
 	feedbackDir := filepath.Join(workspace, "memory", "topics")
@@ -824,13 +836,37 @@ func loadBootProtocol() string {
 	}
 	content := string(data)
 
-	// In server mode, replace the environment section to indicate Web UI context
-	if isServerMode {
+	// Per-session environment override takes priority (e.g. Telegram mode)
+	if sessionEnvOverride != "" {
+		content = injectServerModeContext2(content, sessionEnvOverride)
+	} else if isServerMode {
 		content = injectServerModeContext(content)
 	}
 
 	return content + "\n---\n\n"
 }
+
+// sessionEnvOverride, when non-empty, replaces the environment section in BOOT.md.
+// Set by createSessionWithOpts for per-session overrides (e.g. Telegram mode).
+var sessionEnvOverride string
+
+const telegramModeEnv = `## Current Environment
+
+You are running in **Weiran Server (Telegram)** mode, interacting with Kiyor via Telegram DM.
+Available: file read/write, bash, git, jira-cli, curl, weiran CLI, all local tools.
+Limited: Images delivered via Telegram sendPhoto (use selfie skill normally).
+Unavailable: IndexTTS voice, temperature control.
+
+### Telegram Specifics
+- **Keep messages concise** — Telegram is mobile-first, long walls of text are hard to read.
+- **Images**: Use ` + "`![caption](url)`" + ` markdown — the server automatically extracts these and sends via Telegram sendPhoto API. During streaming, a [caption] placeholder is shown; at turn end, the real photo is delivered.
+- **Web UI components supported**: ` + "`weiran-choices`" + `, ` + "`weiran-chips`" + `, ` + "`weiran-rating`" + `, ` + "`weiran-gallery`" + ` are automatically converted to Telegram-friendly text (numbered options, pipe-separated chips, etc.). Use them normally — especially for GAL.
+- **Markdown**: Telegram supports basic Markdown (bold, italic, code, links). No tables, no HTML.
+- **Multiple messages OK** — For complex responses, break into multiple short messages rather than one huge block.
+- **Code blocks**: Use single backticks for inline code, triple backticks for blocks. Keep them short.
+- **User photos**: When the user sends a photo, it is downloaded locally and the path is provided as ` + "`[User sent a photo: /tmp/tg-photo-xxx.jpg]`" + `. Use the Read tool to view it.
+
+Jira token is set via JIRA_TOKEN env var. Run ` + "`weiran --help`" + ` for all subcommands.`
 
 const serverModeEnv = `## Current Environment
 
@@ -864,4 +900,21 @@ func injectServerModeContext(content string) string {
 	}
 	// No section found, append
 	return content + "\n" + serverModeEnv + "\n"
+}
+
+// injectServerModeContext2 replaces the environment section with a custom override.
+func injectServerModeContext2(content, override string) string {
+	for _, marker := range []string{"## 当前环境", "## Current Environment"} {
+		idx := strings.Index(content, marker)
+		if idx < 0 {
+			continue
+		}
+		rest := content[idx+len(marker):]
+		endIdx := strings.Index(rest, "\n## ")
+		if endIdx < 0 {
+			return content[:idx] + override + "\n"
+		}
+		return content[:idx] + override + "\n" + rest[endIdx+1:]
+	}
+	return content + "\n" + override + "\n"
 }

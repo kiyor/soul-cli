@@ -103,6 +103,7 @@ func (s *serverSession) snapshot() map[string]any {
 		"claude_session_id": s.ClaudeSID,
 		"resumed_from":      s.ResumedFrom,
 		"stream_url":        s.StreamURL,
+		"agent":             "main",
 		"soul_enabled":      s.SoulEnabled,
 		"chrome_enabled":    s.ChromeEnabled,
 		"gal_id":            galID,
@@ -140,14 +141,15 @@ func newSessionManager(maxSessions int, idleTimeout, maxLifetime time.Duration) 
 
 // sessionCreateOpts holds options for creating a new session.
 type sessionCreateOpts struct {
-	Name     string
-	Project  string
-	Model    string
-	Soul     bool
-	MCP      string
-	GalID    string
-	Category string   // interactive, heartbeat, cron, evolve (default: interactive)
-	Tags     []string // freeform labels
+	Name        string
+	Project     string
+	Model       string
+	Soul        bool
+	MCP         string
+	GalID       string
+	Category    string   // interactive, heartbeat, cron, evolve, telegram (default: interactive)
+	Tags        []string // freeform labels
+	EnvOverride string   // if set, replaces the environment section in BOOT.md
 }
 
 // createSession spawns a new Claude Code session.
@@ -171,11 +173,12 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 	}
 
 	// Only count interactive sessions toward maxSessions limit
+	// Telegram, heartbeat, cron, evolve sessions bypass this limit.
 	sm.mu.Lock()
-	if !isEphemeralCategory(category) {
+	if category == CategoryInteractive {
 		interactiveCount := 0
 		for _, s := range sm.sessions {
-			if !isEphemeralCategory(s.Category) {
+			if s.Category == CategoryInteractive {
 				interactiveCount++
 			}
 		}
@@ -228,7 +231,14 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 	var promptFile string
 	if opts.Soul {
 		initSessionDir()
+		// Only inject HEARTBEAT.md for heartbeat/cron sessions
+		includeHeartbeat = opts.Category == CategoryHeartbeat || opts.Category == CategoryCron
+		// Allow per-session environment override (e.g. Telegram mode)
+		if opts.EnvOverride != "" {
+			sessionEnvOverride = opts.EnvOverride
+		}
 		result := buildPrompt()
+		sessionEnvOverride = "" // reset after use
 		writePrompt(result)
 		promptFile = promptOut
 		sess.promptFile = promptFile
@@ -265,6 +275,8 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 				sess.mu.Unlock()
 				// Record Claude session ID → weiran session mapping for history lookup
 				setClaudeSessionID(sess.ID, init.SessionID)
+				// Record agent identity for this Claude session
+				recordSessionAgent(init.SessionID, "main", appName, "server-create")
 				// Read Claude Code's session name (slug like "distributed-munching-kitten")
 				if ccName := readClaudeSessionName(init.SessionID); ccName != "" {
 					sess.mu.Lock()
@@ -517,6 +529,11 @@ func (sm *sessionManager) destroySession(id string) error {
 	// Clean up persistent per-session state (chrome flag, rename meta, etc.)
 	clearSessionRow(id)
 
+	// Clear telegram chat→session mapping if this was a TG session
+	if sess.Category == CategoryTelegram {
+		clearTGSessionMapping(id)
+	}
+
 	if sm.hub != nil {
 		sm.hub.notifySessions()
 	}
@@ -573,6 +590,14 @@ func (sm *sessionManager) reap() {
 			continue
 		}
 
+		// Telegram sessions: destroy on idle/expired but not on dead (will be recreated on next message)
+		if category == CategoryTelegram {
+			if idle || expired {
+				toDestroy = append(toDestroy, id)
+			}
+			continue
+		}
+
 		// Interactive sessions: normal TTL rules
 		if idle || expired || dead {
 			toDestroy = append(toDestroy, id)
@@ -590,7 +615,7 @@ func (sm *sessionManager) reap() {
 
 // resumeSession creates a new active session wrapping `claude --resume <sessionID>`.
 // If a session resuming the same Claude session ID is already active, return it.
-func (sm *sessionManager) resumeSession(sessionID, message, displayName string) (*serverSession, error) {
+func (sm *sessionManager) resumeSession(sessionID, message, displayName, categoryOverride string) (*serverSession, error) {
 	sm.mu.Lock()
 	// Dedup: check if already resumed (by ClaudeSID or ResumedFrom), only if alive
 	for _, s := range sm.sessions {
@@ -607,7 +632,7 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName string) 
 	// Only count interactive sessions toward maxSessions
 	interactiveCount := 0
 	for _, s := range sm.sessions {
-		if !isEphemeralCategory(s.Category) {
+		if s.Category == CategoryInteractive {
 			interactiveCount++
 		}
 	}
@@ -628,13 +653,22 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName string) 
 	bc.hub = sm.hub
 	bc.sessionID = id
 
+	// Category priority: explicit override > inherited from original session > default
+	resolvedCategory := categoryOverride
+	if resolvedCategory == "" {
+		resolvedCategory = getSessionCategory(sessionID)
+	}
+	if resolvedCategory == "" {
+		resolvedCategory = CategoryInteractive
+	}
+
 	sess := &serverSession{
 		ID:          id,
 		Name:        displayName,
 		ResumedFrom: sessionID,
 		Project:     workspace,
 		Status:      "starting",
-		Category:    CategoryInteractive,
+		Category:    resolvedCategory,
 		CreatedAt:   now,
 		LastActive:  now,
 		SoulEnabled: true,
@@ -664,6 +698,7 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName string) 
 	cmd.Dir = workspace
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+	env = injectProxyEnv(env)
 	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
@@ -713,6 +748,8 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName string) 
 				sess.mu.Lock()
 				sess.ClaudeSID = init.SessionID
 				sess.mu.Unlock()
+				// Record agent identity (resume inherits from original)
+				recordSessionAgent(init.SessionID, "main", appName, "server-resume")
 				if ccName := readClaudeSessionName(init.SessionID); ccName != "" {
 					sess.mu.Lock()
 					if sess.Name == "" || strings.HasPrefix(sess.Name, "session-") || strings.HasPrefix(sess.Name, "resume-") {

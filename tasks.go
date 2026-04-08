@@ -167,16 +167,14 @@ func evolveTask() string {
 
 // ── Heartbeat task text ──
 
-var heartbeatTemplate = template.Must(template.New("heartbeat").Parse(`Execute heartbeat patrol:
-1) jira-cli checkin main, handle urgent tickets
-2) Check key services (curl health endpoints or index pages for monitored services)
+var heartbeatTemplate = template.Must(template.New("heartbeat").Parse(`Execute heartbeat patrol — follow HEARTBEAT.md strictly, step by step.
 {{.Sessions}}
-4) **Write a report file** (auto-sends via Telegram after exit):
+**Write a report file** (auto-sends via Telegram after exit):
 ` + "```bash" + `
 cat > {{.ReportPath}} << 'RPTEOF'
 Patrol results (2-5 lines):
 - Service status
-- Jira backlog
+- Jira backlog + what was worked on
 - Anomalies (if any)
 RPTEOF
 ` + "```" + `
@@ -187,7 +185,7 @@ func heartbeatTask() string {
 	sessions := recentSessions(5)
 	sessionsPart := ""
 	if len(sessions) > 0 {
-		sessionsPart = fmt.Sprintf("3) Read recent session JSONL and update daily notes:\n%s", formatSessionList(sessions))
+		sessionsPart = fmt.Sprintf("Also read recent session JSONL and update daily notes:\n%s", formatSessionList(sessions))
 	}
 
 	data := map[string]string{

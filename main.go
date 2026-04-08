@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -70,6 +73,10 @@ var (
 
 	// Current run mode (cron/heartbeat/interactive etc.), used for metrics recording
 	currentMode string
+
+	// includeHeartbeat controls whether HEARTBEAT.md is injected into the prompt.
+	// Only set true for heartbeat/cron modes — interactive/server sessions don't need it.
+	includeHeartbeat bool
 
 	// Extra projectRoots read from config.json
 	extraProjectRoots []string
@@ -406,9 +413,12 @@ Subcommands:
   {{NAME}} clean                 clean old session temp directories under /tmp
   {{NAME}} sessions [keyword]    search sessions (fuzzy match on title/content/project)
   {{NAME}} ss [keyword]          same as above (shorthand)
+  {{NAME}} spawn <agent> "task"   dispatch task to another agent (async by default)
+  {{NAME}} spawn <agent> "task" --wait  dispatch and wait for completion
+  {{NAME}} spawn list            show running/recent spawn processes
   {{NAME}} new                   reset all Telegram direct sessions (start new conversation)
-  {{NAME}} notify <message>      send Telegram text message to user (supports Markdown)
-  {{NAME}} notify-photo <URL> [caption]  send Telegram photo to user
+  {{NAME}} notify [--dry-run] <message>      send Telegram text message to user (supports Markdown)
+  {{NAME}} notify-photo [--dry-run] <URL> [caption]  send Telegram photo to user
   {{NAME}} db recall             view sessions pending scan and instructions
   {{NAME}} db pending            JSON output of sessions pending scan
   {{NAME}} db summarized         JSON output of sessions with summaries
@@ -478,23 +488,49 @@ func main() {
 		handleSessions(extra)
 		return
 	case "notify":
-		msg := strings.Join(extra, " ")
+		dryRun := false
+		var msgParts []string
+		for _, a := range extra {
+			if a == "--dry-run" {
+				dryRun = true
+			} else {
+				msgParts = append(msgParts, a)
+			}
+		}
+		msg := strings.Join(msgParts, " ")
 		if msg == "" {
-			fmt.Fprintf(os.Stderr, "usage: %s notify <message>\n", appName)
+			fmt.Fprintf(os.Stderr, "usage: %s notify [--dry-run] <message>\n", appName)
 			os.Exit(1)
 		}
-		sendTelegram(msg)
+		if dryRun {
+			fmt.Printf("[dry-run] would send TG: %s\n", msg)
+		} else {
+			sendTelegram(msg)
+		}
 		return
 	case "notify-photo":
-		if len(extra) < 1 {
-			fmt.Fprintf(os.Stderr, "usage: %s notify-photo <image-URL> [caption]\n", appName)
+		dryRun := false
+		var photoParts []string
+		for _, a := range extra {
+			if a == "--dry-run" {
+				dryRun = true
+			} else {
+				photoParts = append(photoParts, a)
+			}
+		}
+		if len(photoParts) < 1 {
+			fmt.Fprintf(os.Stderr, "usage: %s notify-photo [--dry-run] <image-URL> [caption]\n", appName)
 			os.Exit(1)
 		}
 		caption := ""
-		if len(extra) > 1 {
-			caption = strings.Join(extra[1:], " ")
+		if len(photoParts) > 1 {
+			caption = strings.Join(photoParts[1:], " ")
 		}
-		sendTelegramPhoto(extra[0], caption)
+		if dryRun {
+			fmt.Printf("[dry-run] would send TG photo: %s (caption: %s)\n", photoParts[0], caption)
+		} else {
+			sendTelegramPhoto(photoParts[0], caption)
+		}
 		return
 	case "status":
 		handleStatus()
@@ -540,6 +576,9 @@ func main() {
 		return
 	case "new":
 		handleNew()
+		return
+	case "spawn":
+		handleSpawn(extra)
 		return
 	case "server":
 		handleServer(extra)
@@ -637,6 +676,13 @@ func main() {
 		os.Exit(exitCode)
 
 	case "heartbeat":
+		// If server is running, delegate to /api/wake instead of spawning a subprocess.
+		// This ensures heartbeat sessions get proper category in server_sessions DB.
+		if delegateToServer("heartbeat") {
+			os.Exit(0)
+		}
+
+		includeHeartbeat = true
 		mustLock()
 		defer releaseLock()
 
@@ -675,6 +721,45 @@ func main() {
 }
 
 // ── argument parsing ──
+
+// delegateToServer tries to delegate a heartbeat/cron/evolve run to the running server.
+// Returns true if the server handled it (caller should exit), false if server is not running.
+func delegateToServer(mode string) bool {
+	cfg := loadServerConfig()
+	addr := fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
+
+	var endpoint, reason string
+	switch mode {
+	case "heartbeat":
+		endpoint = "/api/wake"
+		reason = "cron-heartbeat"
+	default:
+		return false
+	}
+
+	body, _ := json.Marshal(map[string]string{"text": reason})
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(addr+endpoint, "application/json", bytes.NewReader(body))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] server not reachable, falling back to subprocess mode\n", appName)
+		return false
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusOK {
+		fmt.Fprintf(os.Stderr, "[%s] delegated %s to server: %s\n", appName, mode, string(respBody))
+		return true
+	}
+	if resp.StatusCode == http.StatusConflict {
+		// Already running — that's fine, skip this cycle
+		fmt.Fprintf(os.Stderr, "[%s] server: %s session already running, skipping\n", appName, mode)
+		return true
+	}
+
+	fmt.Fprintf(os.Stderr, "[%s] server returned %d for %s, falling back to subprocess\n", appName, resp.StatusCode, mode)
+	return false
+}
 
 func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 	mode = "interactive"
@@ -733,6 +818,10 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			return
 		case "new":
 			mode = "new"
+			return
+		case "spawn":
+			mode = "spawn"
+			extra = args[i+1:]
 			return
 		case "server":
 			mode = "server"

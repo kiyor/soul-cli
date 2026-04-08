@@ -196,6 +196,9 @@ body{
 .context-fill.warn{background:var(--warn)}
 .context-fill.danger{background:var(--bad)}
 .context-pct{font-size:9px;color:var(--muted2);font-family:var(--mono)}
+.cwd-badge{position:absolute;top:46px;right:46px;z-index:10;font-size:10px;color:var(--dim);font-family:var(--mono);background:rgba(0,0,0,.25);border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:1px 7px;backdrop-filter:blur(8px);pointer-events:none;transition:all .2s;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cwd-badge:empty{opacity:0}
+.cwd-badge::before{content:'📂 ';font-size:9px}
 
 /* Slash command dropdown */
 .slash-dropdown{
@@ -229,6 +232,39 @@ body{
 }
 .welcome h2{font-size:18px;color:var(--text);font-weight:750}
 .welcome p{font-size:13px;line-height:1.6;max-width:320px}
+
+/* Sniff Panel */
+.sniff-panel{
+  display:flex;flex-direction:column;height:100%;overflow:hidden;
+}
+.sniff-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 20px 12px;border-bottom:1px solid var(--border);flex-shrink:0;
+}
+.sniff-header h2{font-size:16px;font-weight:750;color:var(--text)}
+.sniff-content{
+  flex:1;overflow-y:auto;padding:16px 20px;
+  -webkit-overflow-scrolling:touch;
+}
+.sniff-content table{width:100%;border-collapse:collapse;font-size:12px;font-family:var(--mono)}
+.sniff-content th{text-align:left;padding:6px 8px;color:var(--muted2);font-weight:600;border-bottom:1px solid var(--border2);white-space:nowrap;position:sticky;top:0;background:var(--bg1)}
+.sniff-content td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
+.sniff-content tr.error td{color:var(--bad)}
+.sniff-content .sniff-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius2);padding:14px 16px;margin-bottom:10px}
+.sniff-content .sniff-card h3{font-size:13px;font-weight:700;color:var(--muted2);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
+.sniff-content .sniff-stat{display:flex;justify-content:space-between;padding:4px 0;font-size:13px}
+.sniff-content .sniff-stat .label{color:var(--muted)}
+.sniff-content .sniff-stat .value{font-weight:600;font-family:var(--mono)}
+.sniff-content .sniff-bar{height:6px;background:var(--bg0);border-radius:3px;margin:4px 0 2px;overflow:visible;position:relative}
+.sniff-content .sniff-bar-fill{height:100%;border-radius:3px;transition:width .3s var(--spring)}
+.sniff-content .sniff-bar .tl-now{position:absolute;top:-4px;width:2px;height:14px;background:#58a6ff;border-radius:1px;z-index:1}
+.sniff-content .sniff-bar .tl-now-label{position:absolute;top:10px;transform:translateX(-50%);color:#58a6ff;font-size:10px;font-weight:600;white-space:nowrap}
+.sniff-pager{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px 0}
+.sniff-pager button{padding:6px 14px;border-radius:8px;border:1px solid var(--border2);background:var(--bg2);color:var(--text);font-size:12px;cursor:pointer}
+.sniff-pager button:disabled{opacity:.3;cursor:default}
+.sniff-pager span{font-size:12px;color:var(--muted)}
+.sniff-filter{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.sniff-filter select,.sniff-filter input{padding:6px 10px;border-radius:8px;border:1px solid var(--border2);background:var(--bg2);color:var(--text);font-size:12px;font-family:var(--mono)}
 
 /* Messages */
 .msg{border:1px solid var(--border);background:rgba(15,22,38,.6);border-radius:var(--radius);overflow:hidden}
@@ -550,6 +586,16 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 }
 .send-btn:active{transform:scale(.9)}
 .send-btn:disabled{opacity:.4}
+.attach-btn{width:36px;height:36px;border-radius:10px;border:none;flex-shrink:0;background:transparent;color:var(--muted2);font-size:20px;cursor:pointer;display:grid;place-items:center;transition:all .15s;align-self:flex-end;margin-bottom:4px}
+.attach-btn:hover{color:var(--text);background:rgba(139,92,246,.1)}
+.upload-preview{display:flex;gap:6px;padding:6px 10px 0;flex-wrap:wrap}
+.upload-preview:empty{display:none}
+.upload-thumb{position:relative;width:64px;height:64px;border-radius:8px;overflow:hidden;border:1px solid var(--border2)}
+.upload-thumb img{width:100%;height:100%;object-fit:cover}
+.upload-thumb .remove-thumb{position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;border:none;font-size:11px;cursor:pointer;display:grid;place-items:center;line-height:1}
+.composer.drag-over .inputwrap{border-color:rgba(139,92,246,.6);box-shadow:0 0 0 3px rgba(139,92,246,.15)}
+.upload-progress{padding:4px 10px 0;font-size:11px;color:var(--muted2)}
+.upload-progress:empty{display:none}
 
 /* ── Scroll FAB ── */
 .scroll-fab{
@@ -746,12 +792,22 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
       <input id="history-search" class="search-input" type="text" placeholder="Search sessions...">
     </div>
     <div class="session-list" id="history-list" style="flex:2"></div>
+    <div class="sniff-section" id="sniff-section" style="display:none">
+      <div class="sidebar-header" style="border-top:1px solid var(--border)">
+        <h2>📊 Sniff</h2>
+      </div>
+      <div style="padding:4px 8px 6px;display:flex;gap:4px">
+        <button class="cat-chip" onclick="setHash('usage');showSniffUsage()">Usage</button>
+        <button class="cat-chip" onclick="setHash('logs');showSniffLogs()">Logs</button>
+      </div>
+    </div>
   </div>
 
   <!-- Main -->
   <div class="main" id="main">
     <div class="model-badge" id="model-badge"></div>
     <div class="context-bar hidden" id="context-bar"><div class="context-track"><div class="context-fill" id="context-fill"></div></div><span class="context-pct" id="context-pct"></span></div>
+    <div class="cwd-badge" id="cwd-badge"></div>
     <div class="content" id="content">
       <div class="welcome" id="welcome">
         <div class="wlogo" id="w-logo">W</div>
@@ -759,6 +815,13 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
         <p>Persistent Claude Code sessions.<br>Create or resume a session to start.</p>
       </div>
       <div class="wrap" id="messages" style="display:none"></div>
+      <div class="sniff-panel" id="sniff-panel" style="display:none">
+        <div class="sniff-header">
+          <h2 id="sniff-title">Usage</h2>
+          <button class="btn mini" onclick="closeSniffPanel()">✕ Close</button>
+        </div>
+        <div class="sniff-content" id="sniff-content"></div>
+      </div>
     </div>
     <button class="scroll-fab" id="scroll-fab" onclick="scrollBottom()">&#8595;</button>
     <button class="settings-btn" id="settings-btn" onclick="toggleSettingsPanel()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
@@ -797,8 +860,12 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
     <div class="composer disabled" id="composer">
       <div class="slash-dropdown" id="slash-dropdown"></div>
       <div class="inner">
+        <input type="file" id="file-input" accept="image/*" multiple hidden onchange="handleFileSelect(this.files)">
+        <button class="attach-btn" title="Attach image" onclick="document.getElementById('file-input').click()">&#128206;</button>
         <div class="inputwrap">
+          <div class="upload-preview" id="upload-preview"></div>
           <textarea id="input" placeholder="Send a message... (/ for commands)" rows="1"></textarea>
+          <div class="upload-progress" id="upload-progress"></div>
         </div>
         <button class="send-btn" id="send-btn" onclick="sendMessage()" disabled>&#9654;</button>
       </div>
@@ -891,7 +958,9 @@ let ws = null, wsRetryDelay = 1000, wsRetryTimer = null;
 let activeSessionId = null, sessions = {}, streamingMsgEl = null, streamingText = '';
 let typeBuf = '', typeRendered = '', typeRAF = null, typeLastChunk = 0;
 let showToolsMode = false, toolRunning = false;
-let currentModel = '', contextMax = 0, contextTokensPeak = 0;
+let currentModel = '', contextMax = 0, contextTokensPeak = 0, currentCwd = '';
+function shortCwd(p){if(!p)return '';const h=p.replace(/^\/Users\/[^/]+/,'~');return h.length>50?'…'+h.slice(-49):h}
+function setCwd(p){currentCwd=p||'';document.getElementById('cwd-badge').textContent=shortCwd(currentCwd)}
 let linkPreviewCache = {};
 let agentName = 'Weiran', agentAvatar = 'W';
 let pendingResumeId = null, pendingResumeName = null, pendingDestroyId = null;
@@ -1358,11 +1427,19 @@ async function initApp(){
       document.title=agentName;
     }
     if(h.version)document.getElementById('app-version').textContent=' '+h.version;
+    if(h.sniff_enabled){
+      document.getElementById('sniff-section').style.display='';
+      window._sniffEnabled=true;
+    }
   }catch(e){}
 
   connectWS();
   loadHistory();
   loadSkills();
+
+  // Handle hash routing after init
+  handleHashRoute();
+  window.addEventListener('hashchange', handleHashRoute);
 
   // History category chips
   document.querySelectorAll('#history-cats .cat-chip').forEach(btn=>{
@@ -1392,7 +1469,7 @@ async function initApp(){
   const inp=document.getElementById('input');
   inp.addEventListener('input',function(){
     autoResize(this);
-    document.getElementById('send-btn').disabled=!this.value.trim();
+    updateSendBtn();
     updateSlashDropdown();
   });
 
@@ -1586,6 +1663,7 @@ function handleSessionEvent(event,data){
       contextMax=getContextWindow(currentModel);
       updateContextBar(contextTokensPeak);
       syncSettingsDropdowns();
+      if(data.cwd)setCwd(data.cwd);
       break;
     case 'assistant':
       handleAssistant(data);
@@ -1627,6 +1705,7 @@ function selectSession(id){
   activeSessionId=id;
   document.getElementById('model-badge').textContent='';
   document.getElementById('context-bar').classList.add('hidden');
+  setCwd('');
   currentModel='';contextMax=0;contextTokensPeak=0;
 
   // Sync URL query string
@@ -1749,7 +1828,16 @@ function typewriterTick(now){
 
 function handleToolUse(data){
   finalizeStream();const msg=data.message;if(!msg||!msg.content)return;
-  msg.content.forEach(b=>{if(b.type==='tool_use')addToolUseMsg(b.name,b.input)});
+  msg.content.forEach(b=>{
+    if(b.type==='tool_use'){
+      addToolUseMsg(b.name,b.input);
+      // Track cwd changes from Bash cd commands
+      if(b.name==='Bash'&&b.input&&typeof b.input.command==='string'){
+        const m=b.input.command.match(/^\s*cd\s+("[^"]+"|'[^']+'|\S+)/);
+        if(m){let d=m[1].replace(/^['"]|['"]$/g,'');if(d.startsWith('~'))d='/Users/kiyor'+d.slice(1);else if(!d.startsWith('/'))d=currentCwd+'/'+d;setCwd(d)}
+      }
+    }
+  });
   if(!showToolsMode)setThinking(true);
 }
 
@@ -1911,9 +1999,22 @@ function addToolResultMsg(text){
   scrollBottomSmooth();
 }
 
+function renderUserMsg(text){
+  // Extract ![alt](url) images, render them inline; escape the rest
+  const imgRe=/!\[([^\]]*)\]\(([^)]+)\)/g;
+  const parts=[];let last=0,m;
+  while((m=imgRe.exec(text))!==null){
+    if(m.index>last)parts.push(esc(text.slice(last,m.index)));
+    parts.push(`<img src="${esc(m[2])}" alt="${esc(m[1])}" onclick="openLightbox(this.src)" loading="lazy" style="max-width:100%;border-radius:var(--radius2);cursor:pointer">`);
+    last=imgRe.lastIndex;
+  }
+  if(last<text.length)parts.push(esc(text.slice(last)));
+  return parts.join('');
+}
+
 function createMsg(type,av,name,text){
   const el=document.createElement('div');el.className='msg '+type;
-  const rendered=type==='user'?esc(text):renderMd(text);
+  const rendered=type==='user'?renderUserMsg(text):renderMd(text);
   el.innerHTML=`<div class="msghead"><div class="avatar ${type}">${esc(av)}</div><div class="who"><span class="name">${esc(name)}</span><span class="meta">${timeStr()}</span></div></div><div class="body"><div class="copy-msg"><button onclick="copyText(this)">Copy</button></div><div class="md">${rendered}</div></div>`;
   return el;
 }
@@ -1923,20 +2024,108 @@ function renderMd(text){
   try{return marked.parse(text)}catch(e){return esc(text)}
 }
 
+// ── Image Upload ──
+let pendingFiles=[];
+
+function handleFileSelect(files){
+  for(const f of files){
+    if(!f.type.startsWith('image/'))continue;
+    pendingFiles.push(f);
+    addThumb(f);
+  }
+  updateSendBtn();
+}
+
+function addThumb(file){
+  const prev=document.getElementById('upload-preview');
+  const wrap=document.createElement('div');
+  wrap.className='upload-thumb';
+  const img=document.createElement('img');
+  img.src=URL.createObjectURL(file);
+  const btn=document.createElement('button');
+  btn.className='remove-thumb';btn.textContent='×';
+  btn.onclick=()=>{
+    const idx=pendingFiles.indexOf(file);
+    if(idx>=0)pendingFiles.splice(idx,1);
+    URL.revokeObjectURL(img.src);wrap.remove();updateSendBtn();
+  };
+  wrap.append(img,btn);prev.append(wrap);
+}
+
+function updateSendBtn(){
+  const inp=document.getElementById('input');
+  document.getElementById('send-btn').disabled=!activeSessionId||(!inp.value.trim()&&!pendingFiles.length);
+}
+
+async function uploadFile(file){
+  const fd=new FormData();fd.append('file',file);
+  const r=await fetch(`/api/sessions/${activeSessionId}/upload`,{
+    method:'POST',headers:{'Authorization':'Bearer '+TOKEN},body:fd
+  });
+  if(!r.ok)throw new Error('Upload failed: '+r.status);
+  return r.json();
+}
+
+// Paste handler (images from clipboard)
+document.addEventListener('paste',e=>{
+  if(!activeSessionId)return;
+  const items=e.clipboardData?.items;
+  if(!items)return;
+  for(const item of items){
+    if(item.type.startsWith('image/')){
+      e.preventDefault();
+      const f=item.getAsFile();
+      if(f){pendingFiles.push(f);addThumb(f);updateSendBtn();}
+    }
+  }
+});
+
+// Drag-drop on composer
+(function(){
+  const comp=document.getElementById('composer');
+  if(!comp)return;
+  let dragCounter=0;
+  comp.addEventListener('dragenter',e=>{e.preventDefault();dragCounter++;comp.classList.add('drag-over')});
+  comp.addEventListener('dragleave',e=>{e.preventDefault();dragCounter--;if(dragCounter<=0){dragCounter=0;comp.classList.remove('drag-over')}});
+  comp.addEventListener('dragover',e=>e.preventDefault());
+  comp.addEventListener('drop',e=>{
+    e.preventDefault();dragCounter=0;comp.classList.remove('drag-over');
+    if(e.dataTransfer?.files)handleFileSelect(e.dataTransfer.files);
+  });
+})();
+
 // ── Send Message ──
-function sendMessage(){
+async function sendMessage(){
   const inp=document.getElementById('input');
   const text=inp.value.trim();
-  if(!text||!activeSessionId)return;
+  if((!text&&!pendingFiles.length)||!activeSessionId)return;
   inp.value='';autoResize(inp);
   document.getElementById('send-btn').disabled=true;
   document.getElementById('slash-dropdown').classList.remove('show');
   slashDropdownIdx=-1;
   // Handle built-in slash commands client-side
-  if(text.startsWith('/')&&handleSlashSend(text))return;
-  // Don't render user message here — it will come back via broadcast event
-  // This ensures messages persist when switching sessions
-  wsSend({type:'send',sid:activeSessionId,message:text});
+  if(text.startsWith('/')&&!pendingFiles.length&&handleSlashSend(text))return;
+
+  // Upload pending images first
+  let imgMarkdown='';
+  if(pendingFiles.length){
+    const prog=document.getElementById('upload-progress');
+    prog.textContent='Uploading...';
+    try{
+      const results=await Promise.all(pendingFiles.map(uploadFile));
+      imgMarkdown=results.map(r=>`![${r.original_name||'image'}](${r.url})`).join('\n');
+    }catch(e){
+      prog.textContent='Upload failed: '+e.message;
+      setTimeout(()=>{prog.textContent=''},3000);
+      return;
+    }
+    prog.textContent='';
+    pendingFiles=[];
+    document.getElementById('upload-preview').innerHTML='';
+  }
+
+  const msg=[text,imgMarkdown].filter(Boolean).join('\n');
+  wsSend({type:'send',sid:activeSessionId,message:msg});
 }
 
 // ── Create / Destroy / Resume ──
@@ -2269,7 +2458,8 @@ function fetchUsage(){
   if(!activeSessionId)return;
   if(pendingUsageRequest){addSystemMsg('Usage request already pending...');return}
   pendingUsageRequest=true;
-  addSystemMsg('Fetching context usage...');
+  addSystemMsg('Fetching usage...');
+  // Fire both requests in parallel: context usage (control request) + proxy usage (API)
   fetch(`/api/sessions/${activeSessionId}/usage`,{
     method:'POST',
     headers:{'Authorization':'Bearer '+TOKEN}
@@ -2279,6 +2469,11 @@ function fetchUsage(){
     pendingUsageRequest=false;
     addErrorMsg('Usage request failed: '+e.message);
   });
+  // Fetch proxy/subscription usage in parallel
+  fetch('/api/proxy/usage',{headers:{'Authorization':'Bearer '+TOKEN}})
+    .then(r=>r.ok?r.json():null)
+    .then(d=>{if(d)window._proxyUsage=d})
+    .catch(()=>{});
 }
 
 function handleControlResponse(data){
@@ -2303,7 +2498,7 @@ function renderUsage(r){
   const max=r.maxTokens||contextMax;
   const pct=max>0?((total/max)*100).toFixed(1):0;
 
-  let lines=[`**Context Usage: ${pct}%** (${fmtK(total)} / ${fmtK(max)} tokens)`,''];
+  let lines=[`**Context Window: ${pct}%** (${fmtK(total)} / ${fmtK(max)} tokens)`,''];
   if(cats.length){
     lines.push('| Category | Tokens | % |','|---|---|---|');
     cats.filter(c=>c.tokens>0).sort((a,b)=>b.tokens-a.tokens).forEach(c=>{
@@ -2313,17 +2508,60 @@ function renderUsage(r){
   }
   const api=r.apiUsage;
   if(api){
-    lines.push('','**API Usage:**');
+    lines.push('','**API Usage (this turn):**');
     if(api.input_tokens)lines.push(`- Input: ${fmtK(api.input_tokens)}`);
     if(api.output_tokens)lines.push(`- Output: ${fmtK(api.output_tokens)}`);
     if(api.cache_read_input_tokens)lines.push(`- Cache read: ${fmtK(api.cache_read_input_tokens)}`);
     if(api.cache_creation_input_tokens)lines.push(`- Cache creation: ${fmtK(api.cache_creation_input_tokens)}`);
   }
+
+  // Proxy usage (subscription rate limits + cumulative tokens)
+  const pu=window._proxyUsage;
+  if(pu){
+    const rl=pu.rate_limit;
+    if(rl&&(rl.five_hour_utilization>0||rl.seven_day_utilization>0)){
+      lines.push('','**Subscription Quota:**');
+      if(rl.five_hour_utilization>0){
+        const p5=(rl.five_hour_utilization*100).toFixed(1);
+        const r5=rl.five_hour_resets_at?fmtReset(rl.five_hour_resets_at):'';
+        lines.push(`- 5h session: **${p5}%**${r5?' (resets '+r5+')':''}`);
+      }
+      if(rl.seven_day_utilization>0){
+        const p7=(rl.seven_day_utilization*100).toFixed(1);
+        const r7=rl.seven_day_resets_at?fmtReset(rl.seven_day_resets_at):'';
+        lines.push(`- 7d weekly: **${p7}%**${r7?' (resets '+r7+')':''}`);
+      }
+      if(rl.status&&rl.status!=='allowed')lines.push(`- Status: ${rl.status}`);
+      if(rl.is_overage)lines.push(`- ⚠️ Using overage`);
+    }
+    const td=pu.today;
+    if(td&&td.models&&Object.keys(td.models).length>0){
+      lines.push('','**Today\'s Token Usage:**');
+      lines.push('| Model | Input | Output | Cache R | Cache W | Reqs |','|---|---|---|---|---|---|');
+      for(const[m,u]of Object.entries(td.models)){
+        const short=m.replace('claude-','').replace(/-\d{8}$/,'');
+        lines.push(`| ${short} | ${fmtK(u.input_tokens)} | ${fmtK(u.output_tokens)} | ${fmtK(u.cache_read_input_tokens)} | ${fmtK(u.cache_creation_input_tokens)} | ${u.request_count} |`);
+      }
+    }
+  }
+
   // Remove the "Fetching..." msg
   const msgs=document.getElementById('messages');
   const last=msgs.lastElementChild;
   if(last&&last.classList.contains('system-msg')&&last.textContent.includes('Fetching'))last.remove();
   addSystemMsg(lines.join('\n'),true);
+}
+function fmtReset(epoch){
+  if(!epoch)return'';
+  const d=new Date(epoch*1000);
+  const now=Date.now();
+  const diff=epoch*1000-now;
+  if(diff<=0)return'now';
+  const h=Math.floor(diff/3600000);
+  const m=Math.floor((diff%3600000)/60000);
+  if(h>24)return d.toLocaleDateString();
+  if(h>0)return`${h}h${m}m`;
+  return`${m}m`;
 }
 function fmtK(n){return n>=1000?(n/1000).toFixed(1)+'k':String(n)}
 
@@ -2577,10 +2815,235 @@ function relTime(iso){
   return Math.floor(h/24)+'d';
 }
 
+// ── Hash Routing ──
+
+function handleHashRoute(){
+  const hash=location.hash.replace('#','').replace(/^\//,'');
+  if(hash==='usage'&&window._sniffEnabled){showSniffUsage();return}
+  if(hash==='logs'&&window._sniffEnabled){showSniffLogs();return}
+}
+function setHash(h){location.hash=h}
+
+// ── Sniff Viewer ──
+
+let sniffLogPage=0,sniffLogTotal=0;
+const SNIFF_PAGE_SIZE=50;
+
+function showSniffPanel(title){
+  document.getElementById('welcome').style.display='none';
+  document.getElementById('messages').style.display='none';
+  document.getElementById('sniff-panel').style.display='flex';
+  document.getElementById('sniff-title').textContent=title;
+  document.getElementById('composer').classList.add('disabled');
+  document.getElementById('context-bar').classList.add('hidden');
+  document.getElementById('model-badge').textContent='';
+  document.getElementById('cwd-badge').textContent='';
+  if(isMobile)closeSidebar();
+}
+
+function closeSniffPanel(){
+  document.getElementById('sniff-panel').style.display='none';
+  document.getElementById('composer').classList.remove('disabled');
+  document.getElementById('welcome').style.display='';
+  if(activeSessionId){
+    document.getElementById('messages').style.display='flex';
+    document.getElementById('welcome').style.display='none';
+    document.getElementById('context-bar').classList.remove('hidden');
+  }
+  if(location.hash)history.replaceState(null,'',location.pathname+location.search);
+}
+
+function fmtTokens(n){
+  if(!n||n===0)return '0';
+  if(n>=1000000)return (n/1000000).toFixed(1)+'M';
+  if(n>=1000)return (n/1000).toFixed(1)+'k';
+  return String(n);
+}
+
+async function showSniffUsage(){
+  showSniffPanel('Usage');
+  const el=document.getElementById('sniff-content');
+  el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted2)">Loading...</div>';
+
+  try{
+    const [usageR,statsR]=await Promise.all([
+      fetch('/api/proxy/usage',{headers:{'Authorization':'Bearer '+TOKEN}}),
+      fetch('/api/proxy/stats?group=hour&days=1',{headers:{'Authorization':'Bearer '+TOKEN}})
+    ]);
+    const usage=await usageR.json();
+    const statsData=await statsR.json();
+    let html='';
+
+    // Rate limit card
+    const rl=usage.rate_limit;
+    if(rl&&(rl.five_hour_utilization>0||rl.seven_day_utilization>0||rl.status)){
+      html+=`<div class="sniff-card"><h3>Subscription Quota</h3>`;
+      if(rl.five_hour_utilization>0||rl.five_hour_resets_at){
+        const p5=(rl.five_hour_utilization*100).toFixed(1);
+        const color=rl.five_hour_utilization>0.8?'var(--bad)':rl.five_hour_utilization>0.5?'var(--warn)':'var(--good)';
+        html+=`<div class="sniff-stat"><span class="label">5h Session</span><span class="value" style="color:${color}">${p5}%</span></div>`;
+        let now5='';
+        if(rl.five_hour_resets_at){
+          const remainMs=rl.five_hour_resets_at*1000-Date.now();
+          const windowMs=5*3600000;
+          const elapsedPct=Math.min(100,Math.max(0,((windowMs-remainMs)/windowMs)*100));
+          now5=`<span class="tl-now" style="left:${elapsedPct.toFixed(1)}%"></span><span class="tl-now-label" style="left:${elapsedPct.toFixed(1)}%">now</span>`;
+        }
+        html+=`<div class="sniff-bar"><div class="sniff-bar-fill" style="width:${p5}%;background:${color}"></div>${now5}</div>`;
+        if(rl.five_hour_resets_at){
+          const diff=rl.five_hour_resets_at*1000-Date.now();
+          const mins=Math.max(0,Math.floor(diff/60000));
+          html+=`<div class="sniff-stat"><span class="label">Resets in</span><span class="value">${mins}m</span></div>`;
+        }
+      }
+      if(rl.seven_day_utilization>0||rl.seven_day_resets_at){
+        const p7=(rl.seven_day_utilization*100).toFixed(1);
+        const color=rl.seven_day_utilization>0.8?'var(--bad)':rl.seven_day_utilization>0.5?'var(--warn)':'var(--good)';
+        html+=`<div class="sniff-stat"><span class="label">7d Weekly</span><span class="value" style="color:${color}">${p7}%</span></div>`;
+        let now7='';
+        if(rl.seven_day_resets_at){
+          const remainMs=rl.seven_day_resets_at*1000-Date.now();
+          const windowMs=7*24*3600000;
+          const elapsedPct=Math.min(100,Math.max(0,((windowMs-remainMs)/windowMs)*100));
+          now7=`<span class="tl-now" style="left:${elapsedPct.toFixed(1)}%"></span><span class="tl-now-label" style="left:${elapsedPct.toFixed(1)}%">now</span>`;
+        }
+        html+=`<div class="sniff-bar"><div class="sniff-bar-fill" style="width:${p7}%;background:${color}"></div>${now7}</div>`;
+        if(rl.seven_day_resets_at){
+          const diff=rl.seven_day_resets_at*1000-Date.now();
+          const hrs=Math.max(0,Math.floor(diff/3600000));
+          html+=`<div class="sniff-stat"><span class="label">Resets in</span><span class="value">${hrs}h</span></div>`;
+        }
+      }
+      if(rl.status&&rl.status!=='allowed')html+=`<div class="sniff-stat"><span class="label">Status</span><span class="value" style="color:var(--warn)">${rl.status}</span></div>`;
+      if(rl.is_overage)html+=`<div class="sniff-stat"><span class="label">Overage</span><span class="value" style="color:var(--bad)">Active</span></div>`;
+      html+=`</div>`;
+    }
+
+    // Today's model usage card
+    const td=usage.today;
+    if(td&&td.models&&Object.keys(td.models).length>0){
+      html+=`<div class="sniff-card"><h3>Today (${td.date})</h3>`;
+      html+=`<table><tr><th>Model</th><th>In</th><th>Out</th><th>Cache R</th><th>Cache W</th><th>Reqs</th></tr>`;
+      for(const[m,u]of Object.entries(td.models)){
+        const short=m.replace('claude-','').replace(/-\d{8}$/,'');
+        html+=`<tr><td>${short}</td><td>${fmtTokens(u.input_tokens)}</td><td>${fmtTokens(u.output_tokens)}</td><td>${fmtTokens(u.cache_read_input_tokens)}</td><td>${fmtTokens(u.cache_creation_input_tokens)}</td><td>${u.request_count}</td></tr>`;
+      }
+      html+=`</table></div>`;
+    }
+
+    // Total since server start
+    const t=usage.total;
+    if(t&&t.request_count>0){
+      html+=`<div class="sniff-card"><h3>Total (since restart)</h3>`;
+      html+=`<div class="sniff-stat"><span class="label">Requests</span><span class="value">${t.request_count}</span></div>`;
+      html+=`<div class="sniff-stat"><span class="label">Input</span><span class="value">${fmtTokens(t.input_tokens)}</span></div>`;
+      html+=`<div class="sniff-stat"><span class="label">Output</span><span class="value">${fmtTokens(t.output_tokens)}</span></div>`;
+      html+=`<div class="sniff-stat"><span class="label">Cache Read</span><span class="value">${fmtTokens(t.cache_read_input_tokens)}</span></div>`;
+      html+=`<div class="sniff-stat"><span class="label">Cache Write</span><span class="value">${fmtTokens(t.cache_creation_input_tokens)}</span></div>`;
+      html+=`</div>`;
+    }
+
+    // Hourly stats
+    const stats=statsData.stats||[];
+    if(stats.length>0){
+      html+=`<div class="sniff-card"><h3>Hourly Breakdown</h3>`;
+      html+=`<table><tr><th>Hour</th><th>Model</th><th>Reqs</th><th>In</th><th>Out</th><th>Err</th><th>Avg ms</th></tr>`;
+      stats.forEach(s=>{
+        const hour=s.period.split(' ')[1]||s.period;
+        const short=(s.model||'').replace('claude-','').replace(/-\d{8}$/,'');
+        const errStyle=s.errors>0?'color:var(--bad)':'';
+        html+=`<tr><td>${hour}</td><td>${short}</td><td>${s.requests}</td><td>${fmtTokens(s.input_tokens)}</td><td>${fmtTokens(s.output_tokens)}</td><td style="${errStyle}">${s.errors}</td><td>${s.avg_duration_ms}</td></tr>`;
+      });
+      html+=`</table></div>`;
+    }
+
+    if(!html)html='<div style="text-align:center;padding:40px;color:var(--muted2)">No data yet</div>';
+    el.innerHTML=html;
+  }catch(e){
+    el.innerHTML=`<div style="text-align:center;padding:40px;color:var(--bad)">Error: ${e.message}</div>`;
+  }
+}
+
+async function showSniffLogs(page){
+  if(page===undefined)page=0;
+  sniffLogPage=page;
+  showSniffPanel('Logs');
+  const el=document.getElementById('sniff-content');
+  el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted2)">Loading...</div>';
+
+  try{
+    const params=new URLSearchParams({limit:SNIFF_PAGE_SIZE,offset:page*SNIFF_PAGE_SIZE});
+    // Apply filters
+    const modelFilter=document.getElementById('sniff-log-model');
+    const errorFilter=document.getElementById('sniff-log-error');
+    if(modelFilter&&modelFilter.value)params.set('model',modelFilter.value);
+    if(errorFilter&&errorFilter.checked)params.set('error','true');
+
+    const r=await fetch(`/api/proxy/logs?${params}`,{headers:{'Authorization':'Bearer '+TOKEN}});
+    const data=await r.json();
+    sniffLogTotal=data.total||0;
+    const recs=data.records||[];
+
+    let html=`<div class="sniff-filter">
+      <select id="sniff-log-model" onchange="showSniffLogs(0)">
+        <option value="">All models</option>
+        <option value="opus">Opus</option>
+        <option value="sonnet">Sonnet</option>
+        <option value="haiku">Haiku</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted)">
+        <input type="checkbox" id="sniff-log-error" onchange="showSniffLogs(0)"> Errors only
+      </label>
+      <span style="font-size:11px;color:var(--muted2);margin-left:auto">${sniffLogTotal} total</span>
+    </div>`;
+
+    if(recs.length===0){
+      html+='<div style="text-align:center;padding:40px;color:var(--muted2)">No records</div>';
+    }else{
+      html+=`<table><tr><th>Time</th><th>Model</th><th>In</th><th>Out</th><th>Cache</th><th>ms</th><th>Stop</th><th>Tools</th><th>Status</th></tr>`;
+      recs.forEach(r=>{
+        const t=new Date(r.time);
+        const ts=t.toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+        const short=(r.model||'').replace('claude-','').replace(/-\d{8}$/,'');
+        const cache=fmtTokens((r.cache_read||0)+(r.cache_create||0));
+        const errCls=r.is_error?' class="error"':'';
+        const statusBadge=r.is_error?`<span style="color:var(--bad)">${r.status}</span>`:`<span style="color:var(--good)">${r.status}</span>`;
+        const tools=r.tool_calls?`<span title="${esc(r.tool_calls)}">${r.tools_count}</span>`:(r.tools_count||'');
+        html+=`<tr${errCls}><td>${ts}</td><td>${short}</td><td>${fmtTokens(r.input_tokens)}</td><td>${fmtTokens(r.output_tokens)}</td><td>${cache}</td><td>${r.duration_ms}</td><td>${r.stop_reason||''}</td><td>${tools}</td><td>${statusBadge}</td></tr>`;
+      });
+      html+=`</table>`;
+
+      // Pager
+      const totalPages=Math.ceil(sniffLogTotal/SNIFF_PAGE_SIZE);
+      if(totalPages>1){
+        html+=`<div class="sniff-pager">
+          <button onclick="showSniffLogs(${page-1})"${page<=0?' disabled':''}>← Prev</button>
+          <span>${page+1} / ${totalPages}</span>
+          <button onclick="showSniffLogs(${page+1})"${page>=totalPages-1?' disabled':''}>Next →</button>
+        </div>`;
+      }
+    }
+
+    el.innerHTML=html;
+
+    // Restore filter state
+    if(modelFilter&&modelFilter.value){
+      const sel=document.getElementById('sniff-log-model');
+      if(sel)sel.value=modelFilter.value;
+    }
+    if(errorFilter&&errorFilter.checked){
+      const cb=document.getElementById('sniff-log-error');
+      if(cb)cb.checked=true;
+    }
+  }catch(e){
+    el.innerHTML=`<div style="text-align:center;padding:40px;color:var(--bad)">Error: ${e.message}</div>`;
+  }
+}
+
 // ── Keyboard ──
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){
-    closeNewSheet();closeResumeSheet();closeDestroySheet();closeLightbox();closeSettingsPanel();
+    closeNewSheet();closeResumeSheet();closeDestroySheet();closeLightbox();closeSettingsPanel();closeSniffPanel();
   }
 });
 

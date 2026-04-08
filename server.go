@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"os"
-	"path/filepath"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,13 +28,21 @@ var indexHTML []byte
 // ── Server Config ──
 
 type serverConfig struct {
-	Token           string `json:"token"`
-	Host            string `json:"host"`
-	Port            int    `json:"port"`
-	MaxSessions     int    `json:"maxSessions"`
-	IdleTimeoutMin  int    `json:"idleTimeoutMin"`
-	MaxLifetimeHrs  int    `json:"maxLifetimeHours"`
-	RateLimitPerMin int    `json:"rateLimitPerMin"`
+	Token           string            `json:"token"`
+	Host            string            `json:"host"`
+	Port            int               `json:"port"`
+	MaxSessions     int               `json:"maxSessions"`
+	IdleTimeoutMin  int               `json:"idleTimeoutMin"`
+	MaxLifetimeHrs  int               `json:"maxLifetimeHours"`
+	RateLimitPerMin int               `json:"rateLimitPerMin"`
+	Telegram        telegramBotConfig `json:"telegram"`
+	Proxy           proxyConfig       `json:"proxy"`
+}
+
+// telegramBotConfig holds Telegram bot settings.
+type telegramBotConfig struct {
+	Enabled        bool     `json:"enabled"`
+	AllowedChatIDs []string `json:"allowedChatIDs"` // if empty, uses global tgChatID
 }
 
 func defaultServerConfig() serverConfig {
@@ -40,6 +53,7 @@ func defaultServerConfig() serverConfig {
 		IdleTimeoutMin:  30,
 		MaxLifetimeHrs:  4,
 		RateLimitPerMin: 60,
+		Proxy:           defaultProxyConfig(),
 	}
 }
 
@@ -58,7 +72,7 @@ func loadServerConfig() serverConfig {
 		var wrapper struct {
 			Server serverConfig `json:"server"`
 		}
-		if json.Unmarshal(data, &wrapper) == nil && (wrapper.Server.Token != "" || wrapper.Server.Port != 0) {
+		if json.Unmarshal(data, &wrapper) == nil && (wrapper.Server.Token != "" || wrapper.Server.Port != 0 || wrapper.Server.Telegram.Enabled) {
 			if wrapper.Server.Token != "" {
 				cfg.Token = wrapper.Server.Token
 			}
@@ -79,6 +93,18 @@ func loadServerConfig() serverConfig {
 			}
 			if wrapper.Server.RateLimitPerMin > 0 {
 				cfg.RateLimitPerMin = wrapper.Server.RateLimitPerMin
+			}
+			cfg.Telegram = wrapper.Server.Telegram
+			if wrapper.Server.Proxy.Port != 0 || wrapper.Server.Proxy.Upstream != "" || wrapper.Server.Proxy.Enabled {
+				if wrapper.Server.Proxy.Enabled {
+					cfg.Proxy.Enabled = true
+				}
+				if wrapper.Server.Proxy.Port != 0 {
+					cfg.Proxy.Port = wrapper.Server.Proxy.Port
+				}
+				if wrapper.Server.Proxy.Upstream != "" {
+					cfg.Proxy.Upstream = wrapper.Server.Proxy.Upstream
+				}
 			}
 		}
 		break
@@ -190,12 +216,14 @@ func handleServer(args []string) {
 	// Health (no auth required)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status":     "ok",
-			"app":        appName,
-			"agent_name": agentName,
-			"version":    buildVersion,
-			"sessions":   len(sm.sessions),
-			"uptime":     time.Since(serverStartTime).String(),
+			"status":        "ok",
+			"app":           appName,
+			"agent_name":    agentName,
+			"version":       buildVersion,
+			"sessions":      len(sm.sessions),
+			"uptime":        time.Since(serverStartTime).String(),
+			"sniff_enabled": activeProxyPort > 0,
+			"sniff_port":    activeProxyPort,
 		})
 	})
 
@@ -495,6 +523,88 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 	}))
 
+	// Upload file to session (multipart)
+	mux.HandleFunc("POST /api/sessions/{id}/upload", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		if !rl.allow() {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+			return
+		}
+
+		sess := sm.getSession(r.PathValue("id"))
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+
+		// Parse multipart form — 32 MB max
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to parse multipart form: " + err.Error()})
+			return
+		}
+
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file field is required"})
+			return
+		}
+		defer file.Close()
+
+		// Validate file type (images only for now)
+		ext := strings.ToLower(filepath.Ext(header.Filename))
+		allowedExts := map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".svg": true}
+		if !allowedExts[ext] {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported file type: " + ext})
+			return
+		}
+
+		// Ensure content-type matches
+		ct := header.Header.Get("Content-Type")
+		if ct == "" {
+			ct = mime.TypeByExtension(ext)
+		}
+
+		// Generate unique filename: timestamp-random.ext
+		randBytes := make([]byte, 8)
+		rand.Read(randBytes)
+		filename := fmt.Sprintf("%d-%s%s", time.Now().UnixMilli(), hex.EncodeToString(randBytes), ext)
+
+		// Save to workspace/uploads/
+		uploadsDir := filepath.Join(workspace, "uploads")
+		if err := os.MkdirAll(uploadsDir, 0755); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create uploads dir: " + err.Error()})
+			return
+		}
+
+		destPath := filepath.Join(uploadsDir, filename)
+		dst, err := os.Create(destPath)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create file: " + err.Error()})
+			return
+		}
+		defer dst.Close()
+
+		written, err := io.Copy(dst, file)
+		if err != nil {
+			os.Remove(destPath)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save file: " + err.Error()})
+			return
+		}
+
+		// Build URL path for the uploaded file
+		urlPath := "/uploads/" + filename
+
+		fmt.Fprintf(os.Stderr, "[%s] server: uploaded %s (%d bytes) for session %s\n",
+			appName, filename, written, sess.ID)
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":           urlPath,
+			"filename":      filename,
+			"original_name": header.Filename,
+			"size":          written,
+			"content_type":  ct,
+		})
+	}))
+
 	// SSE stream
 	mux.HandleFunc("GET /api/sessions/{id}/stream", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		sess := sm.getSession(r.PathValue("id"))
@@ -585,6 +695,9 @@ func handleServer(args []string) {
 		all := scanAllSessions()
 		sort.Slice(all, func(i, j int) bool { return all[i].ModTime.After(all[j].ModTime) })
 
+		// Build spawn agent lookup: session_name → agent_id
+		spawnAgentMap := loadSpawnAgentMap()
+
 		// Convert to JSON-friendly format, applying category filter
 		items := make([]map[string]any, 0, len(all))
 		for _, s := range all {
@@ -603,6 +716,15 @@ func handleServer(args []string) {
 				break
 			}
 
+			// Determine agent: DB record > spawn name match > default "main" for server sessions
+			agent := getSessionAgent(s.ID)
+			if agent == "" {
+				// Check if session name matches a spawn pattern
+				if a, ok := spawnAgentMap[s.Name]; ok {
+					agent = a
+				}
+			}
+
 			items = append(items, map[string]any{
 				"id":        s.ID,
 				"name":      s.Name,
@@ -610,6 +732,7 @@ func handleServer(args []string) {
 				"project":   s.Project,
 				"model":     s.Model,
 				"category":  cat,
+				"agent":     agent,
 				"first_msg": s.FirstMsg,
 				"summary":   s.Summary,
 				"size":      s.Size,
@@ -664,13 +787,14 @@ func handleServer(args []string) {
 			SessionID string `json:"session_id"`
 			Message   string `json:"message"`
 			Name      string `json:"name"`
+			Category  string `json:"category"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id is required"})
 			return
 		}
 
-		sess, err := sm.resumeSession(req.SessionID, req.Message, req.Name)
+		sess, err := sm.resumeSession(req.SessionID, req.Message, req.Name, req.Category)
 		if err != nil {
 			status := http.StatusInternalServerError
 			if strings.Contains(err.Error(), "max sessions") {
@@ -739,6 +863,24 @@ func handleServer(args []string) {
 			reason = "jira-wake"
 		}
 
+		// Dedup: reject if a heartbeat/cron/evolve session is already running
+		sm.mu.RLock()
+		for _, s := range sm.sessions {
+			if (s.Category == CategoryHeartbeat || s.Category == CategoryCron || s.Category == CategoryEvolve) &&
+				s.process != nil && s.process.alive() {
+				sm.mu.RUnlock()
+				fmt.Fprintf(os.Stderr, "[%s] server: wake rejected — %s session %s already running\n",
+					appName, s.Category, shortID(s.ID))
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error":    fmt.Sprintf("%s session already running", s.Category),
+					"session":  s.ID,
+					"category": s.Category,
+				})
+				return
+			}
+		}
+		sm.mu.RUnlock()
+
 		// Default: soul enabled (未然). Caller can explicitly disable.
 		soulEnabled := true
 		if req.Soul != nil {
@@ -787,8 +929,154 @@ func handleServer(args []string) {
 		})
 	})
 
+	// Spawn API — dispatch a task to any agent
+	// Body: {"agent": "intern", "task": "处理 #815", "wait": false}
+	// No auth required — Jira and 未然 both call this
+	mux.HandleFunc("POST /api/spawn", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Agent string `json:"agent"`
+			Task  string `json:"task"`
+			Wait  bool   `json:"wait"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Agent == "" || req.Task == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent and task are required"})
+			return
+		}
+
+		agents, err := loadAgents()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load agents: " + err.Error()})
+			return
+		}
+
+		agent := findAgent(agents, req.Agent)
+		if agent == nil {
+			available := []string{}
+			for _, a := range agents {
+				if a.ID != "main" {
+					available = append(available, a.ID)
+				}
+			}
+			writeJSON(w, http.StatusNotFound, map[string]any{
+				"error":     "agent not found: " + req.Agent,
+				"available": available,
+			})
+			return
+		}
+
+		if agent.ID == "main" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "use /api/wake for main agent"})
+			return
+		}
+
+		// Per-agent mutual exclusion
+		if running := agentRunningSpawn(agent.ID); running != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":      fmt.Sprintf("agent %s already has a running spawn", agent.ID),
+				"spawn_id":   running.id,
+				"task":       running.task,
+				"started_at": running.started,
+			})
+			return
+		}
+
+		// Build prompt and spawn
+		promptContent := buildAgentPrompt(agent)
+		tmpDir, err := os.MkdirTemp("", fmt.Sprintf("%s-spawn-%s-", appName, agent.ID))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "create temp dir: " + err.Error()})
+			return
+		}
+		promptFile := filepath.Join(tmpDir, "prompt.md")
+		os.WriteFile(promptFile, []byte(promptContent), 0600)
+
+		sessionName := fmt.Sprintf("spawn-%s-%s", agent.ID, time.Now().Format("0102-1504"))
+		spawnID := recordSpawnStart(agent, req.Task, sessionName, tmpDir)
+
+		claudeArgs := []string{
+			"--append-system-prompt-file", promptFile,
+			"--dangerously-skip-permissions",
+			"--name", sessionName,
+			"-p", req.Task,
+		}
+		if agent.Model != "" {
+			claudeArgs = append(claudeArgs, "--model", agent.Model)
+		}
+
+		cmd := exec.Command(claudeBin, claudeArgs...)
+		cmd.Dir = agent.Workspace
+		cmd.Env = injectProxyEnv(os.Environ())
+
+		// Set JIRA_TOKEN
+		jiraTokenFile := filepath.Join(agent.Workspace, ".jira-token")
+		if data, err := os.ReadFile(jiraTokenFile); err == nil {
+			if token := strings.TrimSpace(string(data)); token != "" {
+				cmd.Env = append(cmd.Env, "JIRA_TOKEN="+token)
+			}
+		}
+
+		// Async: double-fork via wrapper script
+		logFile := filepath.Join(tmpDir, "output.log")
+		pidFile := filepath.Join(tmpDir, "pid")
+		exitFile := filepath.Join(tmpDir, "exit")
+		notifyBin, _ := exec.LookPath(os.Args[0])
+		if notifyBin == "" {
+			notifyBin = os.Args[0]
+		}
+
+		wrapperScript := fmt.Sprintf("#!/bin/sh\necho $$ > %q\n%s > %q 2>&1\nEXIT_CODE=$?\necho \"$EXIT_CODE\" > %q\nDURATION=$SECONDS\n%s spawn finish %d $EXIT_CODE $DURATION %q 2>/dev/null\nif [ \"$EXIT_CODE\" -eq 0 ]; then\n  %s notify \"✅ spawn %s 完成 (${DURATION}s)\\nsession: %s\"\nelse\n  %s notify \"❌ spawn %s 失败 (exit=$EXIT_CODE, ${DURATION}s)\\nsession: %s\\nlog: %s\"\nfi\n",
+			pidFile,
+			shellQuoteArgs(cmd.Path, cmd.Args[1:]...), logFile,
+			exitFile,
+			notifyBin, spawnID, logFile,
+			notifyBin, agent.Name, sessionName,
+			notifyBin, agent.Name, sessionName, logFile,
+		)
+
+		wrapperPath := filepath.Join(tmpDir, "run.sh")
+		os.WriteFile(wrapperPath, []byte(wrapperScript), 0700)
+
+		bgCmd := exec.Command("/bin/sh", wrapperPath)
+		bgCmd.Dir = agent.Workspace
+		bgCmd.Env = cmd.Env
+		bgCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		bgCmd.Stdin = nil
+		bgCmd.Stdout = nil
+		bgCmd.Stderr = nil
+
+		if err := bgCmd.Start(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "spawn failed: " + err.Error()})
+			return
+		}
+		bgCmd.Process.Release()
+
+		fmt.Fprintf(os.Stderr, "[%s] server: spawned %s (%s) for task: %s\n",
+			appName, agent.Name, agent.ID, truncate(req.Task, 80))
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":       true,
+			"spawn_id": spawnID,
+			"agent":    agent.ID,
+			"session":  sessionName,
+			"log":      logFile,
+		})
+	})
+
 	// WebSocket endpoint for bidirectional real-time sync
 	mux.HandleFunc("GET /api/ws", hub.serveWS)
+
+	// Serve uploaded files (authed)
+	uploadsDir := filepath.Join(workspace, "uploads")
+	mux.HandleFunc("GET /uploads/", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		// Strip /uploads/ prefix and serve from uploadsDir
+		name := strings.TrimPrefix(r.URL.Path, "/uploads/")
+		if name == "" || strings.Contains(name, "..") {
+			http.NotFound(w, r)
+			return
+		}
+		filePath := filepath.Join(uploadsDir, name)
+		http.ServeFile(w, r, filePath)
+	}))
 
 	// Serve UI
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -799,6 +1087,30 @@ func handleServer(args []string) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(indexHTML)
 	})
+
+	// Start Telegram bot if enabled
+	var tgBridge *telegramBridge
+	if cfg.Telegram.Enabled {
+		tgToken := getTelegramToken()
+		if tgToken == "" {
+			fmt.Fprintf(os.Stderr, "[%s] server: telegram enabled but no bot token found\n", appName)
+		} else {
+			allowedIDs := cfg.Telegram.AllowedChatIDs
+			if len(allowedIDs) == 0 && tgChatID != "" {
+				allowedIDs = []string{tgChatID} // fallback to global chat ID
+			}
+			tgBridge = newTelegramBridge(tgToken, allowedIDs, sm, hub)
+			tgBridge.start()
+		}
+	}
+
+	// Register proxy usage API endpoint
+	registerProxyAPI(mux, cfg.Token)
+
+	// Start Anthropic API proxy if enabled
+	if cfg.Proxy.Enabled {
+		startProxyServer(cfg.Proxy)
+	}
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
@@ -816,6 +1128,11 @@ func handleServer(args []string) {
 	go func() {
 		sig := <-sigCh
 		fmt.Fprintf(os.Stderr, "\n[%s] server: received %v, shutting down...\n", appName, sig)
+
+		// Stop Telegram bot first (stops receiving new messages)
+		if tgBridge != nil {
+			tgBridge.shutdown()
+		}
 
 		// Notify via Telegram
 		if tgChatID != "" {
