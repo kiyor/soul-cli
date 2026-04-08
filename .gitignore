@@ -5,6 +5,8 @@ services.json
 metrics.jsonl
 .versions/
 weiran
+soul-cli
+soul
 /bin/
 Makefile
 site/
