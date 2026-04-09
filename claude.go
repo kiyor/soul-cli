@@ -268,6 +268,107 @@ func getModelEndpoint() string {
 	return ""
 }
 
+// providerConfig holds baseURL and apiKey for a model provider.
+type providerConfig struct {
+	BaseURL string   `json:"baseUrl"`
+	APIKey  string   `json:"apiKey"`
+	AuthEnv string   `json:"authEnv"` // env var name for the key, default "ANTHROPIC_AUTH_TOKEN"; use "ANTHROPIC_API_KEY" for MiniMax etc.
+	Models  []string `json:"models"`  // available model names for this provider
+}
+
+// resolveProvider looks up a provider's endpoint config from config.json "providers" section.
+// config.json is soul-cli's own config (in data/config.json).
+func resolveProvider(providerName string) *providerConfig {
+	// Read from config.json (same paths as loadConfig)
+	configPaths := []string{
+		filepath.Join(appHome, "data", "config.json"),
+		filepath.Join(workspace, "scripts", appName, "config.json"),
+	}
+	for _, p := range configPaths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var cfg struct {
+			Providers map[string]providerConfig `json:"providers"`
+		}
+		if json.Unmarshal(data, &cfg) == nil {
+			if prov, ok := cfg.Providers[providerName]; ok && prov.BaseURL != "" {
+				return &prov
+			}
+		}
+	}
+	return nil
+}
+
+// injectModelOverrideEnv injects ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN for the overrideModel provider.
+// Called by injectProxyEnv when overrideModel is set (CLI mode backward compat).
+// Returns the modified env and whether the override was applied.
+func injectModelOverrideEnv(env []string) ([]string, bool) {
+	return injectProviderEnv(env, overrideModel)
+}
+
+// injectProviderEnv injects ANTHROPIC_BASE_URL + auth env for the given model's provider.
+// model must be in "provider/modelName" format (e.g. "zai/glm-5.1").
+// Returns the modified env and whether the override was applied.
+func injectProviderEnv(env []string, model string) ([]string, bool) {
+	if model == "" {
+		return env, false
+	}
+
+	parts := strings.SplitN(model, "/", 2)
+	if len(parts) < 2 {
+		return env, false
+	}
+
+	providerName := parts[0]
+	provider := resolveProvider(providerName)
+	if provider == nil {
+		fmt.Fprintf(os.Stderr, "[%s] provider %q not found in config.json\n", appName, providerName)
+		return env, false
+	}
+
+	fmt.Fprintf(os.Stderr, "[%s] using provider %q → %s\n", appName, providerName, provider.BaseURL)
+
+	// Filter out conflicting env vars
+	filtered := make([]string, 0, len(env)+3)
+	for _, v := range env {
+		if strings.HasPrefix(v, "ANTHROPIC_BASE_URL=") ||
+			strings.HasPrefix(v, "ANTHROPIC_AUTH_TOKEN=") ||
+			strings.HasPrefix(v, "ANTHROPIC_API_KEY=") {
+			continue
+		}
+		filtered = append(filtered, v)
+	}
+
+	filtered = append(filtered, "ANTHROPIC_BASE_URL="+provider.BaseURL)
+	if provider.APIKey != "" {
+		authEnv := provider.AuthEnv
+		if authEnv == "" {
+			authEnv = "ANTHROPIC_AUTH_TOKEN"
+		}
+		filtered = append(filtered, authEnv+"="+provider.APIKey)
+	}
+	// Extend timeout for third-party providers (they can be slower)
+	filtered = append(filtered, "API_TIMEOUT_MS=3000000")
+
+	return filtered, true
+}
+
+// providerModelName extracts the model name from a "provider/model" string.
+// Returns the full string if no "/" is found (Anthropic native model).
+func providerModelName(model string) string {
+	if i := strings.Index(model, "/"); i >= 0 {
+		return model[i+1:]
+	}
+	return model
+}
+
+// isProviderModel returns true if the model string is in "provider/model" format.
+func isProviderModel(model string) bool {
+	return strings.Contains(model, "/")
+}
+
 // trackClaudeExit appends claude subprocess exit info to metrics.jsonl
 func trackClaudeExit(exitCode int, duration time.Duration, errMsg string) {
 	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")

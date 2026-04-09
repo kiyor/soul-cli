@@ -46,6 +46,13 @@ var (
 
 	isServerMode bool // set to true when running as `weiran server`
 
+	// Custom model override: --model provider/model (e.g. zai/glm-5.1, minimax/MiniMax-M2.7)
+	// When set, injects provider's baseUrl + apiKey as ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
+	overrideModel string
+
+	// Default model for cron/heartbeat (from config.json "defaultModel")
+	defaultModel string
+
 	launchDir  string // original working directory before chdir to workspace
 	galContext string // GAL save JSON injected into prompt for resume
 
@@ -77,6 +84,11 @@ var (
 	// includeHeartbeat controls whether HEARTBEAT.md is injected into the prompt.
 	// Only set true for heartbeat/cron modes — interactive/server sessions don't need it.
 	includeHeartbeat bool
+
+	// replaceSoul enables Id Mode (本我) — use --system-prompt-file (replace CC's
+	// native system prompt) instead of --append-system-prompt-file.
+	// DEFAULT: true (本我模式). Use --standard to switch to append mode.
+	replaceSoul = true
 
 	// Extra projectRoots read from config.json
 	extraProjectRoots []string
@@ -312,6 +324,7 @@ func loadConfig() {
 		TelegramChatID string   `json:"telegramChatID"`
 		ProjectRoots   []string `json:"projectRoots"`
 		AgentName      string   `json:"agentName"`
+		DefaultModel   string   `json:"defaultModel"` // default model for cron/heartbeat (e.g. "zai/glm-5.1")
 	}
 	var cfg appConfig
 	if cfgData != nil {
@@ -353,6 +366,14 @@ func loadConfig() {
 		}
 		extraProjectRoots = append(extraProjectRoots, r)
 	}
+
+	// defaultModel: config.json > env var
+	if cfg.DefaultModel != "" {
+		defaultModel = cfg.DefaultModel
+	}
+	if envModel := os.Getenv("WEIRAN_DEFAULT_MODEL"); envModel != "" {
+		defaultModel = envModel
+	}
 }
 
 func init() {
@@ -385,8 +406,12 @@ func helpText() string {
 	text := `{{NAME}} — Claude Code launcher with soul prompt
 
 Usage:
-  {{NAME}}                       interactive session (with soul prompt)
+  {{NAME}}                       interactive session (Id Mode 本我, default)
+  {{NAME}} --standard            Standard mode — append soul to CC's native system prompt
   {{NAME}} -p "task"             one-shot task, exits when done
+  {{NAME}} --standard -p "task"  one-shot task in Standard mode
+  {{NAME}} --model zai/glm-5.1    use custom provider endpoint (reads from models.json)
+  {{NAME}} --model minimax/MiniMax-M2.7  use MiniMax endpoint
   {{NAME}} -r                    resume session (opens TUI picker if no ID given)
   {{NAME}} -r <session-id>       resume specific session
   {{NAME}} --cron                memory consolidation mode (for scheduled tasks)
@@ -401,6 +426,7 @@ Subcommands:
   {{NAME}} update                self-update: git pull -> {{NAME}} build (safe build)
   {{NAME}} status                quick health check (without launching claude)
   {{NAME}} doctor                deep diagnostics (claude version, processes, DB, disk, model endpoints, metrics anomalies)
+  {{NAME}} doctor cron           audit crontab: binary path, schedule sanity, log health, evolve-probe readiness
   {{NAME}} prompt                 print the full assembled system prompt to stdout
   {{NAME}} lint                   validate md file formats (topics, skills, CLAUDE.md)
   {{NAME}} diff                  show soul/memory file changes since last commit
@@ -416,6 +442,9 @@ Subcommands:
   {{NAME}} spawn <agent> "task"   dispatch task to another agent (async by default)
   {{NAME}} spawn <agent> "task" --wait  dispatch and wait for completion
   {{NAME}} spawn list            show running/recent spawn processes
+  {{NAME}} evolve-probe -f <feedback> -s <scenario> [--mode with|without|both]
+                                  run a thought-experiment probe against a feedback rule
+  {{NAME}} evolve-probe -f <feedback> --list   list scenarios for a feedback
   {{NAME}} new                   reset all Telegram direct sessions (start new conversation)
   {{NAME}} notify [--dry-run] <message>      send Telegram text message to user (supports Markdown)
   {{NAME}} notify-photo [--dry-run] <URL> [caption]  send Telegram photo to user
@@ -563,7 +592,11 @@ func main() {
 		handleConfig()
 		return
 	case "doctor":
-		handleDoctor()
+		if len(extra) > 0 && extra[0] == "cron" {
+			handleDoctorCron()
+		} else {
+			handleDoctor()
+		}
 		return
 	case "diff":
 		handleDiff()
@@ -580,6 +613,9 @@ func main() {
 	case "spawn":
 		handleSpawn(extra)
 		return
+	case "evolve-probe":
+		handleProbe(extra)
+		return
 	case "server":
 		handleServer(extra)
 		return
@@ -589,7 +625,26 @@ func main() {
 	result := buildPrompt()
 	writePrompt(result)
 
-	base := []string{"--append-system-prompt-file", promptOut, "--dangerously-skip-permissions"}
+	// Apply defaultModel for cron/heartbeat if no CLI --model override
+	if overrideModel == "" && defaultModel != "" {
+		if mode == "cron" || mode == "heartbeat" || mode == "evolve" {
+			overrideModel = defaultModel
+			fmt.Fprintf(os.Stderr, "[%s] using defaultModel: %s\n", appName, defaultModel)
+		}
+	}
+
+	promptFlag := "--append-system-prompt-file"
+	if replaceSoul {
+		promptFlag = "--system-prompt-file"
+	} else {
+		fmt.Fprintln(os.Stderr, "["+appName+"] Standard mode (--append-system-prompt-file)")
+	}
+	base := []string{promptFlag, promptOut, "--dangerously-skip-permissions"}
+
+	// Inject --model flag for Claude Code when custom model is specified
+	if overrideModel != "" {
+		base = append(base, "--model", providerModelName(overrideModel))
+	}
 
 	switch mode {
 	case "interactive":
@@ -693,10 +748,37 @@ func main() {
 			}
 		}
 
+		// Expire stale soul sessions (>24h inactive)
+		endStaleSoulSessions()
+
 		hb := heartbeatTask()
+		beforeRun := time.Now()
+
+		// Check for active soul session to resume
+		if claudeSID := getActiveSoulSession(agentName); claudeSID != "" {
+			fmt.Fprintf(os.Stderr, "["+appName+"] resuming soul session (claude %s)\n", shortID(claudeSID))
+			args := append(base, "--resume", claudeSID, "-p", hb)
+			args = append(args, extra...)
+			exitCode := runClaude(args)
+			touchSoulSession(agentName)
+			updateSoulSessionBudget(agentName)
+			runHooks("heartbeat")
+			os.Exit(exitCode)
+		}
+
+		// No active session — create new daily soul session
+		soulID := createSoulSession(agentName, "daily", 2.0)
 		args := append(base, "-p", hb)
 		args = append(args, extra...)
 		exitCode := runClaude(args)
+
+		// Detect and link the Claude session ID created by this run
+		if soulID > 0 {
+			if newSID := detectNewSession(beforeRun); newSID != "" {
+				linkSoulSession(soulID, newSID)
+			}
+		}
+
 		runHooks("heartbeat")
 		os.Exit(exitCode)
 
@@ -806,6 +888,7 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			return
 		case "doctor":
 			mode = "doctor"
+			extra = args[i+1:]
 			return
 		case "diff":
 			mode = "diff"
@@ -823,6 +906,10 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			mode = "spawn"
 			extra = args[i+1:]
 			return
+		case "evolve-probe":
+			mode = "evolve-probe"
+			extra = args[i+1:]
+			return
 		case "server":
 			mode = "server"
 			extra = args[i+1:]
@@ -833,6 +920,18 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			mode = "heartbeat"
 		case "--evolve":
 			mode = "evolve"
+		case "--id", "--soul":
+			// already default, no-op for backward compat
+			replaceSoul = true
+		case "--standard":
+			// Standard mode: append to CC's native system prompt instead of replacing
+			replaceSoul = false
+		case "--model":
+			// Custom model: --model provider/model (e.g. zai/glm-5.1, minimax/MiniMax-M2.7)
+			if i+1 < len(args) {
+				overrideModel = args[i+1]
+				i++
+			}
 		case "-p":
 			mode = "print"
 			if i+1 < len(args) {

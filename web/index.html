@@ -976,8 +976,8 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
     <span>Enable soul files (personality, memory)</span>
   </div>
   <div class="toggle">
-    <input type="checkbox" id="m-replace-soul">
-    <span>本我模式 <span style="font-size:11px;color:var(--muted2)">(replace CC harness · experimental)</span></span>
+    <input type="checkbox" id="m-replace-soul" checked>
+    <span>本我模式 <span style="font-size:11px;color:var(--muted2)">(replace CC harness)</span></span>
   </div>
   <div class="actions">
     <button class="btn btn-cancel" onclick="closeNewSheet()">Cancel</button>
@@ -1516,6 +1516,7 @@ async function initApp(){
   connectWS();
   loadHistory();
   loadSkills();
+  loadProviders();
 
   // Handle hash routing after init
   handleHashRoute();
@@ -2525,6 +2526,7 @@ const MODEL_MAP={
   sonnet:'claude-sonnet-4-6',
   haiku:'claude-haiku-4-5-20251001'
 };
+let providerModels={}; // populated from /api/providers, e.g. {zai:[], minimax:[]}
 
 function applyFlagSettings(settings){
   if(!activeSessionId)return;
@@ -2542,14 +2544,46 @@ function applyFlagSettings(settings){
   }).catch(e=>addErrorMsg('Failed: '+e.message));
 }
 
-function applyModel(shortName){
-  if(!shortName)return;
-  const fullId=MODEL_MAP[shortName]||shortName;
+function applyModel(val){
+  if(!val)return;
+  // Check if this is a provider model (contains "/")
+  if(val.includes('/')){
+    // Provider model — needs session reload with new env
+    applyProviderModel(val);
+    return;
+  }
+  const fullId=MODEL_MAP[val]||val;
   applyFlagSettings({model:fullId});
-  currentModel=shortName;
-  document.getElementById('model-badge').textContent=shortName;
-  contextMax=getContextWindow(shortName);
+  currentModel=val;
+  document.getElementById('model-badge').textContent=val;
+  contextMax=getContextWindow(val);
   updateContextBar(contextTokensPeak);
+}
+
+function applyProviderModel(providerModel){
+  if(!activeSessionId)return;
+  addSystemMsg('Switching to '+providerModel+' — reloading session...');
+  // Delete current session and create new one with provider model
+  const sess=sessions[activeSessionId];
+  const oldId=activeSessionId;
+  fetch('/api/sessions',{
+    method:'POST',
+    headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},
+    body:JSON.stringify({
+      name:sess?sess.name:'session-'+Date.now(),
+      project:sess?sess.project:'',
+      model:providerModel,
+      soul_files:true,
+      replace_soul:sess?sess.replace_soul:true
+    })
+  }).then(r=>r.json()).then(d=>{
+    if(d.error){addErrorMsg('Reload failed: '+d.error);return}
+    // Delete old session
+    fetch('/api/sessions/'+oldId,{method:'DELETE',headers:{'Authorization':'Bearer '+TOKEN}});
+    // Switch to new session
+    addSystemMsg('Switched to '+providerModel+' ✓');
+    loadSessions();
+  }).catch(e=>addErrorMsg('Reload failed: '+e.message));
 }
 
 function applyEffort(effort){
@@ -2638,12 +2672,12 @@ function updateSoulBadge(on){
 function syncSettingsDropdowns(){
   const sel=document.getElementById('select-model');
   if(currentModel){
-    // normalize: extract short name from whatever format (opus, claude-opus-4-6, etc.)
     const m=currentModel.toLowerCase();
     let short='';
     if(m.includes('opus'))short='opus';
     else if(m.includes('sonnet'))short='sonnet';
     else if(m.includes('haiku'))short='haiku';
+    else if(m.includes('/'))short=m; // provider/model format
     sel.value=short||'';
   }else{
     sel.value='';
@@ -2824,6 +2858,38 @@ async function injectLinkPreviews(el){
 }
 
 // ── Slash Commands ──
+
+async function loadProviders(){
+  try{
+    const r=await fetch('/api/providers',{headers:{'Authorization':'Bearer '+TOKEN}});
+    const d=await r.json();
+    if(!d.providers||!d.providers.length)return;
+    providerModels={};
+    d.providers.forEach(p=>{providerModels[p.name]=p.models||[]});
+    // Populate settings dropdown
+    const sel=document.getElementById('select-model');
+    const mSel=document.getElementById('m-model');
+    // Add divider + provider options
+    const divOpt=document.createElement('option');divOpt.disabled=true;divOpt.textContent='── Providers ──';
+    sel.appendChild(divOpt);
+    const divOpt2=divOpt.cloneNode(true);mSel.appendChild(divOpt2);
+    for(const [name,models] of Object.entries(providerModels)){
+      if(models&&models.length){
+        models.forEach(m=>{
+          const val=name+'/'+m;
+          const opt=document.createElement('option');opt.value=val;opt.textContent=name+'/'+m;
+          sel.appendChild(opt);
+          mSel.appendChild(opt.cloneNode(true));
+        });
+      }else{
+        // No specific models listed, add provider with generic option
+        const opt=document.createElement('option');opt.value=name+'/default';opt.textContent=name+' (default)';
+        sel.appendChild(opt);
+        mSel.appendChild(opt.cloneNode(true));
+      }
+    }
+  }catch(e){console.warn('loadProviders:',e)}
+}
 
 async function loadSkills(){
   try{

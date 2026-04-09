@@ -101,6 +101,18 @@ type sessionOpts struct {
 	Model            string
 	MaxTurns         int
 	Chrome           bool
+	// ReplaceSoul — when true, pass --system-prompt-file instead of
+	// --append-system-prompt-file. This strips CC's native system prompt
+	// (intro, doing tasks, tone, output efficiency, session guidance,
+	// auto-memory, MCP instructions, env info) and leaves only the soul
+	// prompt. Server-side Anthropic safety blocks (injection defense,
+	// privacy, copyright) are NOT affected — they're injected by the API,
+	// not by CC. See conversation 2026-04-08 for source-code analysis.
+	ReplaceSoul bool
+	// ResumeID — Claude Code session ID to resume. When set, adds
+	// --resume <id> so the new process inherits conversation history.
+	// Used by setReplaceSoul to preserve context across mode toggle.
+	ResumeID string
 }
 
 // claudeProcess wraps a running Claude Code subprocess with stream-json pipes.
@@ -134,19 +146,27 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 	}
 
 	if opts.SystemPromptFile != "" {
-		args = append(args, "--append-system-prompt-file", opts.SystemPromptFile)
+		if opts.ReplaceSoul {
+			args = append(args, "--system-prompt-file", opts.SystemPromptFile)
+		} else {
+			args = append(args, "--append-system-prompt-file", opts.SystemPromptFile)
+		}
 	}
 	if opts.MCPConfig != "" {
 		args = append(args, "--mcp-config", opts.MCPConfig)
 	}
 	if opts.Model != "" {
-		args = append(args, "--model", opts.Model)
+		// For provider/model format (e.g. "zai/glm-5.1"), pass only the model name to --model
+		args = append(args, "--model", providerModelName(opts.Model))
 	}
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(opts.MaxTurns))
 	}
 	if opts.Chrome {
 		args = append(args, "--chrome")
+	}
+	if opts.ResumeID != "" {
+		args = append(args, "--resume", opts.ResumeID)
 	}
 
 	cmd := exec.Command(claudeBin, args...)
@@ -159,7 +179,8 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 	// Filter environment: remove CLAUDECODE to prevent nested detection
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
-	env = injectProxyEnv(env)
+	// Use model-aware env injection: provider models route directly, Anthropic models use proxy
+	env = injectProxyEnvWithModel(env, "", opts.Model)
 	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()

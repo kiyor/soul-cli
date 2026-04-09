@@ -410,6 +410,298 @@ func handleDoctor() {
 	}
 }
 
+// handleDoctorCron audits the crontab entries for weiran.
+// Checks: binary path matches installed binary, schedule sanity, log health,
+// evolve-probe readiness, feedback v2 coverage.
+func handleDoctorCron() {
+	fmt.Printf("%s doctor cron — crontab audit\n\n", appName)
+	issues := 0
+	warn := func(format string, a ...interface{}) {
+		issues++
+		fmt.Printf("  ⚠️  "+format+"\n", a...)
+	}
+	ok := func(format string, a ...interface{}) {
+		fmt.Printf("  ✅ "+format+"\n", a...)
+	}
+	info := func(format string, a ...interface{}) {
+		fmt.Printf("  ℹ️  "+format+"\n", a...)
+	}
+
+	installedBin, _ := filepath.Abs(os.Args[0])
+	// Also check the make install target
+	localBin := filepath.Join(home, ".local", "bin", appName)
+
+	// 1. Parse crontab
+	fmt.Println("── Crontab Entries ──")
+	cronOut, err := exec.Command("crontab", "-l").Output()
+	if err != nil {
+		warn("crontab -l failed: %v", err)
+		fmt.Printf("\n🩺 audit complete: %d issues\n", issues)
+		return
+	}
+
+	type cronEntry struct {
+		schedule string
+		binary   string
+		args     string
+		logFile  string
+		raw      string
+	}
+
+	var entries []cronEntry
+	for _, line := range strings.Split(string(cronOut), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Check if this line involves our app
+		if !strings.Contains(line, appName) && !strings.Contains(line, "soul") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 6 {
+			continue
+		}
+		sched := strings.Join(parts[:5], " ")
+		cmd := strings.Join(parts[5:], " ")
+
+		// Extract binary path (first token of command)
+		cmdParts := strings.Fields(cmd)
+		binary := cmdParts[0]
+
+		// Extract args (up to >>)
+		var args []string
+		var logFile string
+		for i, p := range cmdParts[1:] {
+			if p == ">>" {
+				if i+2 < len(cmdParts) {
+					logFile = cmdParts[i+2]
+				}
+				break
+			}
+			args = append(args, p)
+		}
+
+		entries = append(entries, cronEntry{
+			schedule: sched,
+			binary:   binary,
+			args:     strings.Join(args, " "),
+			logFile:  logFile,
+			raw:      line,
+		})
+	}
+
+	if len(entries) == 0 {
+		warn("no %s entries found in crontab", appName)
+		fmt.Printf("\n🩺 audit complete: %d issues\n", issues)
+		return
+	}
+
+	for _, e := range entries {
+		fmt.Printf("\n  %s  %s %s\n", e.schedule, filepath.Base(e.binary), e.args)
+	}
+	fmt.Println()
+
+	// 2. Binary path check
+	fmt.Println("── Binary Path ──")
+	for _, e := range entries {
+		// Check if the crontab binary matches the installed one
+		cronBinReal, _ := filepath.EvalSymlinks(e.binary)
+		localBinReal, _ := filepath.EvalSymlinks(localBin)
+		installedReal, _ := filepath.EvalSymlinks(installedBin)
+
+		if cronBinReal != localBinReal && cronBinReal != installedReal {
+			// Check if crontab binary is older
+			cronInfo, err1 := os.Stat(e.binary)
+			localInfo, err2 := os.Stat(localBin)
+			if err1 == nil && err2 == nil {
+				if cronInfo.ModTime().Before(localInfo.ModTime()) {
+					warn("%s uses OLD binary: %s (mod %s)\n       installed: %s (mod %s)\n       fix: crontab -e → replace %s with %s",
+						e.args, e.binary, cronInfo.ModTime().Format("2006-01-02 15:04"),
+						localBin, localInfo.ModTime().Format("2006-01-02 15:04"),
+						e.binary, localBin)
+				} else {
+					info("%s: binary differs from installed (%s vs %s)", e.args, e.binary, localBin)
+				}
+			} else {
+				warn("%s: binary path %s — cannot stat: %v", e.args, e.binary, err1)
+			}
+		} else {
+			ok("%s: binary path matches installed", e.args)
+		}
+	}
+
+	// 3. Schedule sanity
+	fmt.Println("\n── Schedule Sanity ──")
+	hasHeartbeat, hasCron, hasEvolve := false, false, false
+	for _, e := range entries {
+		switch {
+		case strings.Contains(e.args, "--heartbeat"):
+			hasHeartbeat = true
+			// Should be every 10-30 minutes
+			if strings.HasPrefix(e.schedule, "*/") {
+				parts := strings.Split(e.schedule, " ")
+				if interval := parts[0]; interval == "*/15" || interval == "*/10" || interval == "*/20" || interval == "*/30" {
+					ok("heartbeat: %s (good interval)", e.schedule)
+				} else {
+					info("heartbeat: %s (unusual interval, expected */10-30)", e.schedule)
+				}
+			}
+		case strings.Contains(e.args, "--cron"):
+			hasCron = true
+			ok("cron: %s", e.schedule)
+		case strings.Contains(e.args, "--evolve"):
+			hasEvolve = true
+			ok("evolve: %s", e.schedule)
+		}
+	}
+	if !hasHeartbeat {
+		warn("no --heartbeat entry in crontab")
+	}
+	if !hasCron {
+		warn("no --cron entry in crontab")
+	}
+	if !hasEvolve {
+		warn("no --evolve entry in crontab")
+	}
+
+	// 4. Log file health
+	fmt.Println("\n── Log Files ──")
+	for _, e := range entries {
+		if e.logFile == "" {
+			info("%s: no log file configured", e.args)
+			continue
+		}
+		logInfo, err := os.Stat(e.logFile)
+		if err != nil {
+			info("%s: log not found yet (%s)", e.args, e.logFile)
+		} else {
+			age := time.Since(logInfo.ModTime())
+			sizeKB := logInfo.Size() / 1024
+			if age > 48*time.Hour && strings.Contains(e.args, "--heartbeat") {
+				warn("%s: log stale (last write %s ago) — cron may not be running", e.args, age.Round(time.Hour))
+			} else if sizeKB > 10240 {
+				warn("%s: log large (%d KB), consider rotation", e.args, sizeKB)
+			} else {
+				ok("%s: log ok (%d KB, last write %s ago)", e.args, sizeKB, age.Round(time.Minute))
+			}
+		}
+	}
+
+	// 5. Evolve-probe readiness
+	fmt.Println("\n── Evolve-Probe Readiness ──")
+	feedbacks, err := listActiveFeedbacks("")
+	if err != nil {
+		warn("cannot list feedbacks: %v", err)
+	} else {
+		withScenarios := 0
+		noScenarios := 0
+		for _, fb := range feedbacks {
+			if len(fb.TestScenarios) > 0 {
+				withScenarios++
+			} else {
+				noScenarios++
+				warn("feedback %q has no test_scenarios", fb.Name)
+			}
+		}
+		if noScenarios == 0 {
+			ok("%d active feedbacks, all have test_scenarios", withScenarios)
+		} else {
+			warn("%d/%d feedbacks missing test_scenarios", noScenarios, withScenarios+noScenarios)
+		}
+
+		// Check for never-probed feedbacks
+		neverProbed := 0
+		for _, fb := range feedbacks {
+			if feedbackLastProbed(fb).IsZero() {
+				neverProbed++
+			}
+		}
+		if neverProbed > 0 {
+			info("%d feedbacks never probed (will be prioritized by --sample)", neverProbed)
+		}
+	}
+
+	// 6. Evolve template check — does it reference evolve-probe?
+	fmt.Println("\n── Evolve Template ──")
+	evolveOut := evolveTask()
+	if strings.Contains(evolveOut, "evolve-probe") {
+		ok("evolve template includes probe phase")
+	} else {
+		warn("evolve template does NOT reference evolve-probe — Phase 3 missing?")
+	}
+	if strings.Contains(evolveOut, "Invariant Check") || strings.Contains(evolveOut, "invariants") {
+		ok("evolve template includes invariant check phase")
+	} else {
+		warn("evolve template missing invariant check phase")
+	}
+	if strings.Contains(evolveOut, "Fact Drift") || strings.Contains(evolveOut, "fact drift") {
+		ok("evolve template includes fact drift reconciler")
+	} else {
+		info("evolve template missing fact drift reconciler (optional)")
+	}
+
+	// 7. Metrics — recent run success
+	fmt.Println("\n── Recent Run History ──")
+	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+	if data, err := os.ReadFile(metricsPath); err == nil {
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		modes := map[string]struct{ total, fail int }{}
+		var lastRun map[string]time.Time = make(map[string]time.Time)
+		for _, line := range lines {
+			var rec struct {
+				Mode     string `json:"mode"`
+				ExitCode int    `json:"exit_code"`
+				Ts       string `json:"ts"`
+			}
+			if json.Unmarshal([]byte(line), &rec) != nil || rec.Mode == "" {
+				continue
+			}
+			// Only count modes we care about
+			switch rec.Mode {
+			case "heartbeat", "cron", "evolve":
+			default:
+				continue
+			}
+			m := modes[rec.Mode]
+			m.total++
+			if rec.ExitCode != 0 {
+				m.fail++
+			}
+			modes[rec.Mode] = m
+			if t, err := time.Parse(time.RFC3339, rec.Ts); err == nil {
+				lastRun[rec.Mode] = t
+			}
+		}
+
+		for _, mode := range []string{"heartbeat", "cron", "evolve"} {
+			m, exists := modes[mode]
+			if !exists {
+				warn("%s: never run (no metrics)", mode)
+				continue
+			}
+			failRate := float64(m.fail) / float64(m.total) * 100
+			last := lastRun[mode]
+			ago := time.Since(last).Round(time.Hour)
+			if failRate > 50 {
+				warn("%s: %.0f%% failure rate (%d/%d), last run %s ago", mode, failRate, m.fail, m.total, ago)
+			} else {
+				ok("%s: %.0f%% success (%d/%d), last run %s ago", mode, 100-failRate, m.total-m.fail, m.total, ago)
+			}
+		}
+	} else {
+		warn("no metrics.jsonl — cannot check run history")
+	}
+
+	// Summary
+	fmt.Println()
+	if issues == 0 {
+		fmt.Println("🩺 cron audit complete: all clear")
+	} else {
+		fmt.Printf("🩺 cron audit complete: found %d issues\n", issues)
+	}
+}
+
 // handleDiff shows soul/memory file changes since last commit
 func handleDiff() {
 	// files of interest

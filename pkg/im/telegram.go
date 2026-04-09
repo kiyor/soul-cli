@@ -321,6 +321,67 @@ func EditMessage(token, chatID string, messageID int, text string) bool {
 	return false
 }
 
+// SendMessagePlain sends a text message without parse_mode (plain text).
+// Used during streaming to avoid incomplete markdown rejection.
+func SendMessagePlain(token, chatID, text string) SendResult {
+	if len(text) > MaxMessageLen {
+		text = text[:MaxMessageLen-20] + "\n\n...(truncated)"
+	}
+
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
+	params := url.Values{
+		"chat_id": {chatID},
+		"text":    {text},
+	}
+
+	resp, err := http.PostForm(apiURL, params)
+	if err != nil {
+		return SendResult{}
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	var result struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			MessageID int `json:"message_id"`
+		} `json:"result"`
+	}
+	json.Unmarshal(body, &result)
+	if result.OK {
+		return SendResult{OK: true, MessageID: result.Result.MessageID}
+	}
+	return SendResult{}
+}
+
+// EditMessagePlain edits an existing message without parse_mode (plain text).
+// Used during streaming to avoid incomplete markdown rejection.
+func EditMessagePlain(token, chatID string, messageID int, text string) bool {
+	if len(text) > MaxMessageLen {
+		text = text[:MaxMessageLen-20] + "\n\n...(truncated)"
+	}
+
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", token)
+	params := url.Values{
+		"chat_id":    {chatID},
+		"message_id": {strconv.Itoa(messageID)},
+		"text":       {text},
+	}
+
+	resp, err := http.PostForm(apiURL, params)
+	if err != nil {
+		return false
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	var result struct {
+		OK bool `json:"ok"`
+	}
+	json.Unmarshal(body, &result)
+	return result.OK
+}
+
 // SendChatAction sends a "typing" indicator.
 func SendChatAction(token, chatID, action string) {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendChatAction", token)

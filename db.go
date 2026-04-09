@@ -80,6 +80,11 @@ func openDB() (*sql.DB, error) {
 			return nil, fmt.Errorf("schema creation failed: %w", err)
 		}
 	}
+	// soul_sessions table (session lifecycle management)
+	if err := ensureSoulSessionTable(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("soul_sessions schema failed: %w", err)
+	}
 	return db, nil
 }
 

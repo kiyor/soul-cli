@@ -255,6 +255,45 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, data)
 	}))
 
+	// List configured providers (for UI model dropdown, apiKey redacted)
+	mux.HandleFunc("GET /api/providers", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		type providerInfo struct {
+			Name   string   `json:"name"`
+			Models []string `json:"models,omitempty"`
+		}
+		// Read providers from config.json
+		configPaths := []string{
+			filepath.Join(appHome, "data", "config.json"),
+			filepath.Join(workspace, "scripts", appName, "config.json"),
+		}
+		var providers []providerInfo
+		for _, p := range configPaths {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			var raw struct {
+				Providers map[string]struct {
+					BaseURL string   `json:"baseUrl"`
+					Models  []string `json:"models,omitempty"`
+				} `json:"providers"`
+			}
+			if json.Unmarshal(data, &raw) == nil && len(raw.Providers) > 0 {
+				for name, prov := range raw.Providers {
+					if prov.BaseURL == "" {
+						continue
+					}
+					providers = append(providers, providerInfo{Name: name, Models: prov.Models})
+				}
+				break
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"providers":    providers,
+			"defaultModel": defaultModel,
+		})
+	}))
+
 	// List available skills
 	mux.HandleFunc("GET /api/skills", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		var skills []map[string]string
@@ -926,6 +965,17 @@ func handleServer(args []string) {
 			taskMsg = fmt.Sprintf("Context: %s\n\n%s", reason, hb)
 		}
 
+		// Soul session lifecycle: resume or create
+		endStaleSoulSessions()
+		claudeResumeID := getActiveSoulSession(agentName)
+		soulSessionID := getActiveSoulSessionID(agentName)
+		if claudeResumeID != "" {
+			fmt.Fprintf(os.Stderr, "[%s] server: wake resuming soul session (claude %s)\n", appName, shortID(claudeResumeID))
+		} else {
+			// No active soul session — create a new daily one
+			soulSessionID = createSoulSession(agentName, "daily", 2.0)
+		}
+
 		sessName := fmt.Sprintf("heartbeat-%s", time.Now().Format("0102-1504"))
 		sess, err := sm.createSessionWithOpts(sessionCreateOpts{
 			Name:     sessName,
@@ -933,11 +983,29 @@ func handleServer(args []string) {
 			Soul:     soulEnabled,
 			Category: CategoryHeartbeat,
 			Tags:     []string{"auto"},
+			ResumeID: claudeResumeID,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[%s] server: wake failed to create session: %v\n", appName, err)
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			return
+		}
+
+		// Link or touch soul session once Claude session ID is available
+		if soulSessionID > 0 {
+			go func(soulID int64, s *serverSession) {
+				deadline := time.Now().Add(30 * time.Second)
+				for time.Now().Before(deadline) {
+					s.mu.Lock()
+					cid := s.ClaudeSID
+					s.mu.Unlock()
+					if cid != "" {
+						linkSoulSession(soulID, cid)
+						return
+					}
+					time.Sleep(500 * time.Millisecond)
+				}
+			}(soulSessionID, sess)
 		}
 
 		// Send heartbeat task as initial message
@@ -952,12 +1020,17 @@ func handleServer(args []string) {
 		if !soulEnabled {
 			soulLabel = "no soul"
 		}
-		fmt.Fprintf(os.Stderr, "[%s] server: wake triggered: %s (%s, session %s)\n", appName, reason, soulLabel, shortID(sess.ID))
+		resumeLabel := ""
+		if claudeResumeID != "" {
+			resumeLabel = fmt.Sprintf(" [resume %s]", shortID(claudeResumeID))
+		}
+		fmt.Fprintf(os.Stderr, "[%s] server: wake triggered: %s (%s, session %s%s)\n", appName, reason, soulLabel, shortID(sess.ID), resumeLabel)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":         true,
 			"session_id": sess.ID,
 			"reason":     reason,
 			"soul":       soulEnabled,
+			"resumed":    claudeResumeID != "",
 		})
 	})
 

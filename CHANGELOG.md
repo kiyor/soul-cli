@@ -1,5 +1,79 @@
 # Changelog
 
+## v1.10.0
+
+### Id Mode (本我模式)
+
+- **Default `--system-prompt-file`**: Soul prompt now *replaces* Claude Code's native system prompt instead of appending to it — strips CC's intro/tone/guidance, leaving only the soul identity
+- **`--standard` flag**: Reverts to `--append-system-prompt-file` (old behavior) for compatibility
+- **`--id` / `--soul` flags**: Explicit no-op aliases for default Id Mode
+- **Server-side `ReplaceSoul` option**: `sessionCreateOpts.ReplaceSoul` threads through to `spawnClaude` → `sessionOpts.ReplaceSoul`
+
+### Multi-Provider Model Routing
+
+- **`--model provider/model` CLI flag**: e.g. `weiran --model zai/glm-5.1`, `weiran --model minimax/MiniMax-M2.7`
+- **`providers` config section** in `config.json`: `baseUrl`, `apiKey`, `authEnv`, `models` per provider
+- **`resolveProvider` / `injectProviderEnv`**: Looks up provider config, injects `ANTHROPIC_BASE_URL` + auth env, bypasses local proxy
+- **`defaultModel` in config.json**: Applies to cron/heartbeat/evolve modes automatically; override via `WEIRAN_DEFAULT_MODEL` env var
+- **`GET /api/providers`**: Server endpoint lists providers (apiKey redacted) + `defaultModel` for UI model dropdown
+- **`providerModelName`**: Strips `provider/` prefix when passing `--model` to Claude Code
+
+### Soul Session Persistence
+
+- **`soul_sessions` DB table**: Tracks per-agent daily soul sessions (claude session ID, last-touch, budget)
+- **Heartbeat resume**: On each heartbeat run, checks for an active soul session and passes `--resume <id>` to Claude — continuity across 24h window
+- **`endStaleSoulSessions`**: Expires sessions inactive >24h
+- **Server wake integration**: `/api/wake` (heartbeat trigger) participates in soul session lifecycle — resumes or creates, async-links Claude session ID
+- **`detectNewSession`**: Polls JSONL files after run to find the newly-created Claude session ID for linking
+
+### Voice Message Transcription
+
+- **Telegram voice/audio handling**: Downloads OGG via Telegram file API, converts with `ffmpeg → whisper-cli`
+- **Fast path**: `ffmpeg -ar 16000 -ac 1 → whisper-cli --language auto --no-timestamps` with timeout (30s + 2×duration)
+- **Echo transcript**: Sends `📝 "transcript"` back to user for verification before passing to Claude
+- **Delegation fallback**: If tools missing, builds a detailed self-install prompt for Claude to handle the audio itself
+- **Model**: Prefers `ggml-small.bin`, falls back to `ggml-base.bin`
+
+### Telegram Improvements
+
+- **Streaming plain text**: `sendOrEditPlain` uses no `parse_mode` during streaming to avoid Telegram rejecting incomplete markdown; final `flush()` uses Markdown mode
+- **Shutdown drain**: `drainQueue` processes remaining messages before consumer goroutines exit; `queueWg` coordinates clean shutdown
+- **`SendMessagePlain` / `EditMessagePlain`** in `pkg/im/telegram.go`: Plain-text variants for streaming use
+
+### OAuth Token Sharing
+
+- **`CLAUDE_CODE_OAUTH_TOKEN` injection**: All spawned Claude processes share one static OAuth token — prevents race conditions from concurrent OAuth refreshes
+- **Priority**: env var → `workspace/.oauth-token` file → `config.json server.oauthToken`
+
+### `doctor cron` Subcommand
+
+- **`weiran doctor cron`**: Audits crontab entries — binary path staleness, schedule sanity (heartbeat/cron/evolve coverage), log file health, evolve-probe readiness, recent run metrics
+
+### `evolve-probe` Subcommand
+
+- **`probe.go`**: Thought-experiment probes against feedback rules (v2 frontmatter `test_scenarios`)
+- **`weiran evolve-probe -f <feedback> -s <scenario> [--mode with|without|both]`**: Runs a probe against one scenario
+- **`--list`**: Lists scenarios for a feedback
+- **`--sample N`**: Probes N least-recently-probed active feedbacks
+- **`--regression-archive`**: Monthly probe of all archived rules
+- **Judge**: haiku model auto-judges PASS/FAIL; updates `probe_pass_streak` in frontmatter
+- **Proposals**: Archive/regression proposals written to `memory/evolve/proposals-YYYY-MM-DD.md`
+
+### Evolve Template Overhaul
+
+- **Phase 0**: Review recent interactions (unchanged)
+- **Phase 1**: Invariant Check — scans `invariants.yaml`, hard safety check, sends notify on violation
+- **Phase 1.5**: Fact Drift Reconciler — detects stale values across workspace files from git diff
+- **Phase 2**: New Feedback Detection — scans daily notes for correction keywords, creates drafts in `memory/evolve/new/` (human approval required)
+- **Phase 3**: Active Feedback Probing — `weiran evolve-probe --sample 3`
+- **Phase N**: Soul & Memory Evolution (renumbered)
+- **Wrap Up**: Report template now includes invariant/fact-drift/feedback/probe summary fields
+
+### Miscellaneous
+
+- **`doctor` passes extra args**: `parseArgs` now forwards extra args after `doctor` subcommand
+- **`gopkg.in/yaml.v3`** added as dependency (for probe.go frontmatter parsing)
+
 ## v1.9.0
 
 ### Spawn System

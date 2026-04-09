@@ -225,16 +225,17 @@ func (c *wsClient) writePump() {
 
 func (c *wsClient) handleMessage(raw []byte) {
 	var msg struct {
-		Type       string `json:"type"`
-		SID        string `json:"sid"`
-		Message    string `json:"message"`
-		Name       string `json:"name"`
-		Project    string `json:"project"`
-		Model      string `json:"model"`
-		SoulFiles  *bool  `json:"soul_files"`
-		InitMsg    string `json:"initial_message"`
-		SkipReplay bool   `json:"skip_replay"`
-		GalID      string `json:"gal_id"`
+		Type        string `json:"type"`
+		SID         string `json:"sid"`
+		Message     string `json:"message"`
+		Name        string `json:"name"`
+		Project     string `json:"project"`
+		Model       string `json:"model"`
+		SoulFiles   *bool  `json:"soul_files"`
+		InitMsg     string `json:"initial_message"`
+		SkipReplay  bool   `json:"skip_replay"`
+		GalID       string `json:"gal_id"`
+		ReplaceSoul *bool  `json:"replace_soul"` // 本我模式; nil → default false for create, inherit-from-DB for resume
 	}
 	if json.Unmarshal(raw, &msg) != nil {
 		c.sendJSON(map[string]string{"type": "error", "error": "invalid JSON"})
@@ -325,13 +326,18 @@ func (c *wsClient) handleMessage(raw []byte) {
 		if msg.SoulFiles != nil {
 			soul = *msg.SoulFiles
 		}
+		replaceSoul := false
+		if msg.ReplaceSoul != nil {
+			replaceSoul = *msg.ReplaceSoul
+		}
 		sess, err := c.hub.sm.createSessionWithOpts(sessionCreateOpts{
-			Name:     name,
-			Project:  project,
-			Model:    msg.Model,
-			Soul:     soul,
-			GalID:    msg.GalID,
-			Category: CategoryInteractive,
+			Name:        name,
+			Project:     project,
+			Model:       msg.Model,
+			Soul:        soul,
+			GalID:       msg.GalID,
+			Category:    CategoryInteractive,
+			ReplaceSoul: replaceSoul,
 		})
 		if err != nil {
 			c.sendJSON(map[string]string{"type": "error", "error": err.Error()})
@@ -391,7 +397,7 @@ func (c *wsClient) handleMessage(raw []byte) {
 			c.sendJSON(map[string]string{"type": "error", "error": "rate limit exceeded"})
 			return
 		}
-		sess, err := c.hub.sm.resumeSession(msg.SID, msg.Message, msg.Name, "")
+		sess, err := c.hub.sm.resumeSession(msg.SID, msg.Message, msg.Name, "", msg.ReplaceSoul)
 		if err != nil {
 			c.sendJSON(map[string]string{"type": "error", "error": err.Error()})
 			return

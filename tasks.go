@@ -14,42 +14,75 @@ import (
 
 var evolveTemplate = template.Must(template.New("evolve").Parse(`# Self-Evolution (evolve mode · {{.Today}})
 
-This is your daily self-evolution cycle.
+This is your daily self-evolution cycle. Follow the phases in order.
+If no evolution needed, write "No evolution inspiration today" in the report and exit.
 
-## Goal
-Based on recent interactions and memory, find areas to improve — then **make the changes directly**.
-If there's no inspiration or improvement needed today, notify the user "No evolution needed today" and exit.
-
-## Checklist
-
-### 1. Review Recent Interactions (quick scan)
+## Phase 0: Review Recent Interactions (quick scan)
 Read recent daily notes:
 {{.Notes}}
 Recent session list:
 {{.Sessions}}
 Ask yourself:
-- Did the user correct my behavior? → Write feedback memory or adjust behavior
+- Did the user correct my behavior? → New feedback candidate (Phase 2)
 - Are there recurring action patterns? → Consider automating or creating a skill
 - Are there failure patterns? → Fix root cause
 - Did the user express new preferences or needs? → Update USER.md or SOUL.md
 
-### 2. System Health Check
-- Run ` + "`{{.CLI}} doctor`" + ` for quick diagnostics
-- Run ` + "`{{.CLI}} db stats`" + ` — any large backlog?
-- Run ` + "`{{.CLI}} db gc`" + ` and ` + "`{{.CLI}} clean`" + ` — clean stale data
+## Phase 1: Invariant Check (always run)
+Scan the most recent 3 days of daily notes and session traces for invariant violations.
+The invariants are defined in ` + "`{{.Workspace}}/memory/evolve/invariants.yaml`" + `.
+
+For each invariant with ` + "`check.mode: trace_scan`" + `:
+- grep the pattern against recent daily notes and session JSONL
+- If matched → **⚠️ CRITICAL**: write to daily notes + send ` + "`{{.CLI}} notify`" + ` immediately
+- If no match → pass, move on
+
+This is a hard safety check. Identity/security violations are not "feedback to improve later" — they are incidents.
+
+## Phase 1.5: Fact Drift Reconciler (always run)
+Check for contradictions between files caused by partial updates.
+
+1. Run: ` + "`cd {{.Workspace}} && git diff HEAD~3..HEAD -- CORE.md SOUL.md IDENTITY.md USER.md AGENTS.md TOOLS.md MEMORY.md memory/`" + `
+2. For each diff hunk that looks like a **fact update** (not just prose/emotion):
+   - grep the old value across all .md files in the workspace
+   - If found in other files → the old value is stale, note it
+3. If stale references found, fix them directly (small, safe replacements).
+4. If no diffs or no fact updates → skip, move on.
+
+## Phase 2: New Feedback Detection (always run)
+Scan the last 3 days of daily notes for patterns where the user corrected behavior:
+- Keywords: 别、不要、错了、不是这样、why did you、为什么
+- Compare against existing ` + "`memory/topics/feedback_*.md`" + ` files
+- If new pattern found → create draft in ` + "`memory/evolve/new/feedback_<name>.md`" + ` with v2 frontmatter
+- **Do NOT auto-move to topics/** — drafts wait for human approval
+
+## Phase 3: Active Feedback Probing (sample 3)
+Run ` + "`{{.CLI}} evolve-probe --sample 3`" + ` to test 3 least-recently-probed active feedback rules.
+
+This invokes the probe engine which:
+- Builds a thought-experiment sandwich prompt (with/without the rule)
+- Judges PASS/FAIL via haiku model
+- Updates ` + "`probe_pass_streak`" + ` in frontmatter
+- Writes archive proposals if streak >= threshold
+
+Review the probe output. If a rule shows "with mode FAIL" (severe degradation), investigate immediately.
 {{.CodeBlock}}
-### {{.SoulStepNum}}. Soul & Memory Evolution
+## Phase {{.SoulStepNum}}: Soul & Memory Evolution
 - Update outdated memory topics
 - Fine-tune SOUL.md / USER.md if new understanding emerged
 - Update AGENTS.md / TOOLS.md if rules changed
 - Improve skills (better prompts, new parameters)
+- Check ` + "`memory/evolve/proposals-*.md`" + ` — any pending proposals to surface?
 
-### {{.WrapStepNum}}. Wrap Up
+## Phase {{.WrapStepNum}}: Wrap Up
 - Record what was evolved today in daily notes ({{.Workspace}}/memory/{{.Today}}.md)
 - **Write report file** (auto-sends via Telegram after exit):
 ` + "```bash" + `
 cat > {{.ReportPath}} << 'RPTEOF'
-🧬 Evolution report:{{if .IsDev}}
+🧬 Evolution report:
+- [invariants] pass/fail count
+- [fact-drift] stale references fixed (if any)
+- [feedback] new drafts / probe results (N pass, N fail){{if .IsDev}}
 - [code] what changed and why (if any){{end}}
 - [soul/memory] what changed and why (if any)
 RPTEOF
@@ -62,27 +95,28 @@ If no evolution needed, write "No evolution inspiration today, system running no
 - **Code first** — code improvements are the highest-value evolution
 - **Safety first** — tests must pass, code must compile, ` + "`{{.CLI}} build`" + ` must succeed{{end}}
 - **Leave a trace** — daily notes, every change documented
+- **Probe before prune** — don't archive feedback rules without probe evidence
 `))
 
 // codeEvolutionBlock is injected into evolve template only when source code is present
 var codeEvolutionBlock = template.Must(template.New("code").Parse(`
-### 3. Code Evolution (primary focus)
+### Phase 4: Code Evolution (primary focus)
 Source code is at: {{.SrcDir}}
 
-**3a. Audit** — Read the Go source files, look for:
+**4a. Audit** — Read the Go source files, look for:
 - Bugs: silent error swallowing, incorrect logic, race conditions
 - Dead code: unused functions, stale comments, unreachable branches
 - Performance: unnecessary file reads, unbounded loops, missing caching
 - Security: unsanitized input, missing validation at boundaries
 - Test gaps: untested functions, missing edge cases
 
-**3b. Implement** — For each issue found:
+**4b. Implement** — For each issue found:
 - Fix it directly (edit the file)
 - Keep changes focused — one concern per edit
 - Don't refactor working code for aesthetics
 - Don't add features nobody asked for
 
-**3c. Verify** — After all code changes:
+**4c. Verify** — After all code changes:
 ` + "`cd {{.SrcDir}} && go test ./... -timeout 60s`" + `
 If tests pass: ` + "`{{.CLI}} build`" + `
 If tests fail: fix the failure, don't skip tests.
@@ -90,11 +124,11 @@ If server is running (curl -s localhost:9847/api/health returns ok), also run th
 ` + "`cd {{.SrcDir}} && ./tests/server-api-e2e.sh`" + `
 This validates the full API lifecycle (create/message/rename/delete) with a real Claude session.
 
-**3d. Commit** — Stage and commit with a descriptive message:
+**4d. Commit** — Stage and commit with a descriptive message:
 ` + "`cd {{.SrcDir}} && git add -A && git commit -m \"evolve: <what changed>\"`" + `
 Do NOT push — the user decides when to push.
 
-### 4. Documentation Sync (if code changed)
+### Phase 4d. Documentation Sync (if code changed)
 - CLAUDE.md in the source directory: update architecture table, line counts, feature descriptions if they drifted
 - README.md: only if a user-visible feature was added/removed
 `))
@@ -131,10 +165,12 @@ func evolveTask() string {
 	}
 
 	// Detect developer mode: source code present → include code evolution steps
+	// Phase numbering: 0-3 are fixed (review, invariant, fact-drift, feedback, probe)
+	// Code evolution inserts as Phase 4 when source exists
 	isDev := hasSourceCode()
 	codeBlock := ""
-	soulStep := "3"
-	wrapStep := "4"
+	soulStep := "4"  // soul step after probing
+	wrapStep := "5"
 	if isDev {
 		cData := map[string]string{"SrcDir": appDir, "CLI": appName}
 		var cBuf bytes.Buffer

@@ -1054,7 +1054,45 @@ var activeProxyPort int // set when proxy starts in server process
 var (
 	detectedProxyPort int
 	detectProxyOnce   sync.Once
+	cachedOAuthToken  string // CLAUDE_CODE_OAUTH_TOKEN captured at startup
+	oauthTokenOnce    sync.Once
 )
+
+// oauthToken returns the cached CLAUDE_CODE_OAUTH_TOKEN.
+// Priority: env var > workspace/.oauth-token file > config.json server.oauthToken
+func oauthToken() string {
+	oauthTokenOnce.Do(func() {
+		// 1. Environment variable
+		if tok := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); tok != "" {
+			cachedOAuthToken = tok
+			fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from env\n", appName)
+			return
+		}
+		// 2. File: workspace/.oauth-token (like .jira-token pattern)
+		tokenFile := workspace + "/.oauth-token"
+		if data, err := os.ReadFile(tokenFile); err == nil {
+			if tok := strings.TrimSpace(string(data)); tok != "" {
+				cachedOAuthToken = tok
+				fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from %s\n", appName, tokenFile)
+				return
+			}
+		}
+		// 3. config.json server.oauthToken
+		type oauthCfg struct {
+			Server struct {
+				OAuthToken string `json:"oauthToken"`
+			} `json:"server"`
+		}
+		if data, err := os.ReadFile(appDir + "/config.json"); err == nil {
+			var c oauthCfg
+			if json.Unmarshal(data, &c) == nil && c.Server.OAuthToken != "" {
+				cachedOAuthToken = c.Server.OAuthToken
+				fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from config.json\n", appName)
+			}
+		}
+	})
+	return cachedOAuthToken
+}
 
 func proxyEnv() string {
 	if activeProxyPort > 0 {
@@ -1095,28 +1133,52 @@ func detectRemoteProxy() int {
 }
 
 // injectProxyEnv appends the proxy env var to an env slice if the proxy is active.
+// Uses the global overrideModel for provider detection (CLI mode).
 func injectProxyEnv(env []string) []string {
-	return injectProxyEnvWithSession(env, "")
+	return injectProxyEnvWithModel(env, "", overrideModel)
 }
 
 // injectProxyEnvWithSession appends the proxy env var with an optional session ID path prefix.
-// When sessionID is set, ANTHROPIC_BASE_URL becomes http://127.0.0.1:{port}/s/{sessionID}
-// so the proxy Director can extract the session ID from the URL path.
+// Uses the global overrideModel for provider detection (backward compat).
 func injectProxyEnvWithSession(env []string, sessionID string) []string {
-	if e := proxyEnv(); e != "" {
+	return injectProxyEnvWithModel(env, sessionID, overrideModel)
+}
+
+// injectProxyEnvWithModel is the core env injection function.
+// model: if provider/model format, routes directly to provider (skip local proxy).
+// sessionID: if set, appends /s/{sessionID} to proxy URL for cost tracking.
+func injectProxyEnvWithModel(env []string, sessionID string, model string) []string {
+	// If model is a provider model, use provider endpoint directly (skip local proxy)
+	if overrideEnv, applied := injectProviderEnv(env, model); applied {
+		env = overrideEnv
+	} else if e := proxyEnv(); e != "" {
 		// If sessionID provided, append path prefix
 		if sessionID != "" {
 			// e is "ANTHROPIC_BASE_URL=http://127.0.0.1:9091"
 			e = e + "/s/" + sessionID
 		}
 		// Remove any existing ANTHROPIC_BASE_URL to avoid conflict
-		filtered := make([]string, 0, len(env)+1)
+		filtered := make([]string, 0, len(env)+2)
 		for _, v := range env {
 			if !strings.HasPrefix(v, "ANTHROPIC_BASE_URL=") {
 				filtered = append(filtered, v)
 			}
 		}
-		return append(filtered, e)
+		env = append(filtered, e)
 	}
+
+	// Inject CLAUDE_CODE_OAUTH_TOKEN if available — ensures all spawned claude
+	// processes share one static token instead of each doing OAuth refresh
+	// (which causes race conditions with concurrent sessions).
+	if tok := oauthToken(); tok != "" {
+		filtered := make([]string, 0, len(env)+1)
+		for _, v := range env {
+			if !strings.HasPrefix(v, "CLAUDE_CODE_OAUTH_TOKEN=") {
+				filtered = append(filtered, v)
+			}
+		}
+		env = append(filtered, "CLAUDE_CODE_OAUTH_TOKEN="+tok)
+	}
+
 	return env
 }

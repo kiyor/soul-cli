@@ -161,6 +161,7 @@ type sessionCreateOpts struct {
 	Tags        []string // freeform labels
 	EnvOverride string   // if set, replaces the environment section in BOOT.md
 	ReplaceSoul bool     // 本我模式 — use --system-prompt-file instead of --append-system-prompt-file
+	ResumeID    string   // Claude Code session ID to resume (adds --resume <id>)
 }
 
 // createSession spawns a new Claude Code session.
@@ -263,6 +264,7 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		Model:            opts.Model,
 		MCPConfig:        opts.MCP,
 		ReplaceSoul:      opts.ReplaceSoul,
+		ResumeID:         opts.ResumeID,
 	}
 	proc, err := spawnClaude(spawnOpts)
 	if err != nil {

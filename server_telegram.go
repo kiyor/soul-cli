@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -43,7 +45,8 @@ type telegramBridge struct {
 	// sessions for the same chatID simultaneously
 	createMu sync.Mutex
 
-	stop chan struct{}
+	stop    chan struct{}
+	queueWg sync.WaitGroup // tracks active consumeQueue goroutines
 }
 
 // tgChat holds per-chat state including the message queue.
@@ -109,7 +112,11 @@ func (tb *telegramBridge) start() {
 }
 
 func (tb *telegramBridge) shutdown() {
+	// Signal all consumeQueue goroutines to drain and exit
 	close(tb.stop)
+
+	// Wait for all queue consumers to finish draining
+	tb.queueWg.Wait()
 
 	// Trigger summary save for all active bridges before stopping
 	tb.bridgeMu.Lock()
@@ -118,7 +125,7 @@ func (tb *telegramBridge) shutdown() {
 	}
 	tb.bridgeMu.Unlock()
 
-	// Stop all chat queues
+	// Stop all chat queues (in case any weren't triggered by tb.stop)
 	tb.chatMu.Lock()
 	for _, chat := range tb.chats {
 		chat.stopOnce.Do(func() { close(chat.stop) })
@@ -151,7 +158,11 @@ func (tb *telegramBridge) getOrCreateChat(chatID string) *tgChat {
 	tb.chats[chatID] = chat
 
 	// Start queue consumer goroutine
-	go tb.consumeQueue(chat)
+	tb.queueWg.Add(1)
+	go func() {
+		defer tb.queueWg.Done()
+		tb.consumeQueue(chat)
+	}()
 
 	return chat
 }
@@ -161,11 +172,25 @@ func (tb *telegramBridge) consumeQueue(chat *tgChat) {
 	for {
 		select {
 		case <-chat.stop:
+			tb.drainQueue(chat)
 			return
 		case <-tb.stop:
+			tb.drainQueue(chat)
 			return
 		case text := <-chat.queue:
 			tb.processMessage(chat, text)
+		}
+	}
+}
+
+// drainQueue processes any remaining messages in the queue before shutdown.
+func (tb *telegramBridge) drainQueue(chat *tgChat) {
+	for {
+		select {
+		case text := <-chat.queue:
+			tb.processMessage(chat, text)
+		default:
+			return
 		}
 	}
 }
@@ -179,6 +204,22 @@ func (tb *telegramBridge) handleMessage(chatID string, msg *im.Message) {
 	if len(msg.Photo) > 0 && text == "" {
 		photo := msg.Photo[len(msg.Photo)-1] // largest size
 		text = tb.handleIncomingPhoto(photo.FileID, msg.Caption)
+		if text == "" {
+			return
+		}
+	}
+
+	// Handle voice messages: download OGG, transcribe via whisper-cpp
+	if msg.Voice != nil && text == "" {
+		text = tb.handleIncomingVoice(chatID, msg.Voice.FileID, msg.Voice.Duration, msg.Caption)
+		if text == "" {
+			return
+		}
+	}
+
+	// Handle audio messages (same flow as voice)
+	if msg.Audio != nil && text == "" {
+		text = tb.handleIncomingVoice(chatID, msg.Audio.FileID, msg.Audio.Duration, msg.Caption)
 		if text == "" {
 			return
 		}
@@ -366,6 +407,146 @@ func (tb *telegramBridge) handleIncomingPhoto(fileID, caption string) string {
 		msg = fmt.Sprintf("%s\n%s", caption, msg)
 	}
 	return msg
+}
+
+// handleIncomingVoice downloads a TG voice/audio message, transcribes it via
+// whisper-cpp, and returns the transcribed text for Claude.
+func (tb *telegramBridge) handleIncomingVoice(chatID, fileID string, duration int, caption string) string {
+	fileURL := im.GetFileURL(tb.token, fileID)
+	if fileURL == "" {
+		fmt.Fprintf(os.Stderr, "[%s] telegram: failed to get file URL for voice %s\n", appName, fileID)
+		return ""
+	}
+
+	// Download to temp file (kept alive — Claude may need it for manual transcription)
+	ts := time.Now().UnixMilli()
+	tmpOGG := fmt.Sprintf("/tmp/tg-voice-%d.ogg", ts)
+	if err := im.DownloadFile(fileURL, tmpOGG); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] telegram: failed to download voice: %v\n", appName, err)
+		return ""
+	}
+
+	// Try the fast path: ffmpeg → whisper-cli
+	transcript := tb.tryTranscribeFast(tmpOGG, ts, duration)
+	if transcript != "" {
+		defer os.Remove(tmpOGG)
+
+		// Echo transcript back so user can verify
+		echoMsg := fmt.Sprintf("📝 \"%s\"", transcript)
+		im.SendMessage(tb.token, chatID, echoMsg)
+
+		msg := fmt.Sprintf("[User sent a voice message (%ds), transcribed: \"%s\"]", duration, transcript)
+		if caption != "" {
+			msg = fmt.Sprintf("%s\n%s", caption, msg)
+		}
+		return msg
+	}
+
+	// Slow path: delegate to Claude with installation instructions
+	fmt.Fprintf(os.Stderr, "[%s] telegram: fast transcription failed, delegating to Claude\n", appName)
+	msg := buildVoiceDelegationPrompt(tmpOGG, duration)
+	if caption != "" {
+		msg = fmt.Sprintf("%s\n%s", caption, msg)
+	}
+	return msg
+}
+
+// tryTranscribeFast attempts ffmpeg convert + whisper-cli transcription.
+// Returns transcript on success, "" on any failure (missing tools, bad audio, etc).
+func (tb *telegramBridge) tryTranscribeFast(oggPath string, ts int64, duration int) string {
+	// Check ffmpeg
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return ""
+	}
+
+	tmpWAV := fmt.Sprintf("/tmp/tg-voice-%d.wav", ts)
+	ffmpegCtx, ffmpegCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer ffmpegCancel()
+	if out, err := exec.CommandContext(ffmpegCtx, "ffmpeg", "-y", "-i", oggPath, "-ar", "16000", "-ac", "1", "-f", "wav", tmpWAV).CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] telegram: ffmpeg convert failed: %v\n%s\n", appName, err, out)
+		return ""
+	}
+	defer os.Remove(tmpWAV)
+
+	return transcribeAudio(tmpWAV, duration)
+}
+
+// buildVoiceDelegationPrompt returns a Claude-facing message that instructs it
+// to install missing STT tools and transcribe the audio file itself.
+func buildVoiceDelegationPrompt(oggPath string, duration int) string {
+	return fmt.Sprintf(`[User sent a voice message (%ds). Audio file saved at: %s
+
+STT fast-path failed (missing ffmpeg/whisper-cli or model). You need to handle this:
+
+1. **Check & install missing tools** (one-time setup, they persist across sessions):
+   - ffmpeg: `+"`brew install ffmpeg`"+`
+   - whisper-cpp: `+"`brew install whisper-cpp`"+` (provides whisper-cli)
+   - Model: `+"`mkdir -p ~/.local/share/whisper-cpp && curl -L -o ~/.local/share/whisper-cpp/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin`"+`
+
+2. **Convert & transcribe**:
+   - `+"`ffmpeg -y -i %s -ar 16000 -ac 1 -f wav /tmp/tg-voice.wav`"+`
+   - `+"`whisper-cli -m ~/.local/share/whisper-cpp/ggml-small.bin -f /tmp/tg-voice.wav --no-timestamps --language auto --no-prints`"+`
+
+3. **Reply to the user** based on the transcription content (not the transcription itself — respond to what they said).
+4. **Clean up** temp files after transcription.
+
+Do this silently — don't tell the user about installation steps, just handle the voice message naturally.]`, duration, oggPath, oggPath)
+}
+
+// transcribeAudio calls whisper-cli to transcribe an audio file.
+// Returns the transcribed text, or "" on failure.
+func transcribeAudio(audioPath string, durationSec int) string {
+	// Find whisper-cli
+	whisperBin := "/opt/homebrew/bin/whisper-cli"
+	if _, err := os.Stat(whisperBin); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] whisper: binary not found at %s\n", appName, whisperBin)
+		return ""
+	}
+
+	// Model path — prefer small (better accuracy, especially zh/auto), fall back to base
+	modelDir := filepath.Join(os.Getenv("HOME"), ".local", "share", "whisper-cpp")
+	modelPath := filepath.Join(modelDir, "ggml-small.bin")
+	if _, err := os.Stat(modelPath); err != nil {
+		modelPath = filepath.Join(modelDir, "ggml-base.bin") // fallback
+	}
+	if _, err := os.Stat(modelPath); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] whisper: model not found at %s\n", appName, modelPath)
+		return ""
+	}
+
+	// Timeout: 30s baseline + 2x duration (generous for CPU)
+	timeout := 30*time.Second + time.Duration(durationSec*2)*time.Second
+	if timeout > 120*time.Second {
+		timeout = 120 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// whisper-cli -m model -f audio --no-timestamps --output-txt --language auto
+	cmd := exec.CommandContext(ctx, whisperBin,
+		"-m", modelPath,
+		"-f", audioPath,
+		"--no-timestamps",
+		"--language", "auto",
+		"--no-prints",
+	)
+
+	out, err := cmd.Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] whisper: transcription failed: %v\n", appName, err)
+		return ""
+	}
+
+	// Clean up output
+	transcript := strings.TrimSpace(string(out))
+
+	// whisper sometimes outputs "[BLANK_AUDIO]" for silence
+	if transcript == "" || transcript == "[BLANK_AUDIO]" {
+		return ""
+	}
+
+	return transcript
 }
 
 func (tb *telegramBridge) handleCommand(chatID, cmd, args string) {
@@ -726,6 +907,8 @@ func (b *tgOutputBridge) resetTurn() {
 }
 
 // sendOrEdit is used during streaming (before flush) — sends/edits raw text progressively.
+// Uses plain text mode (no parse_mode) to avoid Telegram rejecting incomplete markdown
+// during streaming. The final flush() uses Markdown parse_mode for proper formatting.
 func (b *tgOutputBridge) sendOrEdit() {
 	b.mu.Lock()
 	text := b.turnText.String()
@@ -748,7 +931,26 @@ func (b *tgOutputBridge) sendOrEdit() {
 		return
 	}
 
-	b.sendOrEditText(displayText, msgID)
+	b.sendOrEditPlain(displayText, msgID)
+}
+
+// sendOrEditPlain sends/edits without parse_mode — used during streaming to avoid
+// incomplete markdown causing Telegram API rejections and line break issues.
+func (b *tgOutputBridge) sendOrEditPlain(text string, msgID int) {
+	if msgID == 0 {
+		result := im.SendMessagePlain(b.token, b.chatID, text)
+		b.mu.Lock()
+		if result.OK {
+			b.msgID = result.MessageID
+		}
+		b.lastEditLen = len(text)
+		b.mu.Unlock()
+	} else {
+		im.EditMessagePlain(b.token, b.chatID, msgID, text)
+		b.mu.Lock()
+		b.lastEditLen = len(text)
+		b.mu.Unlock()
+	}
 }
 
 func (b *tgOutputBridge) sendOrEditText(text string, msgID int) {
