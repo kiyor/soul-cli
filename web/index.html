@@ -189,6 +189,12 @@ body{
 .main{display:flex;flex-direction:column;overflow:hidden;position:relative}
 .model-badge{position:absolute;top:8px;right:46px;z-index:10;font-size:11px;color:var(--muted2);background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:6px;padding:2px 8px;backdrop-filter:blur(8px);pointer-events:none;transition:opacity .2s}
 .model-badge:empty{opacity:0}
+.cost-badge{position:absolute;top:8px;right:120px;z-index:10;font-size:11px;color:#d2a8ff;background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:6px;padding:2px 8px;backdrop-filter:blur(8px);pointer-events:none;transition:opacity .2s;font-family:var(--mono)}
+.cost-badge:empty{opacity:0}
+/* 本我 badge — replace-soul (--system-prompt-file) mode indicator */
+.soul-badge{flex-shrink:0;z-index:11;font-family:"Noto Serif SC","STKaiti","Songti SC",serif;font-size:11px;font-weight:600;letter-spacing:2px;color:#1a0a1a;background:linear-gradient(135deg,#ff6bcf 0%,#c084fc 100%);border:1px solid rgba(0,0,0,.45);border-radius:10px;padding:1px 8px;box-shadow:0 0 10px rgba(255,107,207,.5),inset 0 1px 0 rgba(255,255,255,.35);backdrop-filter:blur(8px);cursor:help;display:none;animation:soul-pulse 3s ease-in-out infinite;margin-right:6px}
+.soul-badge.on{display:inline-block}
+@keyframes soul-pulse{0%,100%{box-shadow:0 0 10px rgba(255,107,207,.5),inset 0 1px 0 rgba(255,255,255,.35)}50%{box-shadow:0 0 16px rgba(255,107,207,.75),inset 0 1px 0 rgba(255,255,255,.5)}}
 .context-bar{position:absolute;top:30px;right:46px;z-index:10;display:flex;align-items:center;gap:6px;pointer-events:none;transition:opacity .3s}
 .context-bar.hidden{opacity:0}
 .context-track{width:60px;height:4px;border-radius:99px;background:rgba(255,255,255,.06);overflow:hidden}
@@ -263,8 +269,53 @@ body{
 .sniff-pager button{padding:6px 14px;border-radius:8px;border:1px solid var(--border2);background:var(--bg2);color:var(--text);font-size:12px;cursor:pointer}
 .sniff-pager button:disabled{opacity:.3;cursor:default}
 .sniff-pager span{font-size:12px;color:var(--muted)}
-.sniff-filter{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.sniff-filter{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
 .sniff-filter select,.sniff-filter input{padding:6px 10px;border-radius:8px;border:1px solid var(--border2);background:var(--bg2);color:var(--text);font-size:12px;font-family:var(--mono)}
+.sniff-filter .filter-actions{display:flex;gap:4px;margin-left:auto}
+.sniff-filter .btn-sm{padding:5px 12px;border-radius:6px;border:1px solid var(--border2);background:var(--bg2);color:var(--text);font-size:11px;cursor:pointer}
+.sniff-filter .btn-sm:hover{background:var(--bg3);border-color:var(--accent)}
+.sniff-filter .btn-primary{background:#238636;border-color:#238636;color:#fff}
+.sniff-filter .btn-primary:hover{background:#2ea043}
+.time-presets{display:flex;gap:3px}
+.time-presets button{background:var(--bg2);border:1px solid var(--border2);color:var(--muted);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer}
+.time-presets button:hover,.time-presets button.active{background:var(--bg3);color:var(--text);border-color:var(--accent)}
+/* Summary bar */
+.sniff-summary{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.sniff-summary .s-item{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius2);padding:8px 12px;flex:1;min-width:100px}
+.sniff-summary .s-label{font-size:10px;color:var(--muted2);text-transform:uppercase;letter-spacing:.5px}
+.sniff-summary .s-value{font-size:18px;font-weight:600;margin-top:2px;font-family:var(--mono)}
+/* Log table upgrades */
+.sniff-content table{font-size:12px}
+.sniff-content table thead th{cursor:pointer;user-select:none;white-space:nowrap;position:relative}
+.sniff-content table thead th:hover{color:var(--text)}
+.sniff-content table thead th .sort-arrow{margin-left:3px;font-size:9px;color:var(--muted2)}
+.sniff-content table thead th.sorted .sort-arrow{color:var(--accent)}
+.sniff-content tbody tr{cursor:pointer;transition:background .1s}
+.sniff-content tbody tr:hover{background:var(--bg3)}
+.sniff-content tbody tr.expanded{background:var(--bg3)}
+/* Status badges */
+.status-2xx{color:#3fb950}.status-4xx{color:#f85149}.status-5xx{color:#ff7b72}
+/* Model badges */
+.model-opus{color:#d2a8ff}.model-sonnet{color:#79c0ff}.model-haiku{color:#3fb950}
+/* Cost & token colors */
+.cost-val{color:#d2a8ff;font-weight:600}.token-val{color:#79c0ff}
+.dur-fast{color:#3fb950}.dur-med{color:#d29922}.dur-slow{color:#f85149}
+/* Detail row */
+.detail-row td{padding:0!important;border-bottom:1px solid var(--border)}
+.detail-content{padding:10px 16px;background:var(--bg0);display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:6px}
+@media(max-width:600px){.detail-content{grid-template-columns:1fr 1fr;padding:8px}}
+.detail-item{font-size:11px;min-width:0;overflow-wrap:break-word}
+.detail-item .dk{color:var(--muted2)}.detail-item .dv{color:var(--text);font-weight:500;word-break:break-all}
+/* Page size selector */
+.page-size select{background:var(--bg2);border:1px solid var(--border2);color:var(--text);border-radius:4px;padding:2px 6px;font-size:11px}
+/* Auto-refresh toggle */
+.auto-refresh-wrap{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)}
+.auto-refresh-wrap .toggle-sm{position:relative;width:28px;height:16px;cursor:pointer}
+.auto-refresh-wrap .toggle-sm input{opacity:0;width:0;height:0}
+.auto-refresh-wrap .toggle-sm .slider{position:absolute;inset:0;background:var(--bg2);border-radius:8px;border:1px solid var(--border2);transition:.2s}
+.auto-refresh-wrap .toggle-sm input:checked+.slider{background:#238636;border-color:#238636}
+.auto-refresh-wrap .toggle-sm .slider:before{content:'';position:absolute;height:10px;width:10px;left:2px;bottom:2px;background:var(--text);border-radius:50%;transition:.2s}
+.auto-refresh-wrap .toggle-sm input:checked+.slider:before{transform:translateX(12px)}
 
 /* Messages */
 .msg{border:1px solid var(--border);background:rgba(15,22,38,.6);border-radius:var(--radius);overflow:hidden}
@@ -476,6 +527,25 @@ body{
 .thinking-dots span:nth-child(2){animation-delay:.2s}
 .thinking-dots span:nth-child(3){animation-delay:.4s}
 @keyframes dotPulse{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1)}}
+
+/* Thinking ticker (tool chain mini-card) */
+.thinking-ticker{
+  display:none;align-items:center;gap:6px;
+  padding:6px 14px;border-radius:12px;
+  background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.15);
+  font-size:12px;color:var(--text);max-width:90%;overflow:hidden;
+}
+.thinking-ticker .ticker-icon{font-size:14px;flex-shrink:0}
+.thinking-ticker .ticker-name{
+  font-family:var(--mono);font-weight:600;color:rgba(139,92,246,.9);
+  white-space:nowrap;flex-shrink:0;
+}
+.thinking-ticker .ticker-params{
+  color:var(--muted2);font-family:var(--mono);font-size:11px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+@keyframes tickerIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes tickerOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-4px)}}
 
 /* Settings menu (right-top, below model badge) */
 .settings-btn{
@@ -764,6 +834,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
       <h1 id="app-title">Weiran<span class="sub" id="app-version"></span></h1>
     </div>
     <div class="spacer"></div>
+    <div class="soul-badge" id="soul-badge" title="本我模式 — CC 原生 system prompt 已被替换，只剩灵魂">本我</div>
     <div class="conn-dot" id="conn-dot" title="Disconnected"></div>
     <div class="chip" id="session-count">0</div>
   </div>
@@ -806,6 +877,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   <!-- Main -->
   <div class="main" id="main">
     <div class="model-badge" id="model-badge"></div>
+    <div class="cost-badge" id="cost-badge"></div>
     <div class="context-bar hidden" id="context-bar"><div class="context-track"><div class="context-fill" id="context-fill"></div></div><span class="context-pct" id="context-pct"></span></div>
     <div class="cwd-badge" id="cwd-badge"></div>
     <div class="content" id="content">
@@ -852,11 +924,15 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
         <label class="toggle-switch"><input type="checkbox" id="toggle-chrome" onchange="applyChrome(this.checked)"><span class="toggle-track"></span></label>
       </div>
       <div class="settings-row">
+        <span class="settings-label">本我 <span style="font-size:11px;opacity:.55">(replace, reloads)</span></span>
+        <label class="toggle-switch"><input type="checkbox" id="toggle-replace-soul" onchange="applyReplaceSoul(this.checked)"><span class="toggle-track"></span></label>
+      </div>
+      <div class="settings-row">
         <span class="settings-label">Show tools</span>
         <label class="toggle-switch"><input type="checkbox" id="toggle-tools" onchange="toggleTools(this.checked)"><span class="toggle-track"></span></label>
       </div>
     </div>
-    <div class="thinking-indicator" id="thinking"><div class="thinking-dots"><span></span><span></span><span></span></div></div>
+    <div class="thinking-indicator" id="thinking"><div class="thinking-dots"><span></span><span></span><span></span></div><div class="thinking-ticker" id="ticker"><span class="ticker-icon">&#9889;</span><span class="ticker-name"></span><span class="ticker-params"></span></div></div>
     <div class="composer disabled" id="composer">
       <div class="slash-dropdown" id="slash-dropdown"></div>
       <div class="inner">
@@ -898,6 +974,10 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   <div class="toggle">
     <input type="checkbox" id="m-soul" checked>
     <span>Enable soul files (personality, memory)</span>
+  </div>
+  <div class="toggle">
+    <input type="checkbox" id="m-replace-soul">
+    <span>本我模式 <span style="font-size:11px;color:var(--muted2)">(replace CC harness · experimental)</span></span>
   </div>
   <div class="actions">
     <button class="btn btn-cancel" onclick="closeNewSheet()">Cancel</button>
@@ -1628,6 +1708,15 @@ function handleSessionsUpdate(list){
   (list||[]).forEach(s=>{sessions[s.id]=s;newIds.add(s.id)});
   Object.keys(sessions).forEach(id=>{if(!newIds.has(id)){delete sessions[id];if(activeSessionId===id&&!resumeInProgress)selectSession(null)}});
 
+  // Re-sync 本我 badge + toggle if the active session's flag changed
+  // (e.g. another tab toggled it, or a reload completed).
+  if(activeSessionId&&sessions[activeSessionId]){
+    const rs=!!sessions[activeSessionId].replace_soul;
+    const tgl=document.getElementById('toggle-replace-soul');
+    if(tgl&&!replaceSoulReloading&&tgl.checked!==rs)tgl.checked=rs;
+    updateSoulBadge(rs);
+  }
+
   if(!list||list.length===0){
     emptyEl.style.display='';
     listEl.querySelectorAll('.si').forEach(el=>el.remove());
@@ -1646,7 +1735,8 @@ function handleSessionsUpdate(list){
       listEl.appendChild(el);
     }
     el.classList.toggle('active',s.id===activeSessionId);
-    const cost=s.total_cost_usd?'$'+s.total_cost_usd.toFixed(3):'';
+    const rawCost=s.proxy_cost_usd||s.total_cost_usd||0;
+    const cost=rawCost>0?fmtCost(rawCost):'';
     el.innerHTML=`<div class="si-top"><span class="si-name">${esc(s.name||shortId(s.id))}</span><span class="si-dot ${s.status}"></span></div><div class="si-meta"><span>${s.model||'default'}</span><span>${s.status}</span><span>${s.num_turns||0}t</span>${cost?'<span>'+cost+'</span>':''}</div><div class="si-actions"><button class="si-rename" onclick="event.stopPropagation();promptRename('${s.id}','${esc(s.name||'')}')">&#9998;</button><button class="si-del" onclick="openDestroySheet('${s.id}')">&times;</button></div>`;
   });
   existing.forEach((el,id)=>{if(!newIds.has(id))el.remove()});
@@ -1675,7 +1765,7 @@ function handleSessionEvent(event,data){
       handleToolResult(data);
       break;
     case 'result':
-      finalizeStream();
+      finalizeStream();clearTicker();setThinking(false);
       if(data.is_error)addErrorMsg(data.result||'error');
       break;
     case 'user':
@@ -1688,7 +1778,7 @@ function handleSessionEvent(event,data){
     case 'task_progress':
       break;
     case 'close':
-      finalizeStream();
+      finalizeStream();clearTicker();setThinking(false);
       addSystemMsg('Session ended.');
       document.getElementById('composer').classList.add('disabled');
       break;
@@ -1701,12 +1791,14 @@ function selectSession(id){
   // Clean up all streaming/typing state from previous session
   if(typeRAF){cancelAnimationFrame(typeRAF);typeRAF=null}
   streamingMsgEl=null;streamingText='';typeBuf='';typeRendered='';
-  setThinking(false);
+  setThinking(false);clearTicker();
   activeSessionId=id;
   document.getElementById('model-badge').textContent='';
+  document.getElementById('cost-badge').textContent='';
   document.getElementById('context-bar').classList.add('hidden');
   setCwd('');
   currentModel='';contextMax=0;contextTokensPeak=0;
+  updateSoulBadge(false);
 
   // Sync URL query string
   const u=new URL(location);
@@ -1732,8 +1824,14 @@ function selectSession(id){
     updateContextBar(0);
     syncSettingsDropdowns();
   }
+  // Update cost badge
+  updateCostBadge(s);
   // Restore chrome toggle state
   document.getElementById('toggle-chrome').checked=!!(s&&s.chrome_enabled);
+  // Restore 本我 toggle + badge
+  const replaceOn=!!(s&&s.replace_soul);
+  document.getElementById('toggle-replace-soul').checked=replaceOn;
+  updateSoulBadge(replaceOn);
 
   // Load history messages for already-running sessions, then subscribe
   loadHistoryMessages(id).then(async msgs=>{
@@ -1749,6 +1847,11 @@ function selectSession(id){
       scrollBottom();
       // Disable already-answered interactive components
       disableAnsweredInteractives();
+      // If session is still running, show thinking dots (ticker will update on next real-time WS event)
+      if(!showToolsMode&&s&&s.status==='running'){
+        const last=msgs[msgs.length-1];
+        if(last&&last.role!=='assistant')setThinking(true);
+      }
     }else if(s&&s.gal_id){
       // Empty session created from a GAL save → replay scenes into the feed
       await loadGalReplay(s.gal_id);
@@ -1782,7 +1885,7 @@ function handleAssistant(data){
   // Append to type buffer
   typeBuf+=text;
   typeLastChunk=performance.now();
-  if(!showToolsMode)setThinking(false);
+  if(!showToolsMode){setThinking(false);clearTicker()}
 
   if(!streamingMsgEl){
     typeRendered='';
@@ -1838,7 +1941,12 @@ function handleToolUse(data){
       }
     }
   });
-  if(!showToolsMode)setThinking(true);
+  if(!showToolsMode){
+    setThinking(true);
+    let lastTool=null;
+    msg.content.forEach(b=>{if(b.type==='tool_use')lastTool=b});
+    if(lastTool)setTicker(lastTool.name,lastTool.input);
+  }
 }
 
 function handleToolResult(data){
@@ -1903,7 +2011,7 @@ function finalizeStream(){
   streamingMsgEl.classList.remove('streaming');
   streamingMsgEl.querySelectorAll('pre code').forEach(el=>{try{hljs.highlightElement(el)}catch(e){}});
   streamingMsgEl=null;streamingText='';typeRendered='';typeBuf='';
-  if(!showToolsMode)setThinking(false);
+  if(!showToolsMode){setThinking(false);clearTicker()}
   injectLinkPreviews(finEl);
 }
 
@@ -1956,7 +2064,10 @@ function renderWriteLines(content){
   return html;
 }
 function addToolUseMsg(name,input){
-  const inp=(typeof input==='object'&&input!==null)?input:{};
+  let inp;
+  if(typeof input==='object'&&input!==null){inp=input}
+  else if(typeof input==='string'){try{const p=JSON.parse(input);inp=(typeof p==='object'&&p!==null)?p:{}}catch(e){inp={}}}
+  else{inp={}}
   // Special-case code-edit tools — always visible, rendered as diff
   if(name==='Edit'&&inp.old_string!==undefined){
     const el=document.createElement('div');el.className='msg ai tool-msg code-edit';
@@ -2167,6 +2278,7 @@ function createSession(){
   const model=document.getElementById('m-model').value.trim();
   const initial=document.getElementById('m-initial').value.trim();
   const soul=document.getElementById('m-soul').checked;
+  const replaceSoul=document.getElementById('m-replace-soul').checked;
   const galId=document.getElementById('m-gal').value;
   closeNewSheet();
   const msg={
@@ -2175,12 +2287,14 @@ function createSession(){
     project:project||undefined,
     model:model||undefined,
     soul_files:soul,
+    replace_soul:replaceSoul,
     initial_message:initial||undefined
   };
   if(galId)msg.gal_id=galId;
   wsSend(msg);
   ['m-name','m-project','m-model','m-initial'].forEach(id=>document.getElementById(id).value='');
   document.getElementById('m-gal').value='';
+  document.getElementById('m-replace-soul').checked=false;
 }
 
 function promptRename(id,currentName){
@@ -2229,6 +2343,7 @@ function doResume(sid,displayName){
   const m=document.getElementById('messages');m.style.display='flex';m.innerHTML='';
   document.getElementById('composer').classList.remove('disabled');
   document.getElementById('model-badge').textContent='';
+  updateSoulBadge(false);
 
   // Load history messages first, then resume
   loadHistoryMessages(sid).then(msgs=>{
@@ -2351,6 +2466,47 @@ function setThinking(on){
   else{el.classList.remove('show')}
 }
 
+/* Thinking ticker — mini card showing current tool */
+function toolParamsSummary(name,input){
+  if(!input)return '';
+  if(name==='Read')return input.file_path||'';
+  if(name==='Write')return input.file_path||'';
+  if(name==='Edit')return input.file_path||'';
+  if(name==='Bash')return(input.command||'').slice(0,60);
+  if(name==='Grep')return input.pattern||'';
+  if(name==='Glob')return input.pattern||'';
+  if(name==='WebFetch')return input.url||'';
+  if(name==='WebSearch')return input.query||'';
+  if(name==='Agent')return input.description||'';
+  if(name==='Skill')return input.skill||'';
+  for(const v of Object.values(input)){if(typeof v==='string'&&v.length>0)return v.slice(0,60)}
+  return '';
+}
+let _tickerVisible=false;
+function setTicker(name,input){
+  const ticker=document.getElementById('ticker');
+  const dots=ticker.previousElementSibling;
+  const apply=()=>{
+    ticker.querySelector('.ticker-name').textContent=name;
+    ticker.querySelector('.ticker-params').textContent=toolParamsSummary(name,input);
+    ticker.style.display='inline-flex';
+    dots.style.display='none';
+    ticker.style.animation='tickerIn .25s var(--spring)';
+    _tickerVisible=true;
+  };
+  if(_tickerVisible){
+    ticker.style.animation='tickerOut .15s forwards';
+    setTimeout(apply,150);
+  }else{apply()}
+}
+function clearTicker(){
+  const ticker=document.getElementById('ticker');
+  if(!_tickerVisible)return;
+  const dots=ticker.previousElementSibling;
+  ticker.style.animation='tickerOut .15s forwards';
+  setTimeout(()=>{ticker.style.display='none';dots.style.display='';_tickerVisible=false},150);
+}
+
 function toggleSettingsPanel(){
   const p=document.getElementById('settings-panel');
   const b=document.getElementById('settings-backdrop');
@@ -2435,6 +2591,48 @@ function applyChrome(on){
       document.getElementById('send-btn').disabled=!document.getElementById('input').value.trim();
     },2000);
   });
+}
+
+let replaceSoulReloading=false;
+function applyReplaceSoul(on){
+  if(!activeSessionId||replaceSoulReloading)return;
+  replaceSoulReloading=true;
+  const tgl=document.getElementById('toggle-replace-soul');
+  tgl.disabled=true;
+  const composer=document.getElementById('composer');
+  composer.classList.add('disabled');
+  document.getElementById('send-btn').disabled=true;
+  addSystemMsg(`本我模式 ${on?'on':'off'} — reloading session (identity may shift mid-session)...`);
+  fetch(`/api/sessions/${activeSessionId}/replace-soul`,{
+    method:'POST',
+    headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:on})
+  }).then(r=>r.json()).then(d=>{
+    if(d.error){addErrorMsg('本我 toggle failed: '+d.error);tgl.checked=!on;}
+    else{
+      const s=sessions[activeSessionId];
+      if(s)s.replace_soul=on;
+      updateSoulBadge(on);
+      addSystemMsg(on?'本我模式 enabled ✓  (CC harness stripped, only SOUL active)':'本我模式 disabled ✓  (CC harness restored)');
+    }
+  }).catch(e=>{
+    addErrorMsg('本我 toggle failed: '+e.message);
+    tgl.checked=!on;
+  }).finally(()=>{
+    setTimeout(()=>{
+      replaceSoulReloading=false;
+      tgl.disabled=false;
+      composer.classList.remove('disabled');
+      document.getElementById('send-btn').disabled=!document.getElementById('input').value.trim();
+    },2000);
+  });
+}
+
+function updateSoulBadge(on){
+  const badge=document.getElementById('soul-badge');
+  if(!badge)return;
+  if(on)badge.classList.add('on');
+  else badge.classList.remove('on');
 }
 
 function syncSettingsDropdowns(){
@@ -2766,6 +2964,14 @@ function handleSlashSend(text){
   return false; // not a built-in command, send as message
 }
 
+// ── Cost Badge ──
+function updateCostBadge(s){
+  const el=document.getElementById('cost-badge');
+  if(!el)return;
+  const cost=(s&&s.proxy_cost_usd)||(s&&s.total_cost_usd)||0;
+  el.textContent=cost>0?fmtCost(cost):'';
+}
+
 // ── Context Bar ──
 
 function getContextWindow(model){
@@ -2826,8 +3032,8 @@ function setHash(h){location.hash=h}
 
 // ── Sniff Viewer ──
 
-let sniffLogPage=0,sniffLogTotal=0;
-const SNIFF_PAGE_SIZE=50;
+let sniffLogPage=0,sniffLogTotal=0,sniffLogSort='id',sniffLogDir='desc',sniffAutoRefresh=false,sniffAutoRefreshTimer=null;
+let sniffLogPageSize=50,sniffLogTimePreset='24',sniffLogExpandedId=null;
 
 function showSniffPanel(title){
   document.getElementById('welcome').style.display='none';
@@ -2838,10 +3044,12 @@ function showSniffPanel(title){
   document.getElementById('context-bar').classList.add('hidden');
   document.getElementById('model-badge').textContent='';
   document.getElementById('cwd-badge').textContent='';
+  updateSoulBadge(false);
   if(isMobile)closeSidebar();
 }
 
 function closeSniffPanel(){
+  sniffStopAutoRefresh();
   document.getElementById('sniff-panel').style.display='none';
   document.getElementById('composer').classList.remove('disabled');
   document.getElementById('welcome').style.display='';
@@ -2923,10 +3131,18 @@ async function showSniffUsage(){
     const td=usage.today;
     if(td&&td.models&&Object.keys(td.models).length>0){
       html+=`<div class="sniff-card"><h3>Today (${td.date})</h3>`;
-      html+=`<table><tr><th>Model</th><th>In</th><th>Out</th><th>Cache R</th><th>Cache W</th><th>Reqs</th></tr>`;
+      html+=`<table><tr><th>Model</th><th>In</th><th>Out</th><th>Cache R</th><th>Cache W</th><th>Est. Cost</th><th>Reqs</th></tr>`;
       for(const[m,u]of Object.entries(td.models)){
         const short=m.replace('claude-','').replace(/-\d{8}$/,'');
-        html+=`<tr><td>${short}</td><td>${fmtTokens(u.input_tokens)}</td><td>${fmtTokens(u.output_tokens)}</td><td>${fmtTokens(u.cache_read_input_tokens)}</td><td>${fmtTokens(u.cache_creation_input_tokens)}</td><td>${u.request_count}</td></tr>`;
+        // Client-side cost estimation using same pricing as backend
+        const pricing={'opus':[5,25],'sonnet':[3,15],'haiku':[1,5]};
+        let p=[3,15]; // default sonnet
+        const ml=m.toLowerCase();
+        if(ml.includes('opus'))p=[5,25]; else if(ml.includes('haiku'))p=[1,5];
+        const ir=p[0]/1e6,or=p[1]/1e6,crr=ir*0.1,ccr=ir*1.25;
+        const ri=Math.max(0,(u.input_tokens||0)-(u.cache_read_input_tokens||0)-(u.cache_creation_input_tokens||0));
+        const cost=ri*ir+(u.output_tokens||0)*or+(u.cache_read_input_tokens||0)*crr+(u.cache_creation_input_tokens||0)*ccr;
+        html+=`<tr><td class="${modelClass(m)}">${short}</td><td>${fmtTokens(u.input_tokens)}</td><td>${fmtTokens(u.output_tokens)}</td><td>${fmtTokens(u.cache_read_input_tokens)}</td><td>${fmtTokens(u.cache_creation_input_tokens)}</td><td class="cost-val">${fmtCost(cost)}</td><td>${u.request_count}</td></tr>`;
       }
       html+=`</table></div>`;
     }
@@ -2947,12 +3163,12 @@ async function showSniffUsage(){
     const stats=statsData.stats||[];
     if(stats.length>0){
       html+=`<div class="sniff-card"><h3>Hourly Breakdown</h3>`;
-      html+=`<table><tr><th>Hour</th><th>Model</th><th>Reqs</th><th>In</th><th>Out</th><th>Err</th><th>Avg ms</th></tr>`;
+      html+=`<table><tr><th>Hour</th><th>Model</th><th>Reqs</th><th>In</th><th>Out</th><th>Cost</th><th>Err</th><th>Avg ms</th></tr>`;
       stats.forEach(s=>{
         const hour=s.period.split(' ')[1]||s.period;
         const short=(s.model||'').replace('claude-','').replace(/-\d{8}$/,'');
         const errStyle=s.errors>0?'color:var(--bad)':'';
-        html+=`<tr><td>${hour}</td><td>${short}</td><td>${s.requests}</td><td>${fmtTokens(s.input_tokens)}</td><td>${fmtTokens(s.output_tokens)}</td><td style="${errStyle}">${s.errors}</td><td>${s.avg_duration_ms}</td></tr>`;
+        html+=`<tr><td>${hour}</td><td class="${modelClass(s.model)}">${short}</td><td>${s.requests}</td><td>${fmtTokens(s.input_tokens)}</td><td>${fmtTokens(s.output_tokens)}</td><td class="cost-val">${fmtCost(s.cost_usd||0)}</td><td style="${errStyle}">${s.errors}</td><td>${s.avg_duration_ms}</td></tr>`;
       });
       html+=`</table></div>`;
     }
@@ -2964,77 +3180,214 @@ async function showSniffUsage(){
   }
 }
 
+// ── Log Viewer (Pool-grade) ──
+
+function sniffLogSinceISO(){
+  if(sniffLogTimePreset==='0')return '';
+  const h=parseInt(sniffLogTimePreset)||24;
+  return new Date(Date.now()-h*3600000).toISOString();
+}
+function sniffBuildParams(){
+  const p=new URLSearchParams({limit:sniffLogPageSize,offset:sniffLogPage*sniffLogPageSize,sort:sniffLogSort,dir:sniffLogDir});
+  const model=document.getElementById('sniff-log-model');
+  const error=document.getElementById('sniff-log-error');
+  const status=document.getElementById('sniff-log-status');
+  if(model&&model.value)p.set('model',model.value);
+  if(error&&error.checked)p.set('error','true');
+  if(status&&status.value)p.set('status',status.value);
+  const since=sniffLogSinceISO();
+  if(since)p.set('since',since);
+  return p;
+}
+function sniffSortBy(col){
+  if(sniffLogSort===col){sniffLogDir=sniffLogDir==='desc'?'asc':'desc'}
+  else{sniffLogSort=col;sniffLogDir='desc'}
+  sniffLogPage=0;
+  showSniffLogs(0);
+}
+function sniffToggleDetail(id){
+  sniffLogExpandedId=sniffLogExpandedId===id?null:id;
+  // Toggle in DOM without refetch
+  document.querySelectorAll('.log-detail-row').forEach(r=>r.style.display='none');
+  document.querySelectorAll('.log-main-row').forEach(r=>r.classList.remove('expanded'));
+  if(sniffLogExpandedId!==null){
+    const dr=document.getElementById('detail-'+id);
+    const mr=document.getElementById('row-'+id);
+    if(dr)dr.style.display='';
+    if(mr)mr.classList.add('expanded');
+  }
+}
+function sniffStartAutoRefresh(){
+  sniffStopAutoRefresh();
+  if(sniffAutoRefresh)sniffAutoRefreshTimer=setInterval(()=>showSniffLogs(sniffLogPage),5000);
+}
+function sniffStopAutoRefresh(){
+  if(sniffAutoRefreshTimer){clearInterval(sniffAutoRefreshTimer);sniffAutoRefreshTimer=null}
+}
+function sniffToggleAutoRefresh(cb){
+  sniffAutoRefresh=cb.checked;
+  if(sniffAutoRefresh)sniffStartAutoRefresh();else sniffStopAutoRefresh();
+}
+function sniffExportCSV(){
+  const p=sniffBuildParams();
+  p.delete('limit');p.delete('offset');p.delete('sort');p.delete('dir');
+  window.open('/api/proxy/logs/export?'+p+'&token='+TOKEN);
+}
+function modelClass(m){if(!m)return '';const l=m.toLowerCase();if(l.includes('opus'))return 'model-opus';if(l.includes('haiku'))return 'model-haiku';return 'model-sonnet'}
+function statusClass(s){if(s>=500)return 'status-5xx';if(s>=400)return 'status-4xx';return 'status-2xx'}
+function durClass(ms){if(ms<2000)return 'dur-fast';if(ms<10000)return 'dur-med';return 'dur-slow'}
+function fmtCost(c){if(!c||c===0)return '$0';if(c<0.001)return '$'+c.toFixed(6);if(c<0.1)return '$'+c.toFixed(4);return '$'+c.toFixed(2)}
+function fmtDur(ms){if(ms<1000)return ms+'ms';return (ms/1000).toFixed(1)+'s'}
+function shortModel(m){return (m||'').replace('claude-','').replace(/-\d{8}$/,'')}
+function sortArrow(col){return sniffLogSort===col?`<span class="sort-arrow">${sniffLogDir==='asc'?'▲':'▼'}</span>`:'<span class="sort-arrow">⇅</span>'}
+
 async function showSniffLogs(page){
   if(page===undefined)page=0;
   sniffLogPage=page;
+  // Save filter state before re-render
+  const prevModel=(document.getElementById('sniff-log-model')||{}).value||'';
+  const prevError=(document.getElementById('sniff-log-error')||{}).checked||false;
+  const prevStatus=(document.getElementById('sniff-log-status')||{}).value||'';
+
   showSniffPanel('Logs');
   const el=document.getElementById('sniff-content');
   el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted2)">Loading...</div>';
 
   try{
-    const params=new URLSearchParams({limit:SNIFF_PAGE_SIZE,offset:page*SNIFF_PAGE_SIZE});
-    // Apply filters
-    const modelFilter=document.getElementById('sniff-log-model');
-    const errorFilter=document.getElementById('sniff-log-error');
-    if(modelFilter&&modelFilter.value)params.set('model',modelFilter.value);
-    if(errorFilter&&errorFilter.checked)params.set('error','true');
-
-    const r=await fetch(`/api/proxy/logs?${params}`,{headers:{'Authorization':'Bearer '+TOKEN}});
-    const data=await r.json();
+    // Fetch filters + logs in parallel
+    const params=sniffBuildParams();
+    const [logsR,filtersR]=await Promise.all([
+      fetch(`/api/proxy/logs?${params}`,{headers:{'Authorization':'Bearer '+TOKEN}}),
+      fetch('/api/proxy/logs/filters',{headers:{'Authorization':'Bearer '+TOKEN}})
+    ]);
+    const data=await logsR.json();
+    const filters=await filtersR.json();
     sniffLogTotal=data.total||0;
     const recs=data.records||[];
+    const totalCost=data.total_cost||0;
+    const avgDur=data.avg_dur_ms||0;
+    const totalErrors=data.errors||0;
+    const errRate=sniffLogTotal>0?((totalErrors/sniffLogTotal)*100).toFixed(1)+'%':'0%';
 
-    let html=`<div class="sniff-filter">
-      <select id="sniff-log-model" onchange="showSniffLogs(0)">
-        <option value="">All models</option>
-        <option value="opus">Opus</option>
-        <option value="sonnet">Sonnet</option>
-        <option value="haiku">Haiku</option>
+    // Model options from server
+    const modelOpts=(filters.models||[]).map(m=>`<option value="${esc(m)}"${m===prevModel?' selected':''}>${shortModel(m)}</option>`).join('');
+
+    let html='';
+
+    // ── Filter bar ──
+    html+=`<div class="sniff-filter">
+      <div class="time-presets" id="sniff-time-presets">
+        ${['1','6','24','168','720','0'].map(h=>`<button data-hours="${h}" class="${sniffLogTimePreset===h?'active':''}" onclick="sniffLogTimePreset='${h}';this.parentNode.querySelectorAll('button').forEach(b=>b.classList.remove('active'));this.classList.add('active');sniffLogPage=0;showSniffLogs(0)">${h==='0'?'All':h<24?h+'h':h<168?Math.round(h/24)+'d':h<720?'7d':'30d'}</button>`).join('')}
+      </div>
+      <select id="sniff-log-model" onchange="sniffLogPage=0;showSniffLogs(0)">
+        <option value="">All models</option>${modelOpts}
       </select>
-      <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted)">
-        <input type="checkbox" id="sniff-log-error" onchange="showSniffLogs(0)"> Errors only
+      <select id="sniff-log-status" onchange="sniffLogPage=0;showSniffLogs(0)">
+        <option value=""${prevStatus===''?' selected':''}>All status</option>
+        <option value="2xx"${prevStatus==='2xx'?' selected':''}>2xx</option>
+        <option value="4xx"${prevStatus==='4xx'?' selected':''}>4xx</option>
+        <option value="5xx"${prevStatus==='5xx'?' selected':''}>5xx</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:3px;font-size:11px;color:var(--muted)">
+        <input type="checkbox" id="sniff-log-error" onchange="sniffLogPage=0;showSniffLogs(0)"${prevError?' checked':''}> Errors
       </label>
-      <span style="font-size:11px;color:var(--muted2);margin-left:auto">${sniffLogTotal} total</span>
+      <div class="filter-actions">
+        <div class="auto-refresh-wrap">
+          Auto
+          <label class="toggle-sm"><input type="checkbox" onchange="sniffToggleAutoRefresh(this)"${sniffAutoRefresh?' checked':''}><span class="slider"></span></label>
+        </div>
+        <button class="btn-sm" onclick="sniffExportCSV()" title="Export CSV">CSV</button>
+      </div>
+    </div>`;
+
+    // ── Summary bar ──
+    html+=`<div class="sniff-summary">
+      <div class="s-item"><div class="s-label">Requests</div><div class="s-value">${sniffLogTotal.toLocaleString()}</div></div>
+      <div class="s-item"><div class="s-label">Total Cost</div><div class="s-value" style="color:#d2a8ff">${fmtCost(totalCost)}</div></div>
+      <div class="s-item"><div class="s-label">Avg Duration</div><div class="s-value">${fmtDur(avgDur)}</div></div>
+      <div class="s-item"><div class="s-label">Errors</div><div class="s-value" style="color:${totalErrors>0?'var(--bad)':'var(--text)'}">${totalErrors}</div></div>
+      <div class="s-item"><div class="s-label">Error Rate</div><div class="s-value" style="color:${totalErrors>0?'var(--bad)':'var(--text)'}">${errRate}</div></div>
     </div>`;
 
     if(recs.length===0){
       html+='<div style="text-align:center;padding:40px;color:var(--muted2)">No records</div>';
     }else{
-      html+=`<table><tr><th>Time</th><th>Model</th><th>In</th><th>Out</th><th>Cache</th><th>ms</th><th>Stop</th><th>Tools</th><th>Status</th></tr>`;
+      // ── Table ──
+      const th=(col,label)=>`<th${col?' data-col="'+col+'" onclick="sniffSortBy(\''+col+'\')"':''}${sniffLogSort===col?' class="sorted"':''}>${label}${col?sortArrow(col):''}</th>`;
+      html+=`<table><thead><tr>
+        ${th('time','Time')}${th('model','Model')}${th('status','Status')}
+        ${th('input_tokens','Input')}${th('output_tokens','Output')}
+        ${th('','Cache R')}${th('','Cache W')}
+        ${th('cost_usd','Cost')}${th('duration_ms','Duration')}
+        ${th('','Stop')}${th('','Tools')}${th('','Think')}
+      </tr></thead><tbody>`;
+
       recs.forEach(r=>{
         const t=new Date(r.time);
-        const ts=t.toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
-        const short=(r.model||'').replace('claude-','').replace(/-\d{8}$/,'');
-        const cache=fmtTokens((r.cache_read||0)+(r.cache_create||0));
-        const errCls=r.is_error?' class="error"':'';
-        const statusBadge=r.is_error?`<span style="color:var(--bad)">${r.status}</span>`:`<span style="color:var(--good)">${r.status}</span>`;
+        const ts=t.toLocaleString('en-US',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+        const sm=shortModel(r.model);
+        const mc=modelClass(r.model);
+        const sc=statusClass(r.status);
+        const dc=durClass(r.duration_ms);
         const tools=r.tool_calls?`<span title="${esc(r.tool_calls)}">${r.tools_count}</span>`:(r.tools_count||'');
-        html+=`<tr${errCls}><td>${ts}</td><td>${short}</td><td>${fmtTokens(r.input_tokens)}</td><td>${fmtTokens(r.output_tokens)}</td><td>${cache}</td><td>${r.duration_ms}</td><td>${r.stop_reason||''}</td><td>${tools}</td><td>${statusBadge}</td></tr>`;
-      });
-      html+=`</table>`;
+        const think=(r.thinking_mode||'').replace('adaptive','A').replace('enabled','E').replace('disabled','D');
+        const isExp=sniffLogExpandedId===r.id;
 
-      // Pager
-      const totalPages=Math.ceil(sniffLogTotal/SNIFF_PAGE_SIZE);
-      if(totalPages>1){
-        html+=`<div class="sniff-pager">
-          <button onclick="showSniffLogs(${page-1})"${page<=0?' disabled':''}>← Prev</button>
-          <span>${page+1} / ${totalPages}</span>
-          <button onclick="showSniffLogs(${page+1})"${page>=totalPages-1?' disabled':''}>Next →</button>
-        </div>`;
-      }
+        html+=`<tr id="row-${r.id}" class="log-main-row${isExp?' expanded':''}" onclick="sniffToggleDetail(${r.id})">
+          <td>${ts}</td>
+          <td class="${mc}">${sm}</td>
+          <td><span class="${sc}">${r.status}</span></td>
+          <td class="token-val">${fmtTokens(r.input_tokens)}</td>
+          <td class="token-val">${fmtTokens(r.output_tokens)}</td>
+          <td>${fmtTokens(r.cache_read||0)}</td>
+          <td>${fmtTokens(r.cache_create||0)}</td>
+          <td class="cost-val">${fmtCost(r.cost_usd)}</td>
+          <td class="${dc}">${fmtDur(r.duration_ms)}</td>
+          <td>${r.stop_reason||''}</td>
+          <td>${tools}</td>
+          <td>${think}</td>
+        </tr>`;
+
+        // Detail row
+        const totalTok=(r.input_tokens||0)+(r.output_tokens||0);
+        const tps=r.duration_ms>0?((totalTok/(r.duration_ms/1000)).toFixed(0)+' tok/s'):'—';
+        html+=`<tr id="detail-${r.id}" class="log-detail-row detail-row" style="display:${isExp?'':'none'}"><td colspan="12">
+          <div class="detail-content">
+            <div class="detail-item"><span class="dk">Request ID</span><br><span class="dv">${r.request_id||'—'}</span></div>
+            <div class="detail-item"><span class="dk">Model</span><br><span class="dv">${r.model||'—'}</span></div>
+            <div class="detail-item"><span class="dk">Thinking</span><br><span class="dv">${r.thinking_mode||'—'}</span></div>
+            <div class="detail-item"><span class="dk">Temperature</span><br><span class="dv">${r.temperature||'—'}</span></div>
+            <div class="detail-item"><span class="dk">Throughput</span><br><span class="dv">${tps}</span></div>
+            <div class="detail-item"><span class="dk">Stream</span><br><span class="dv">${r.stream?'Yes':'No'}</span></div>
+            <div class="detail-item"><span class="dk">Input</span><br><span class="dv token-val">${(r.input_tokens||0).toLocaleString()}</span></div>
+            <div class="detail-item"><span class="dk">Output</span><br><span class="dv token-val">${(r.output_tokens||0).toLocaleString()}</span></div>
+            <div class="detail-item"><span class="dk">Cache Read</span><br><span class="dv">${(r.cache_read||0).toLocaleString()}</span></div>
+            <div class="detail-item"><span class="dk">Cache Write</span><br><span class="dv">${(r.cache_create||0).toLocaleString()}</span></div>
+            <div class="detail-item"><span class="dk">Cost</span><br><span class="dv cost-val">${fmtCost(r.cost_usd)}</span></div>
+            <div class="detail-item"><span class="dk">User Agent</span><br><span class="dv">${esc(r.user_agent)||'—'}</span></div>
+            ${r.tool_calls?`<div class="detail-item" style="grid-column:span 2"><span class="dk">Tool Calls</span><br><span class="dv">${esc(r.tool_calls)}</span></div>`:''}
+            ${r.error_detail?`<div class="detail-item" style="grid-column:1/-1"><span class="dk">Error</span><br><span class="dv" style="color:var(--bad)">${esc(r.error_detail)}</span></div>`:''}
+          </div>
+        </td></tr>`;
+      });
+      html+=`</tbody></table>`;
+
+      // ── Pagination ──
+      const totalPages=Math.ceil(sniffLogTotal/sniffLogPageSize);
+      html+=`<div class="sniff-pager">
+        <div class="page-size">
+          <select onchange="sniffLogPageSize=parseInt(this.value);sniffLogPage=0;showSniffLogs(0)">
+            ${[25,50,100].map(n=>`<option value="${n}"${n===sniffLogPageSize?' selected':''}>${n}/page</option>`).join('')}
+          </select>
+        </div>
+        <button onclick="showSniffLogs(${page-1})"${page<=0?' disabled':''}>← Prev</button>
+        <span>${page+1} / ${totalPages}</span>
+        <button onclick="showSniffLogs(${page+1})"${page>=totalPages-1?' disabled':''}>Next →</button>
+      </div>`;
     }
 
     el.innerHTML=html;
-
-    // Restore filter state
-    if(modelFilter&&modelFilter.value){
-      const sel=document.getElementById('sniff-log-model');
-      if(sel)sel.value=modelFilter.value;
-    }
-    if(errorFilter&&errorFilter.checked){
-      const cb=document.getElementById('sniff-log-error');
-      if(cb)cb.checked=true;
-    }
+    if(sniffAutoRefresh)sniffStartAutoRefresh();
   }catch(e){
     el.innerHTML=`<div style="text-align:center;padding:40px;color:var(--bad)">Error: ${e.message}</div>`;
   }

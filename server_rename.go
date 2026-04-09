@@ -46,6 +46,12 @@ func openServerDB() (*sql.DB, error) {
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN category TEXT NOT NULL DEFAULT 'interactive'`)
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN claude_session_id TEXT NOT NULL DEFAULT ''`)
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`)
+		// Migration: add replace_soul (本我模式) — when true, spawn claude with
+		// --system-prompt-file instead of --append-system-prompt-file, stripping
+		// the CC native harness and leaving only the soul prompt.
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN replace_soul INTEGER NOT NULL DEFAULT 0`)
+		// Migration: add total_cost_usd — persisted from proxy log aggregation
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN total_cost_usd REAL NOT NULL DEFAULT 0`)
 	})
 	if err != nil {
 		return nil, err
@@ -105,6 +111,67 @@ func getSessionCategoryByClaudeSID(claudeSID string) string {
 	var cat string
 	db.QueryRow(`SELECT category FROM server_sessions WHERE claude_session_id=?`, claudeSID).Scan(&cat)
 	return cat
+}
+
+// getSessionProxyCost queries the proxy DB for aggregated cost of a session.
+func getSessionProxyCost(sessionID string) float64 {
+	if proxyDB == nil || sessionID == "" {
+		return 0
+	}
+	var cost float64
+	proxyDB.QueryRow("SELECT COALESCE(SUM(cost_usd),0) FROM proxy_requests WHERE session_id=?", sessionID).Scan(&cost)
+	return cost
+}
+
+// persistSessionCost writes the current proxy-aggregated cost to server_sessions DB.
+func persistSessionCost(sessionID string) {
+	cost := getSessionProxyCost(sessionID)
+	if cost <= 0 {
+		return
+	}
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	now := time.Now().Format(time.RFC3339)
+	db.Exec(`UPDATE server_sessions SET total_cost_usd=?, updated_at=? WHERE session_id=?`,
+		cost, now, sessionID)
+}
+
+// getPersistedSessionCost reads the cached cost from server_sessions DB.
+func getPersistedSessionCost(sessionID string) float64 {
+	db, err := openServerDB()
+	if err != nil {
+		return 0
+	}
+	var cost float64
+	db.QueryRow(`SELECT total_cost_usd FROM server_sessions WHERE session_id=?`, sessionID).Scan(&cost)
+	return cost
+}
+
+// getWeiranSessionIDByClaudeSID returns the weiran session ID for a given Claude session ID.
+func getWeiranSessionIDByClaudeSID(claudeSID string) string {
+	db, err := openServerDB()
+	if err != nil {
+		return ""
+	}
+	var sid string
+	db.QueryRow(`SELECT session_id FROM server_sessions WHERE claude_session_id=?`, claudeSID).Scan(&sid)
+	return sid
+}
+
+// getSessionCostByClaudeSID returns the proxy-aggregated cost for a session identified by Claude session ID.
+func getSessionCostByClaudeSID(claudeSID string) float64 {
+	weiranSID := getWeiranSessionIDByClaudeSID(claudeSID)
+	if weiranSID == "" {
+		return getPersistedSessionCost(claudeSID) // fallback: try direct lookup
+	}
+	// Try live proxy cost first, then persisted
+	cost := getSessionProxyCost(weiranSID)
+	if cost > 0 {
+		return cost
+	}
+	return getPersistedSessionCost(weiranSID)
 }
 
 // markRenamed sets the renamed flag so Haiku won't auto-rename.
@@ -191,6 +258,34 @@ func getChromeEnabled(sessionID string) bool {
 	}
 	var v int
 	db.QueryRow(`SELECT chrome_enabled FROM server_sessions WHERE session_id=?`, sessionID).Scan(&v)
+	return v == 1
+}
+
+// setReplaceSoulEnabled persists the 本我模式 flag for a session.
+func setReplaceSoulEnabled(sessionID string, enabled bool) {
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	v := 0
+	if enabled {
+		v = 1
+	}
+	now := time.Now().Format(time.RFC3339)
+	db.Exec(`UPDATE server_sessions SET replace_soul=?, updated_at=? WHERE session_id=?`,
+		v, now, sessionID)
+}
+
+// getReplaceSoulEnabled reads the 本我模式 flag for a session.
+// Looks up by weiran session ID OR original Claude session ID, so a resume
+// can inherit the original session's mode.
+func getReplaceSoulEnabled(sessionID string) bool {
+	db, err := openServerDB()
+	if err != nil {
+		return false
+	}
+	var v int
+	db.QueryRow(`SELECT replace_soul FROM server_sessions WHERE session_id=? OR claude_session_id=?`, sessionID, sessionID).Scan(&v)
 	return v == 1
 }
 

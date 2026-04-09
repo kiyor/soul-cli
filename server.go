@@ -326,6 +326,7 @@ func handleServer(args []string) {
 			GalID          string   `json:"gal_id"`
 			Category       string   `json:"category"`
 			Tags           []string `json:"tags"`
+			ReplaceSoul    bool     `json:"replace_soul"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -340,14 +341,15 @@ func handleServer(args []string) {
 		}
 
 		sess, err := sm.createSessionWithOpts(sessionCreateOpts{
-			Name:     req.Name,
-			Project:  req.Project,
-			Model:    req.Model,
-			Soul:     req.SoulFiles,
-			MCP:      req.MCPConfig,
-			GalID:    req.GalID,
-			Category: req.Category,
-			Tags:     req.Tags,
+			Name:        req.Name,
+			Project:     req.Project,
+			Model:       req.Model,
+			Soul:        req.SoulFiles,
+			MCP:         req.MCPConfig,
+			GalID:       req.GalID,
+			Category:    req.Category,
+			Tags:        req.Tags,
+			ReplaceSoul: req.ReplaceSoul,
 		})
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
@@ -661,6 +663,33 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "chrome_enabled": req.Enabled})
 	}))
 
+	// Toggle 本我模式 (replace-soul) — reloads the underlying claude proc
+	// with --system-prompt-file instead of --append-system-prompt-file.
+	// Strips CC's native system prompt, leaving only the soul. Server-side
+	// Anthropic safety blocks (injection defense, privacy, copyright) are
+	// NOT affected — they're baked into the API. Mid-session toggling
+	// causes the model's "identity" to shift for the remainder of the
+	// conversation; the UI warns about this.
+	mux.HandleFunc("POST /api/sessions/{id}/replace-soul", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		sess := sm.getSession(r.PathValue("id"))
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		if err := sm.setReplaceSoul(sess.ID, req.Enabled); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "replace_soul": req.Enabled})
+	}))
+
 	// Context usage — fire control request, response comes via SSE
 	mux.HandleFunc("POST /api/sessions/{id}/usage", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		sess := sm.getSession(r.PathValue("id"))
@@ -725,19 +754,21 @@ func handleServer(args []string) {
 				}
 			}
 
+			cost := getSessionCostByClaudeSID(s.ID)
 			items = append(items, map[string]any{
-				"id":        s.ID,
-				"name":      s.Name,
-				"title":     s.Title,
-				"project":   s.Project,
-				"model":     s.Model,
-				"category":  cat,
-				"agent":     agent,
-				"first_msg": s.FirstMsg,
-				"summary":   s.Summary,
-				"size":      s.Size,
-				"messages":  s.Messages,
-				"mod_time":  s.ModTime.Format(time.RFC3339),
+				"id":            s.ID,
+				"name":          s.Name,
+				"title":         s.Title,
+				"project":       s.Project,
+				"model":         s.Model,
+				"category":      cat,
+				"agent":         agent,
+				"first_msg":     s.FirstMsg,
+				"summary":       s.Summary,
+				"size":          s.Size,
+				"messages":      s.Messages,
+				"mod_time":      s.ModTime.Format(time.RFC3339),
+				"proxy_cost_usd": cost,
 			})
 		}
 		writeJSON(w, http.StatusOK, items)
@@ -784,17 +815,18 @@ func handleServer(args []string) {
 		}
 
 		var req struct {
-			SessionID string `json:"session_id"`
-			Message   string `json:"message"`
-			Name      string `json:"name"`
-			Category  string `json:"category"`
+			SessionID   string `json:"session_id"`
+			Message     string `json:"message"`
+			Name        string `json:"name"`
+			Category    string `json:"category"`
+			ReplaceSoul *bool  `json:"replace_soul"` // nil → inherit persisted DB flag
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id is required"})
 			return
 		}
 
-		sess, err := sm.resumeSession(req.SessionID, req.Message, req.Name, req.Category)
+		sess, err := sm.resumeSession(req.SessionID, req.Message, req.Name, req.Category, req.ReplaceSoul)
 		if err != nil {
 			status := http.StatusInternalServerError
 			if strings.Contains(err.Error(), "max sessions") {

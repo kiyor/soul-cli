@@ -47,6 +47,7 @@ type serverSession struct {
 	StreamURL     string    `json:"stream_url"`
 	SoulEnabled   bool      `json:"soul_enabled"`
 	ChromeEnabled bool      `json:"chrome_enabled"`
+	ReplaceSoul   bool      `json:"replace_soul"`     // 本我模式 — use --system-prompt-file (replace) instead of --append-system-prompt-file
 	GalID         string    `json:"gal_id,omitempty"` // GAL save id this session was resumed from
 
 	process     *claudeProcess
@@ -69,10 +70,17 @@ func (s *serverSession) setStatus(status string) {
 	s.mu.Lock()
 	changed := s.Status != status
 	s.Status = status
+	id := s.ID
 	hub := s.hub
 	s.mu.Unlock()
-	if changed && hub != nil {
-		hub.notifySessions()
+	if changed {
+		// Persist proxy-aggregated cost when session ends
+		if status == "stopped" || status == "error" {
+			go persistSessionCost(id)
+		}
+		if hub != nil {
+			hub.notifySessions()
+		}
 	}
 }
 
@@ -99,6 +107,7 @@ func (s *serverSession) snapshot() map[string]any {
 		"created_at":        s.CreatedAt.Format(time.RFC3339),
 		"last_active":       s.LastActive.Format(time.RFC3339),
 		"total_cost_usd":    s.TotalCost,
+		"proxy_cost_usd":   getSessionProxyCost(s.ID),
 		"num_turns":         s.NumTurns,
 		"claude_session_id": s.ClaudeSID,
 		"resumed_from":      s.ResumedFrom,
@@ -106,6 +115,7 @@ func (s *serverSession) snapshot() map[string]any {
 		"agent":             "main",
 		"soul_enabled":      s.SoulEnabled,
 		"chrome_enabled":    s.ChromeEnabled,
+		"replace_soul":      s.ReplaceSoul,
 		"gal_id":            galID,
 		"subscribers":       s.broadcaster.count(),
 		"last_event":        s.broadcaster.lastEventAt(),
@@ -150,6 +160,7 @@ type sessionCreateOpts struct {
 	Category    string   // interactive, heartbeat, cron, evolve, telegram (default: interactive)
 	Tags        []string // freeform labels
 	EnvOverride string   // if set, replaces the environment section in BOOT.md
+	ReplaceSoul bool     // 本我模式 — use --system-prompt-file instead of --append-system-prompt-file
 }
 
 // createSession spawns a new Claude Code session.
@@ -212,6 +223,7 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		CreatedAt:   now,
 		LastActive:  now,
 		SoulEnabled: opts.Soul,
+		ReplaceSoul: opts.ReplaceSoul,
 		StreamURL:   fmt.Sprintf("/api/sessions/%s/stream", id),
 		mcpConfig:   opts.MCP,
 		broadcaster: bc,
@@ -250,6 +262,7 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		SystemPromptFile: promptFile,
 		Model:            opts.Model,
 		MCPConfig:        opts.MCP,
+		ReplaceSoul:      opts.ReplaceSoul,
 	}
 	proc, err := spawnClaude(spawnOpts)
 	if err != nil {
@@ -262,6 +275,9 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 	ensureServerSessionFull(id, opts.Name, category, opts.Tags)
 	if opts.GalID != "" {
 		setGalID(id, opts.GalID)
+	}
+	if opts.ReplaceSoul {
+		setReplaceSoulEnabled(id, true)
 	}
 
 	// Start stdout → SSE/WS bridge
@@ -505,6 +521,119 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 	return nil
 }
 
+// setReplaceSoul reloads a session's underlying claude process with
+// --system-prompt-file (本我模式) toggled on/off. The serverSession
+// (broadcaster, history, name, etc.) is preserved across the reload — only
+// the subprocess is swapped. Note: toggling mid-session causes the system
+// prompt to change, which means the model's "identity" shifts for the rest
+// of the conversation. The UI warns the user about this.
+func (sm *sessionManager) setReplaceSoul(id string, enabled bool) error {
+	sess := sm.getSession(id)
+	if sess == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	sess.mu.Lock()
+	if sess.ReplaceSoul == enabled && sess.process != nil && sess.process.alive() {
+		sess.mu.Unlock()
+		return nil // no-op
+	}
+	oldProc := sess.process
+	resumeID := sess.ClaudeSID // preserve conversation history across reload
+	opts := sessionOpts{
+		WorkDir:          sess.Project,
+		SystemPromptFile: sess.promptFile,
+		Model:            sess.Model,
+		MCPConfig:        sess.mcpConfig,
+		Chrome:           sess.ChromeEnabled,
+		ReplaceSoul:      enabled,
+		ResumeID:         resumeID,
+	}
+	sess.mu.Unlock()
+
+	if oldProc != nil {
+		oldProc.suppressClose.Store(true)
+		if oldProc.alive() {
+			oldProc.shutdown()
+		}
+	}
+
+	sess.setStatus("starting")
+
+	newProc, err := spawnClaude(opts)
+	if err != nil {
+		sess.setStatus("error")
+		return fmt.Errorf("respawn claude: %w", err)
+	}
+
+	sess.mu.Lock()
+	sess.process = newProc
+	sess.ReplaceSoul = enabled
+	sess.ClaudeSID = ""
+	sess.mu.Unlock()
+
+	setReplaceSoulEnabled(id, enabled)
+	sess.setStatus("running")
+
+	go bridgeStdout(newProc, sess.broadcaster,
+		func(raw json.RawMessage) {
+			var init InitMessage
+			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
+				sess.mu.Lock()
+				sess.ClaudeSID = init.SessionID
+				sess.mu.Unlock()
+			}
+		},
+		func(raw json.RawMessage) {
+			var result ResultMessage
+			if json.Unmarshal(raw, &result) == nil {
+				sess.mu.Lock()
+				sess.TotalCost += result.TotalCostUSD
+				sess.NumTurns += result.NumTurns
+				if result.SessionID != "" {
+					sess.ClaudeSID = result.SessionID
+				}
+				newStatus := "idle"
+				if result.Subtype == "error" {
+					newStatus = "error"
+				}
+				sess.mu.Unlock()
+				sess.setStatus(newStatus)
+			}
+			sess.touch()
+		})
+
+	go func() {
+		<-newProc.done
+		sess.mu.Lock()
+		alreadyStopped := sess.Status == "stopped"
+		sess.mu.Unlock()
+		if alreadyStopped {
+			return
+		}
+		if newProc.exitCode != 0 {
+			sess.setStatus("error")
+		} else {
+			sess.setStatus("stopped")
+		}
+	}()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := newProc.stderr.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	if sm.hub != nil {
+		sm.hub.notifySessions()
+	}
+	fmt.Fprintf(os.Stderr, "[%s] server: session %s replace_soul=%v reloaded\n", appName, shortID(id), enabled)
+	return nil
+}
+
 // destroySession gracefully shuts down and removes a session.
 func (sm *sessionManager) destroySession(id string) error {
 	sm.mu.Lock()
@@ -615,7 +744,9 @@ func (sm *sessionManager) reap() {
 
 // resumeSession creates a new active session wrapping `claude --resume <sessionID>`.
 // If a session resuming the same Claude session ID is already active, return it.
-func (sm *sessionManager) resumeSession(sessionID, message, displayName, categoryOverride string) (*serverSession, error) {
+// replaceSoul: pointer — nil means "inherit from original session's persisted flag",
+// non-nil means "explicitly use this value".
+func (sm *sessionManager) resumeSession(sessionID, message, displayName, categoryOverride string, replaceSoul *bool) (*serverSession, error) {
 	sm.mu.Lock()
 	// Dedup: check if already resumed (by ClaudeSID or ResumedFrom), only if alive
 	for _, s := range sm.sessions {
@@ -662,6 +793,15 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 		resolvedCategory = CategoryInteractive
 	}
 
+	// Resolve replace_soul: explicit arg wins, else inherit from persisted DB flag
+	// (looked up by either weiran session_id or claude_session_id — see getReplaceSoulEnabled).
+	resolvedReplaceSoul := false
+	if replaceSoul != nil {
+		resolvedReplaceSoul = *replaceSoul
+	} else {
+		resolvedReplaceSoul = getReplaceSoulEnabled(sessionID)
+	}
+
 	sess := &serverSession{
 		ID:          id,
 		Name:        displayName,
@@ -672,6 +812,7 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 		CreatedAt:   now,
 		LastActive:  now,
 		SoulEnabled: true,
+		ReplaceSoul: resolvedReplaceSoul,
 		StreamURL:   fmt.Sprintf("/api/sessions/%s/stream", id),
 		broadcaster: bc,
 		hub:         sm.hub,
@@ -684,13 +825,17 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 	sess.promptFile = promptOut
 
 	// Spawn Claude Code with --resume
+	promptFlag := "--append-system-prompt-file"
+	if resolvedReplaceSoul {
+		promptFlag = "--system-prompt-file"
+	}
 	args := []string{
 		"-p",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--permission-mode", "bypassPermissions",
-		"--append-system-prompt-file", promptOut,
+		promptFlag, promptOut,
 		"--resume", sessionID,
 	}
 
@@ -698,7 +843,7 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 	cmd.Dir = workspace
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
-	env = injectProxyEnv(env)
+	env = injectProxyEnvWithSession(env, id)
 	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
@@ -739,6 +884,9 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 
 	// Register in server DB
 	ensureServerSession(id, sess.Name)
+	if resolvedReplaceSoul {
+		setReplaceSoulEnabled(id, true)
+	}
 
 	go bridgeStdout(proc, sess.broadcaster,
 		// onInit: sync session name
@@ -1001,8 +1149,15 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 						textParts = nil
 					}
 					inputStr := string(b.Input)
-					if len(inputStr) > 500 {
-						inputStr = inputStr[:500] + "..."
+					// Keep full input for code-edit tools (Edit/Write/NotebookEdit/MultiEdit)
+					// so frontend can render diffs; truncate others
+					switch b.Name {
+					case "Edit", "Write", "NotebookEdit", "MultiEdit":
+						// no truncation
+					default:
+						if len(inputStr) > 500 {
+							inputStr = inputStr[:500] + "..."
+						}
 					}
 					all = append(all, historyMessage{
 						Role:      "tool_use",
