@@ -85,6 +85,11 @@ func openDB() (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("soul_sessions schema failed: %w", err)
 	}
+	// FTS5 full-text search over daily notes and session summaries
+	if err := ensureFTSSchemas(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("fts schema failed: %w", err)
+	}
 	return db, nil
 }
 
@@ -520,8 +525,20 @@ func handleDB(args []string) {
 		}
 		fmt.Printf("rejected: %s\n", args[1])
 
+	case "fts-index":
+		// weiran db fts-index — incrementally index daily notes into FTS5
+		handleFTSIndex()
+
+	case "fts-rebuild":
+		// weiran db fts-rebuild — drop and recreate FTS5 indexes from source tables
+		handleFTSRebuild()
+
+	case "search-fts":
+		// weiran db search-fts <query> [--scope=daily|session|both] [--limit=N] [--json]
+		handleFTSSearch(args[1:])
+
 	default:
-		fmt.Printf("unknown subcommand: %s\nusage: %s db <recall|pending|summarized|save|save-batch|list|stats|search|gc|patterns|pattern-save|pattern-save-batch|feedback|cultivate|pattern-reject>\n", args[0], appName)
+		fmt.Printf("unknown subcommand: %s\nusage: %s db <recall|pending|summarized|save|save-batch|list|stats|search|search-fts|fts-index|fts-rebuild|gc|patterns|pattern-save|pattern-save-batch|feedback|cultivate|pattern-reject>\n", args[0], appName)
 	}
 }
 

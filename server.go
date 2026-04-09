@@ -28,15 +28,26 @@ var indexHTML []byte
 // ── Server Config ──
 
 type serverConfig struct {
-	Token           string            `json:"token"`
-	Host            string            `json:"host"`
-	Port            int               `json:"port"`
-	MaxSessions     int               `json:"maxSessions"`
-	IdleTimeoutMin  int               `json:"idleTimeoutMin"`
-	MaxLifetimeHrs  int               `json:"maxLifetimeHours"`
-	RateLimitPerMin int               `json:"rateLimitPerMin"`
-	Telegram        telegramBotConfig `json:"telegram"`
-	Proxy           proxyConfig       `json:"proxy"`
+	Token           string              `json:"token"`
+	Host            string              `json:"host"`
+	Port            int                 `json:"port"`
+	MaxSessions     int                 `json:"maxSessions"`
+	IdleTimeoutMin  int                 `json:"idleTimeoutMin"`
+	MaxLifetimeHrs  int                 `json:"maxLifetimeHours"`
+	RateLimitPerMin int                 `json:"rateLimitPerMin"`
+	Telegram        telegramBotConfig   `json:"telegram"`
+	Proxy           proxyConfig         `json:"proxy"`
+	SessionReset    sessionResetConfig  `json:"sessionReset"`
+}
+
+// sessionResetConfig mirrors SessionResetPolicy for JSON config loading.
+// Fields default to zero-values; loadResetPolicyFromConfig fills in sane
+// defaults for anything unset.
+type sessionResetConfig struct {
+	Mode          string `json:"mode"`          // "idle" | "daily" | "both" | "none"
+	IdleMinutes   int    `json:"idleMinutes"`   // 0 → default 1440
+	DailyAtHour   int    `json:"dailyAtHour"`   // 0-23; default 4
+	NotifyOnReset bool   `json:"notifyOnReset"` // send Telegram on reset
 }
 
 // telegramBotConfig holds Telegram bot settings.
@@ -95,6 +106,8 @@ func loadServerConfig() serverConfig {
 				cfg.RateLimitPerMin = wrapper.Server.RateLimitPerMin
 			}
 			cfg.Telegram = wrapper.Server.Telegram
+			// Session reset policy (always copy; defaults are filled in by loadResetPolicyFromConfig)
+			cfg.SessionReset = wrapper.Server.SessionReset
 			if wrapper.Server.Proxy.Port != 0 || wrapper.Server.Proxy.Upstream != "" || wrapper.Server.Proxy.Enabled {
 				if wrapper.Server.Proxy.Enabled {
 					cfg.Proxy.Enabled = true
@@ -236,6 +249,38 @@ func handleServer(args []string) {
 			"rate_limit":       cfg.RateLimitPerMin,
 			"workspace":        workspace,
 			"claude_bin":       claudeBin,
+		})
+	}))
+
+	// FTS5 full-text search over daily notes + session summaries
+	// GET /api/search?q=<query>&scope=<daily|session|both>&limit=<N>
+	mux.HandleFunc("GET /api/search", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		if q == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q required"})
+			return
+		}
+		scope := r.URL.Query().Get("scope")
+		if scope == "" {
+			scope = "both"
+		}
+		limit := 20
+		if l := r.URL.Query().Get("limit"); l != "" {
+			fmt.Sscanf(l, "%d", &limit)
+			if limit < 1 || limit > 200 {
+				limit = 20
+			}
+		}
+		hits, err := searchFTS(q, scope, limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"query": q,
+			"scope": scope,
+			"hits":  hits,
+			"total": len(hits),
 		})
 	}))
 
@@ -729,6 +774,28 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "replace_soul": req.Enabled})
 	}))
 
+	// Switch model — respawns the claude process with a new model while
+	// preserving session state (conversation history, replace_soul, chrome).
+	mux.HandleFunc("POST /api/sessions/{id}/set-model", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		sess := sm.getSession(r.PathValue("id"))
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Model == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "model is required"})
+			return
+		}
+		if err := sm.setModel(sess.ID, req.Model); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "model": req.Model})
+	}))
+
 	// Context usage — fire control request, response comes via SSE
 	mux.HandleFunc("POST /api/sessions/{id}/usage", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		sess := sm.getSession(r.PathValue("id"))
@@ -858,6 +925,7 @@ func handleServer(args []string) {
 			Message     string `json:"message"`
 			Name        string `json:"name"`
 			Category    string `json:"category"`
+			Model       string `json:"model"`
 			ReplaceSoul *bool  `json:"replace_soul"` // nil → inherit persisted DB flag
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
@@ -865,7 +933,7 @@ func handleServer(args []string) {
 			return
 		}
 
-		sess, err := sm.resumeSession(req.SessionID, req.Message, req.Name, req.Category, req.ReplaceSoul)
+		sess, err := sm.resumeSession(req.SessionID, req.Message, req.Name, req.Category, req.Model, req.ReplaceSoul)
 		if err != nil {
 			status := http.StatusInternalServerError
 			if strings.Contains(err.Error(), "max sessions") {
@@ -924,8 +992,9 @@ func handleServer(args []string) {
 	// No auth required — Jira calls this from Docker container
 	mux.HandleFunc("POST /api/wake", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Text string `json:"text"`
-			Soul *bool  `json:"soul"` // pointer to distinguish missing from false
+			Text  string `json:"text"`
+			Soul  *bool  `json:"soul"`  // pointer to distinguish missing from false
+			Model string `json:"model"` // override model (e.g. from defaultModel via delegateToServer)
 		}
 		json.NewDecoder(r.Body).Decode(&req) // optional body, ignore errors
 
@@ -965,8 +1034,16 @@ func handleServer(args []string) {
 			taskMsg = fmt.Sprintf("Context: %s\n\n%s", reason, hb)
 		}
 
-		// Soul session lifecycle: resume or create
+		// Soul session lifecycle: compact check → resume or create
 		endStaleSoulSessions()
+
+		// Auto-compact: if rounds exceeded, end old session and start fresh
+		if shouldCompactSoulSession(agentName, soulSessionMaxRounds) {
+			fmt.Fprintf(os.Stderr, "[%s] server: soul session hit %d rounds, compacting (daily notes carry context forward)\n",
+				appName, soulSessionMaxRounds)
+			endSoulSession(agentName, fmt.Sprintf("context compaction (rounds >= %d)", soulSessionMaxRounds))
+		}
+
 		claudeResumeID := getActiveSoulSession(agentName)
 		soulSessionID := getActiveSoulSessionID(agentName)
 		if claudeResumeID != "" {
@@ -976,10 +1053,17 @@ func handleServer(args []string) {
 			soulSessionID = createSoulSession(agentName, "daily", 2.0)
 		}
 
+		// Apply model: request > defaultModel > empty (upstream default)
+		wakeModel := req.Model
+		if wakeModel == "" && defaultModel != "" {
+			wakeModel = defaultModel
+		}
+
 		sessName := fmt.Sprintf("heartbeat-%s", time.Now().Format("0102-1504"))
 		sess, err := sm.createSessionWithOpts(sessionCreateOpts{
 			Name:     sessName,
 			Project:  workspace,
+			Model:    wakeModel,
 			Soul:     soulEnabled,
 			Category: CategoryHeartbeat,
 			Tags:     []string{"auto"},
@@ -1015,6 +1099,9 @@ func handleServer(args []string) {
 				fmt.Fprintf(os.Stderr, "[%s] server: wake failed to send task: %v\n", appName, err)
 			}
 		}()
+
+		// Track rounds for auto-compact
+		incrementSoulSessionRounds(agentName)
 
 		soulLabel := "with soul"
 		if !soulEnabled {
@@ -1227,12 +1314,24 @@ func handleServer(args []string) {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	// Parent context for background goroutines (session lifecycle watcher etc).
+	// Cancelled in the graceful shutdown handler below so watchers exit cleanly.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+
+	// Session lifecycle watcher: expires idle soul sessions + daily reset.
+	// Runs as a background goroutine inside the server process.
+	resetPolicy := loadResetPolicyFromConfig(cfg)
+	go sessionLifecycleWatcher(bgCtx, resetPolicy, 5*time.Minute)
+
 	// Graceful shutdown on SIGTERM/SIGINT
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-sigCh
 		fmt.Fprintf(os.Stderr, "\n[%s] server: received %v, shutting down...\n", appName, sig)
+
+		// Stop background goroutines (lifecycle watcher etc)
+		bgCancel()
 
 		// Stop Telegram bot first (stops receiving new messages)
 		if tgBridge != nil {

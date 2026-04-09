@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### FTS5 Full-Text Search
+
+- **SQLite FTS5 integration**: New `daily_notes` table + `daily_notes_fts` virtual table for keyword search across all daily notes (memory/*.md). External-content mode — no data duplication, triggers keep FTS in sync.
+- **Session summaries FTS**: `session_summaries_fts` virtual table over existing `sessions.summary` column, also via external content + triggers.
+- **`weiran db fts-index`**: Scan and index all daily notes (incremental: skips unchanged files via mtime+hash).
+- **`weiran db search-fts <query>`**: BM25-ranked keyword search with `[highlighted]` snippets across daily notes and/or session summaries. Scope: `daily`, `session`, or `both`.
+- **`weiran db fts-rebuild`**: Rebuild FTS5 indexes from scratch (escape hatch for corruption).
+- **`GET /api/search`**: HTTP endpoint for FTS5 search (auth required). Query params: `q`, `scope`, `limit`.
+- **Cron hook**: `indexDailyNotes()` runs after every cron memory consolidation, keeping the index fresh.
+- **Query sanitization**: User queries with dots, hashes, CJK characters are auto-quoted for safe FTS5 MATCH.
+
+### Session Lifecycle Automation (Jira #844)
+
+- **`SessionResetPolicy`**: Configurable idle expiry + daily reset. Modes: `idle`, `daily`, `both`, `none`.
+- **Background watcher goroutine**: `sessionLifecycleWatcher` runs inside `weiran server`, polls every 5min. Singleton-guarded, cancels cleanly on SIGTERM.
+- **Idle expiry**: Parameterized `expireIdleSoulSessions(idleMinutes)` replaces hardcoded 24h. Default: 1440min (24h).
+- **Daily reset**: `maybeDailyReset(atHour)` ends all active soul sessions once per day at configurable hour (default: 04:00 local). Idempotent via `lifecycle_kv` table.
+- **Config**: `server.sessionReset` block in `config.json` — `mode`, `idleMinutes`, `dailyAtHour`, `notifyOnReset`.
+- **Telegram notification**: Optional notification on reset via existing `sendTelegram()`.
+- **Backward compat**: Existing `endStaleSoulSessions()` in soul_session.go untouched — heartbeat/cron callers still work.
+
+### Fixes
+
+- **Provider mode leaks `CLAUDE_CODE_OAUTH_TOKEN` into third-party endpoints** (`server_proxy.go::injectProxyEnvWithModel`): When `--model provider/model` was active, the function still injected `CLAUDE_CODE_OAUTH_TOKEN` at the end, so Claude Code's interactive login check would prefer that token over the provider's API key and ship it to non-Anthropic endpoints (MiniMax, etc.), producing 401 / "login required" errors. `weiran --model minimax/MiniMax-M2.7-highspeed` failed in interactive mode while `-p` one-shot mode worked because `-p` bypasses the login check. Z.AI appeared to work only because its `authEnv` defaults to `ANTHROPIC_AUTH_TOKEN` (same slot OAuth tokens occupy) and the Z.AI key happened to overwrite it. Fix: strip `CLAUDE_CODE_OAUTH_TOKEN` entirely whenever a provider override is applied.
+
+### Model Discovery & Validation
+
+- **`weiran models` subcommand**: Lists every available model grouped by provider — native Anthropic aliases (opus/sonnet/haiku) plus custom `provider/model` combos from `config.json`. Shows endpoint, auth env, and the default model used by cron/heartbeat/evolve.
+- **Model-name validation warning**: `--model provider/model` now warns loudly to stderr when the model name is not in the provider's `models` whitelist, listing the valid names. Catches typos before the first token is generated — critical for providers like MiniMax that silently fall back to a default model when given an unknown name (e.g. `minimax2.7-highspeed` → `MiniMax-M2.7` instead of the `-highspeed` variant).
+- **`loadAllProviders` helper**: Shared reader for the providers section of `config.json`, reused by `resolveProvider` and `handleModels`.
+
 ## v1.10.0
 
 ### Id Mode (本我模式)

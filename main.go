@@ -53,6 +53,10 @@ var (
 	// Default model for cron/heartbeat (from config.json "defaultModel")
 	defaultModel string
 
+	// Max heartbeat rounds before soul session auto-compact (from config.json "soulSessionMaxRounds")
+	// 0 = disabled. Default 30 (~7.5h at 15-min intervals).
+	soulSessionMaxRounds int
+
 	launchDir  string // original working directory before chdir to workspace
 	galContext string // GAL save JSON injected into prompt for resume
 
@@ -320,11 +324,12 @@ func loadConfig() {
 	}
 
 	type appConfig struct {
-		JiraToken      string   `json:"jiraToken"`
-		TelegramChatID string   `json:"telegramChatID"`
-		ProjectRoots   []string `json:"projectRoots"`
-		AgentName      string   `json:"agentName"`
-		DefaultModel   string   `json:"defaultModel"` // default model for cron/heartbeat (e.g. "zai/glm-5.1")
+		JiraToken            string   `json:"jiraToken"`
+		TelegramChatID       string   `json:"telegramChatID"`
+		ProjectRoots         []string `json:"projectRoots"`
+		AgentName            string   `json:"agentName"`
+		DefaultModel         string   `json:"defaultModel"`         // default model for cron/heartbeat (e.g. "zai/glm-5.1")
+		SoulSessionMaxRounds int      `json:"soulSessionMaxRounds"` // 0 = disabled, default 30
 	}
 	var cfg appConfig
 	if cfgData != nil {
@@ -374,6 +379,12 @@ func loadConfig() {
 	if envModel := os.Getenv("WEIRAN_DEFAULT_MODEL"); envModel != "" {
 		defaultModel = envModel
 	}
+
+	// soulSessionMaxRounds: config.json (default 30)
+	soulSessionMaxRounds = 30 // default
+	if cfg.SoulSessionMaxRounds > 0 {
+		soulSessionMaxRounds = cfg.SoulSessionMaxRounds
+	}
 }
 
 func init() {
@@ -410,8 +421,9 @@ Usage:
   {{NAME}} --standard            Standard mode — append soul to CC's native system prompt
   {{NAME}} -p "task"             one-shot task, exits when done
   {{NAME}} --standard -p "task"  one-shot task in Standard mode
-  {{NAME}} --model zai/glm-5.1    use custom provider endpoint (reads from models.json)
-  {{NAME}} --model minimax/MiniMax-M2.7  use MiniMax endpoint
+  {{NAME}} --model zai/glm-5.1    use custom provider endpoint (see '{{NAME}} models')
+  {{NAME}} --model minimax/MiniMax-M2.7-highspeed  use MiniMax endpoint
+  {{NAME}} models                 list all available models (native + provider/model)
   {{NAME}} -r                    resume session (opens TUI picker if no ID given)
   {{NAME}} -r <session-id>       resume specific session
   {{NAME}} --cron                memory consolidation mode (for scheduled tasks)
@@ -425,6 +437,7 @@ Subcommands:
   {{NAME}} rollback [N]          rollback to Nth version (default 1 = previous)
   {{NAME}} update                self-update: git pull -> {{NAME}} build (safe build)
   {{NAME}} status                quick health check (without launching claude)
+  {{NAME}} models                list available models grouped by provider (native + custom)
   {{NAME}} doctor                deep diagnostics (claude version, processes, DB, disk, model endpoints, metrics anomalies)
   {{NAME}} doctor cron           audit crontab: binary path, schedule sanity, log health, evolve-probe readiness
   {{NAME}} prompt                 print the full assembled system prompt to stdout
@@ -564,6 +577,9 @@ func main() {
 	case "status":
 		handleStatus()
 		return
+	case "models":
+		handleModels()
+		return
 	case "log":
 		handleLog(extra)
 		return
@@ -625,7 +641,11 @@ func main() {
 	result := buildPrompt()
 	writePrompt(result)
 
-	// Apply defaultModel for cron/heartbeat if no CLI --model override
+	// Apply defaultModel for automated modes only (cron/heartbeat/evolve).
+	// Interactive mode intentionally uses the upstream default (Opus) so the
+	// user gets the best model for conversational work. Automated jobs are
+	// high-volume and benefit from a cheaper/faster provider. This is a
+	// deliberate design choice — not a bug.
 	if overrideModel == "" && defaultModel != "" {
 		if mode == "cron" || mode == "heartbeat" || mode == "evolve" {
 			overrideModel = defaultModel
@@ -727,6 +747,15 @@ func main() {
 		args := append(base, "-p", task)
 		args = append(args, extra...)
 		exitCode := runClaude(args)
+
+		// Refresh FTS5 index for daily notes after memory consolidation.
+		// Best-effort: failure here never blocks cron completion.
+		if added, skipped, err := indexDailyNotes(); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] fts reindex failed: %v\n", appName, err)
+		} else if added > 0 {
+			fmt.Fprintf(os.Stderr, "[%s] fts reindex: +%d daily notes (%d unchanged)\n", appName, added, skipped)
+		}
+
 		runHooks("cron")
 		os.Exit(exitCode)
 
@@ -819,7 +848,11 @@ func delegateToServer(mode string) bool {
 		return false
 	}
 
-	body, _ := json.Marshal(map[string]string{"text": reason})
+	payload := map[string]string{"text": reason}
+	if defaultModel != "" {
+		payload["model"] = defaultModel
+	}
+	body, _ := json.Marshal(payload)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Post(addr+endpoint, "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -861,6 +894,9 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			return
 		case "status":
 			mode = "status"
+			return
+		case "models":
+			mode = "models"
 			return
 		case "log":
 			mode = "log"
