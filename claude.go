@@ -74,10 +74,6 @@ func execClaude(args []string) {
 
 	argv := append([]string{"claude"}, args...)
 	env := injectProxyEnv(os.Environ())
-	// Mark as SDK entrypoint so Claude Code skips the interactive OAuth login check.
-	// Without this, the login check hits ANTHROPIC_BASE_URL (our proxy) for auth
-	// validation, which can fail because the proxy only forwards /v1/messages.
-	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
 
 	if err := syscall.Exec(bin, argv, env); err != nil {
 		fmt.Fprintf(os.Stderr, "["+appName+"] exec failed: %v\n", err)

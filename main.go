@@ -40,7 +40,8 @@ var (
 
 	// Claude Code config directory (sessions, projects, settings).
 	// Defaults to ~/.claude; override with CLAUDE_CONFIG_DIR env var for instance isolation.
-	claudeConfigDir string
+	claudeConfigDir         string
+	claudeConfigDirExplicit bool // true when CLAUDE_CONFIG_DIR was explicitly set by user
 
 	// Per-session temp directory, initialized by initSessionDir()
 	sessionDir string // /tmp/<agent>-0405-0924/
@@ -133,7 +134,9 @@ func initAppName() {
 
 	// Claude Code config dir isolation: CLAUDE_CONFIG_DIR env → default ~/.claude
 	claudeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
-	if claudeConfigDir == "" {
+	if claudeConfigDir != "" {
+		claudeConfigDirExplicit = true
+	} else {
 		claudeConfigDir = filepath.Join(home, ".claude")
 	}
 }

@@ -1246,9 +1246,10 @@ func injectProxyEnvWithModel(env []string, sessionID string, model string) []str
 		env = append(filtered, "CLAUDE_CODE_OAUTH_TOKEN="+tok)
 	}
 
-	// Inject CLAUDE_CONFIG_DIR for session isolation between instances.
-	// Replace any existing value to ensure child claude uses the same config dir.
-	if claudeConfigDir != "" {
+	// Inject CLAUDE_CONFIG_DIR only when the user explicitly set it (instance isolation).
+	// Do NOT inject the default ~/.claude — explicitly setting it changes Claude Code's
+	// behavior (triggers onboarding wizard, different auth flow).
+	if claudeConfigDirExplicit {
 		filtered := make([]string, 0, len(env)+1)
 		for _, v := range env {
 			if !strings.HasPrefix(v, "CLAUDE_CONFIG_DIR=") {
