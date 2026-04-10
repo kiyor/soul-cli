@@ -472,6 +472,11 @@ Subcommands:
   {{NAME}} evolve-probe -f <feedback> -s <scenario> [--mode with|without|both]
                                   run a thought-experiment probe against a feedback rule
   {{NAME}} evolve-probe -f <feedback> --list   list scenarios for a feedback
+  {{NAME}} init                  first-run setup wizard (creates workspace + soul files)
+  {{NAME}} init --yes            use defaults, no interactive prompts
+  {{NAME}} init --force          overwrite existing files
+  {{NAME}} init --archetype companion  use a personality archetype (companion/engineer/steward/mentor)
+  {{NAME}} init --name X --role Y --personality Z --owner W --tz TZ  flag-driven (AI-friendly)
   {{NAME}} new                   reset all Telegram direct sessions (start new conversation)
   {{NAME}} notify [--dry-run] <message>      send Telegram text message to user (supports Markdown)
   {{NAME}} notify-photo [--dry-run] <URL> [caption]  send Telegram photo to user
@@ -646,6 +651,9 @@ func main() {
 	case "evolve-probe":
 		handleProbe(extra)
 		return
+	case "init":
+		handleInit(extra)
+		return
 	case "server":
 		handleServer(extra)
 		return
@@ -739,6 +747,18 @@ func main() {
 		execClaude(args)
 
 	case "cron":
+		// If server is running, delegate to it so the session gets proper "cron" category.
+		if delegatePrintToServer(cronTask(), CategoryCron) {
+			// Post-delegate: FTS reindex + hooks still run locally.
+			if added, skipped, err := indexDailyNotes(); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] fts reindex failed: %v\n", appName, err)
+			} else if added > 0 {
+				fmt.Fprintf(os.Stderr, "[%s] fts reindex: +%d daily notes (%d unchanged)\n", appName, added, skipped)
+			}
+			runHooks("cron")
+			os.Exit(0)
+		}
+
 		mustLock()
 		defer releaseLock()
 
@@ -831,6 +851,12 @@ func main() {
 		os.Exit(exitCode)
 
 	case "evolve":
+		// If server is running, delegate to it so the session gets proper "evolve" category.
+		if delegatePrintToServer(evolveTask(), CategoryEvolve) {
+			runHooks("evolve")
+			os.Exit(0)
+		}
+
 		mustLock()
 		defer releaseLock()
 
@@ -1001,6 +1027,10 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			return
 		case "evolve-probe":
 			mode = "evolve-probe"
+			extra = args[i+1:]
+			return
+		case "init":
+			mode = "init"
 			extra = args[i+1:]
 			return
 		case "server":

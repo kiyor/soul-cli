@@ -1,23 +1,11 @@
 # Getting Started
 
-## The Fast Way (Let Claude Code Do It)
-
-You're already using Claude Code, right? Just tell it:
-
-> Clone https://github.com/kiyor/soul-cli, build it as `myai`, set up a workspace, and write initial soul files for me. My name is Alex, I'm a backend engineer, timezone US Pacific.
-
-Claude Code will handle the rest — clone, build, create workspace, write SOUL.md / IDENTITY.md / USER.md. Done.
-
-If you want more control, keep reading.
-
-## Manual Setup
-
-### Prerequisites
+## Prerequisites
 
 - **Go 1.21+** — [Install Go](https://go.dev/dl/)
 - **Claude Code** — [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 
-### Install
+## Install
 
 ```bash
 git clone https://github.com/kiyor/soul-cli.git
@@ -37,17 +25,76 @@ mv myai ~/go/bin/     # or anywhere in PATH
 
     Want a completely separate home? Set `MYAI_HOME=~/my-ai`.
 
-### Create Workspace
+## Initialize (Recommended)
+
+The `init` command creates your workspace, generates soul files, and installs a setup-guide skill — no manual file editing needed.
+
+### Interactive Wizard
 
 ```bash
-mkdir -p ~/.openclaw/workspace/memory
+myai init
 ```
 
-### Write Soul Files
+The wizard asks for your AI's name, role, personality, your name, and timezone. It also offers **personality archetypes** — pre-built templates with depth:
 
-Create these in `~/.openclaw/workspace/`:
+| Archetype | Vibe | Best for |
+|-----------|------|----------|
+| `companion` | Emotionally present, remembers details, picks up on mood | Personal assistant, daily companion |
+| `engineer` | Code first, terse, opinionated, dry humor | Technical pair programming |
+| `steward` | Organized, proactive, structured reporting | Ops management, task tracking |
+| `mentor` | Socratic, patient, layered explanations | Learning, onboarding |
+| *(custom)* | Define your own from keywords | Everything else |
 
-=== "SOUL.md (required)"
+### Non-Interactive (AI-Friendly)
+
+All parameters can be passed as flags — zero stdin required:
+
+```bash
+myai init --archetype engineer --name kuro --owner alex --tz America/Los_Angeles
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--archetype` | Personality template (companion/engineer/steward/mentor) | custom |
+| `--name` | AI's name | binary name |
+| `--role` | Role description | "personal engineering assistant" |
+| `--personality` | Comma-separated personality keywords | "direct, reliable, warm" |
+| `--owner` | Your name | `$USER` |
+| `--tz` | Timezone | system timezone |
+| `--yes` | Skip all prompts, use defaults | — |
+| `--force` | Overwrite existing files | — |
+
+### What Gets Created
+
+```
+~/.openclaw/workspace/
+├── SOUL.md                     — personality, values, inner world
+├── IDENTITY.md                 — name, role
+├── USER.md                     — your preferences
+├── AGENTS.md                   — behavioral rules
+├── MEMORY.md                   — memory index (starts empty)
+├── memory/                     — daily notes directory
+│   └── topics/                 — long-term topic files
+└── skills/
+    └── setup-guide/SKILL.md    — built-in help skill
+```
+
+### Day-0 Self-Enrichment
+
+Generated soul files contain a `<!-- soul:day0 -->` marker. On the first interactive session, the AI will:
+
+1. Introduce itself and confirm its personality
+2. Ask 2–3 questions to understand your relationship and preferences
+3. Expand SOUL.md with concrete speaking examples, emotional patterns, and relationship context
+4. Remove the marker and commit the enriched files
+
+This turns a 70% archetype skeleton into a 90% personalized soul — automatically.
+
+## Manual Setup (Alternative)
+
+If you prefer writing soul files by hand, create them in `~/.openclaw/workspace/`:
+
+=== "SOUL.md"
 
     ```markdown
     # SOUL.md
@@ -66,7 +113,7 @@ Create these in `~/.openclaw/workspace/`:
     - Code speaks louder than explanations
     ```
 
-=== "IDENTITY.md (required)"
+=== "IDENTITY.md"
 
     ```markdown
     # IDENTITY.md
@@ -75,7 +122,7 @@ Create these in `~/.openclaw/workspace/`:
     - **Role:** Personal engineering assistant
     ```
 
-=== "USER.md (recommended)"
+=== "USER.md"
 
     ```markdown
     # USER.md
@@ -88,7 +135,7 @@ Create these in `~/.openclaw/workspace/`:
 !!! info "These are just markdown"
     No schema, no DSL. Write whatever you want. See [Soul Files Guide](guides/soul-files.md) for all available files.
 
-### Launch
+## Launch
 
 ```bash
 myai

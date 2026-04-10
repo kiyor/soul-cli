@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,9 @@ import (
 	"strings"
 	"time"
 )
+
+//go:embed FRAMEWORK.md
+var frameworkRules string
 
 const maxBootstrapFileChars = 20000   // per-file limit
 const maxBootstrapTotalChars = 150000 // total bootstrap budget
@@ -86,6 +90,19 @@ func buildPrompt() buildPromptResult {
 		totalChars += len(content)
 		fmt.Fprintf(&b, "\n# === %s ===\n\n%s\n", name, content)
 		sections = append(sections, promptSection{name: name, tokens: estimateTokens(b.String()[secStart:])})
+	}
+
+	// Framework rules (embedded at compile time, applies to all instances)
+	if frameworkRules != "" {
+		fwContent := strings.ReplaceAll(frameworkRules, "{cli}", appName)
+		if totalChars+len(fwContent) <= maxBootstrapTotalChars {
+			totalChars += len(fwContent)
+			secStart := b.Len()
+			b.WriteString("\n")
+			b.WriteString(fwContent)
+			b.WriteString("\n")
+			sections = append(sections, promptSection{name: "framework", tokens: estimateTokens(b.String()[secStart:])})
+		}
 	}
 
 	// Long-term memory index

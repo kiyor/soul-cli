@@ -113,6 +113,27 @@ func getSessionCategoryByClaudeSID(claudeSID string) string {
 	return cat
 }
 
+// inferCategoryFromName guesses the category of a legacy session (no DB record)
+// based on its name or first message content. Used as a fallback in /api/history.
+func inferCategoryFromName(name, firstMsg string) string {
+	combined := name + " " + firstMsg
+	switch {
+	case strings.Contains(combined, "Memory Consolidation (cron mode)") ||
+		strings.Contains(name, "-cron-"):
+		return CategoryCron
+	case strings.Contains(combined, "Execute heartbeat patrol") ||
+		strings.Contains(combined, "cron-heartbeat") ||
+		strings.Contains(name, "-heartbeat-") ||
+		strings.Contains(name, "heartbeat-"):
+		return CategoryHeartbeat
+	case strings.Contains(combined, "Self-Evolution (evolve mode") ||
+		strings.Contains(name, "-evolve-"):
+		return CategoryEvolve
+	default:
+		return CategoryInteractive
+	}
+}
+
 // getSessionProxyCost queries the proxy DB for aggregated cost of a session.
 func getSessionProxyCost(sessionID string) float64 {
 	if proxyDB == nil || sessionID == "" {

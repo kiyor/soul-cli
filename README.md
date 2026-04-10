@@ -6,22 +6,37 @@ Claude Code starts fresh every time — no memory, no personality, no idea who y
 
 ## Quick Start
 
-Tell Claude Code to set it up for you:
-
-> Clone https://github.com/kiyor/soul-cli, build it as `myai`, set up a workspace with soul files. My name is Alex, I'm a backend engineer, timezone US Pacific.
-
-Or manually:
-
 ```bash
 git clone https://github.com/kiyor/soul-cli.git && cd soul-cli
 go build -ldflags "-X main.defaultAppName=myai" -o myai .
 mv myai ~/go/bin/
 
-mkdir -p ~/.openclaw/workspace/memory
-# Write SOUL.md + IDENTITY.md in ~/.openclaw/workspace/
-
-myai  # Claude Code, but it remembers
+myai init                          # interactive wizard
+myai init --archetype companion    # pick a personality archetype
+myai                               # Claude Code, but it remembers
 ```
+
+The `init` command creates your workspace, generates soul files, and installs a setup-guide skill — no manual file editing needed.
+
+### Personality Archetypes
+
+| Archetype | Vibe |
+|-----------|------|
+| `companion` | Emotionally present partner — remembers the small things, picks up on mood |
+| `engineer` | Technical peer — code first, explain later, dry humor |
+| `steward` | Operations manager — proactive, organized, quietly reliable |
+| `mentor` | Patient teacher — Socratic questions, layered explanations |
+| *(custom)* | Define your own from keywords |
+
+On first launch, the AI automatically enriches its personality based on your conversation (day-0 self-enrichment).
+
+### AI-Friendly (No Stdin Required)
+
+```bash
+myai init --archetype engineer --name kuro --owner alex --tz America/Los_Angeles
+```
+
+All flags provided = zero interactive prompts. Perfect for scripting or AI-driven setup.
 
 > **Requires:** Go 1.21+ and [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 

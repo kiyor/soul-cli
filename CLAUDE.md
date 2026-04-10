@@ -66,6 +66,10 @@ Key subsystems:
 - `dbPath` = `<appHome>/data/sessions.db` (SQLite)
 - `tgChatID` = Telegram chat ID (read from config.json / openclaw.json / env var)
 
+## Coding Rules
+
+- **Framework vs user data separation**: Framework code must only match text produced by the framework itself (e.g. templates in `tasks.go`). User skill names, prompt content, and behavioral patterns are private data — never hardcode them into framework logic. soul-cli is open-source; code must not leak any specific user's usage patterns.
+
 ## Hooks
 
 Shell scripts in `hooks/{cron,heartbeat}.d/` run after each cron/heartbeat session. They receive env vars: `WEIRAN_MODE`, `WEIRAN_WORKSPACE`, `WEIRAN_DB`. Currently `90-safety-extended.sh` does supplementary checks (memory pollution, git health, temp file cleanup, openclaw.json validity).

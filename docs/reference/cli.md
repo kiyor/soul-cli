@@ -67,6 +67,31 @@ Start the HTTP server with Web UI. See [Server Mode Guide](../guides/server.md).
 
 ## Commands
 
+### `init`
+
+First-run setup wizard — creates workspace, generates soul files, installs setup-guide skill.
+
+```bash
+myai init                          # interactive wizard with archetype selection
+myai init --yes                    # use all defaults, no prompts
+myai init --archetype companion    # use companion personality template
+myai init --archetype engineer --name kuro --owner alex --tz America/New_York
+myai init --force                  # overwrite existing files
+```
+
+| Flag | Description |
+|------|-------------|
+| `--archetype` | Personality template: `companion`, `engineer`, `steward`, `mentor` |
+| `--name` | AI name (default: binary name) |
+| `--role` | Role description |
+| `--personality` | Comma-separated keywords |
+| `--owner` | Owner's name (default: `$USER`) |
+| `--tz` | Timezone (default: system timezone) |
+| `--yes`, `-y` | Skip prompts, use defaults |
+| `--force`, `-f` | Overwrite existing files |
+
+Generated files include a `<!-- soul:day0 -->` marker that triggers automatic personality enrichment on first interactive session.
+
 ### `status`
 
 Quick health check (doesn't launch Claude):
@@ -221,6 +246,19 @@ myai db save-batch       # batch import pending summaries
 | `--heartbeat` | Run health check |
 | `--evolve` | Run self-improvement |
 | `--chrome` | Enable Chrome automation (passed to Claude Code) |
+
+### Init Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--archetype` | *(custom)* | Personality template: companion, engineer, steward, mentor |
+| `--name` | binary name | AI name |
+| `--role` | "personal engineering assistant" | Role description |
+| `--personality` | "direct, reliable, warm" | Comma-separated keywords |
+| `--owner` | `$USER` | Owner name |
+| `--tz` | system timezone | Timezone string |
+| `--yes` / `-y` | — | Skip interactive prompts |
+| `--force` / `-f` | — | Overwrite existing files |
 
 ### Passthrough Flags
 

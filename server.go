@@ -839,7 +839,7 @@ func handleServer(args []string) {
 			// Look up category from DB via Claude session ID
 			cat := getSessionCategoryByClaudeSID(s.ID)
 			if cat == "" {
-				cat = CategoryInteractive // sessions without DB records are legacy interactive
+				cat = inferCategoryFromName(s.Name, s.FirstMsg)
 			}
 
 			// Filter by category (unless "all" is requested)
