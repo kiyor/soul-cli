@@ -585,7 +585,7 @@ func estimateTokens(s string) int {
 // and returns a formatted summary. Each session limited to charBudget chars.
 // Skips current session (via env var CLAUDE_SESSION_ID) and weiran's own sessions.
 func buildCCSessionContext(n int, charBudget int) string {
-	claudeProjects := filepath.Join(home, ".claude", "projects")
+	claudeProjects := filepath.Join(claudeConfigDir, "projects")
 	currentSessionID := os.Getenv("CLAUDE_SESSION_ID")
 
 	type ccSession struct {

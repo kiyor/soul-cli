@@ -279,7 +279,16 @@ type providerConfig struct {
 // resolveProvider looks up a provider's endpoint config from config.json "providers" section.
 // config.json is soul-cli's own config (in data/config.json).
 func resolveProvider(providerName string) *providerConfig {
-	// Read from config.json (same paths as loadConfig)
+	all, _ := loadAllProviders()
+	if prov, ok := all[providerName]; ok && prov.BaseURL != "" {
+		return &prov
+	}
+	return nil
+}
+
+// loadAllProviders returns every provider from the first config.json found,
+// along with the source path that was read.
+func loadAllProviders() (map[string]providerConfig, string) {
 	configPaths := []string{
 		filepath.Join(appHome, "data", "config.json"),
 		filepath.Join(workspace, "scripts", appName, "config.json"),
@@ -292,13 +301,11 @@ func resolveProvider(providerName string) *providerConfig {
 		var cfg struct {
 			Providers map[string]providerConfig `json:"providers"`
 		}
-		if json.Unmarshal(data, &cfg) == nil {
-			if prov, ok := cfg.Providers[providerName]; ok && prov.BaseURL != "" {
-				return &prov
-			}
+		if json.Unmarshal(data, &cfg) == nil && len(cfg.Providers) > 0 {
+			return cfg.Providers, p
 		}
 	}
-	return nil
+	return nil, ""
 }
 
 // injectModelOverrideEnv injects ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN for the overrideModel provider.
@@ -322,10 +329,37 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 	}
 
 	providerName := parts[0]
+	modelName := parts[1]
 	provider := resolveProvider(providerName)
 	if provider == nil {
-		fmt.Fprintf(os.Stderr, "[%s] provider %q not found in config.json\n", appName, providerName)
+		fmt.Fprintf(os.Stderr, "[%s] provider %q not found in config.json (try `%s models`)\n", appName, providerName, appName)
 		return env, false
+	}
+
+	// Validate model name against provider's whitelist.
+	// Some upstreams (like MiniMax) silently fall back to a default model when
+	// an unknown name is passed, which leads to "it runs but with the wrong model".
+	// We warn loudly so typos get caught before the first token is generated.
+	if len(provider.Models) > 0 {
+		found := false
+		for _, m := range provider.Models {
+			if m == modelName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "[%s] ⚠️  model %q not registered under provider %q\n", appName, modelName, providerName)
+			fmt.Fprintf(os.Stderr, "[%s]    available: ", appName)
+			for i, m := range provider.Models {
+				if i > 0 {
+					fmt.Fprint(os.Stderr, ", ")
+				}
+				fmt.Fprintf(os.Stderr, "%s/%s", providerName, m)
+			}
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintf(os.Stderr, "[%s]    upstream may silently fall back to a default model. (use `%s models` to list)\n", appName, appName)
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "[%s] using provider %q → %s\n", appName, providerName, provider.BaseURL)

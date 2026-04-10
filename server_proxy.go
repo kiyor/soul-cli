@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -1032,6 +1033,55 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 				id, ts, model, status, isErr, stream, inTok, outTok, cacheR, cacheC, costUSD, durMs, stopReason, toolsCnt, toolCalls, thinking, temp, ua, strings.ReplaceAll(errD, "\"", "'"), reqID)
 		}
 	}))
+
+	// GET /api/glm/quota — Z.AI GLM usage quota (only if zai provider configured)
+	mux.HandleFunc("GET /api/glm/quota", authMiddleware(token, func(w http.ResponseWriter, r *http.Request) {
+		apiKey := ""
+		configPaths := []string{
+			filepath.Join(appHome, "data", "config.json"),
+			filepath.Join(workspace, "scripts", appName, "config.json"),
+		}
+		for _, p := range configPaths {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			var raw struct {
+				Providers map[string]struct {
+					APIKey  string `json:"apiKey"`
+					BaseURL string `json:"baseUrl"`
+				} `json:"providers"`
+			}
+			if json.Unmarshal(data, &raw) == nil {
+				if zai, ok := raw.Providers["zai"]; ok && zai.APIKey != "" {
+					apiKey = zai.APIKey
+				}
+			}
+			break
+		}
+		if apiKey == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"configured": false})
+			return
+		}
+
+		req, err := http.NewRequestWithContext(r.Context(), "GET", "https://api.z.ai/api/monitor/usage/quota/limit", nil)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Z.AI request failed: " + err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	}))
 }
 
 // intParam parses an integer query parameter with a default.
@@ -1149,7 +1199,8 @@ func injectProxyEnvWithSession(env []string, sessionID string) []string {
 // sessionID: if set, appends /s/{sessionID} to proxy URL for cost tracking.
 func injectProxyEnvWithModel(env []string, sessionID string, model string) []string {
 	// If model is a provider model, use provider endpoint directly (skip local proxy)
-	if overrideEnv, applied := injectProviderEnv(env, model); applied {
+	overrideEnv, providerApplied := injectProviderEnv(env, model)
+	if providerApplied {
 		env = overrideEnv
 	} else if e := proxyEnv(); e != "" {
 		// If sessionID provided, append path prefix
@@ -1167,6 +1218,21 @@ func injectProxyEnvWithModel(env []string, sessionID string, model string) []str
 		env = append(filtered, e)
 	}
 
+	// When a third-party provider (MiniMax, Z.AI, etc.) is active, CLAUDE_CODE_OAUTH_TOKEN
+	// must be stripped entirely. Otherwise Claude Code's interactive login check prefers
+	// the OAuth token, then sends it to the non-Anthropic endpoint and gets 401/auth errors.
+	// -p one-shot mode bypasses the login check which is why it "kind of" worked before.
+	if providerApplied {
+		filtered := make([]string, 0, len(env))
+		for _, v := range env {
+			if strings.HasPrefix(v, "CLAUDE_CODE_OAUTH_TOKEN=") {
+				continue
+			}
+			filtered = append(filtered, v)
+		}
+		return filtered
+	}
+
 	// Inject CLAUDE_CODE_OAUTH_TOKEN if available — ensures all spawned claude
 	// processes share one static token instead of each doing OAuth refresh
 	// (which causes race conditions with concurrent sessions).
@@ -1178,6 +1244,18 @@ func injectProxyEnvWithModel(env []string, sessionID string, model string) []str
 			}
 		}
 		env = append(filtered, "CLAUDE_CODE_OAUTH_TOKEN="+tok)
+	}
+
+	// Inject CLAUDE_CONFIG_DIR for session isolation between instances.
+	// Replace any existing value to ensure child claude uses the same config dir.
+	if claudeConfigDir != "" {
+		filtered := make([]string, 0, len(env)+1)
+		for _, v := range env {
+			if !strings.HasPrefix(v, "CLAUDE_CONFIG_DIR=") {
+				filtered = append(filtered, v)
+			}
+		}
+		env = append(filtered, "CLAUDE_CONFIG_DIR="+claudeConfigDir)
 	}
 
 	return env

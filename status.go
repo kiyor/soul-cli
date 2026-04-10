@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -850,6 +851,73 @@ func handleConfig() {
 	} else {
 		fmt.Printf("  status:       ❌ %v\n", err)
 	}
+}
+
+// handleModels lists every model available via --model, grouped by provider.
+// Reads from config.json (providers section) and also documents native
+// Anthropic aliases that Claude Code ships with.
+func handleModels() {
+	providers, source := loadAllProviders()
+
+	fmt.Printf("%s %s — available models\n", appName, buildVersion)
+	if source != "" {
+		fmt.Printf("source: %s\n\n", source)
+	} else {
+		fmt.Println("source: (no config.json with providers section found)")
+		fmt.Println()
+	}
+
+	// Native Anthropic aliases — handled by Claude Code directly, not by
+	// our provider injection. These work without the `provider/` prefix.
+	fmt.Println("── Native (Anthropic, upstream default) ──")
+	nativeAliases := [][2]string{
+		{"opus", "claude-opus-4-6"},
+		{"opus[1m]", "claude-opus-4-6[1m]"},
+		{"sonnet", "claude-sonnet-4-6"},
+		{"sonnet[1m]", "claude-sonnet-4-6[1m]"},
+		{"haiku", "claude-haiku-4-5-20251001"},
+	}
+	for _, row := range nativeAliases {
+		fmt.Printf("  %-14s → %s\n", row[0], row[1])
+	}
+	fmt.Printf("  usage: %s --model opus   (no provider prefix)\n", appName)
+	fmt.Println()
+
+	// Custom providers from config.json
+	if len(providers) == 0 {
+		fmt.Println("── Custom providers ──")
+		fmt.Println("  (none configured — add entries to config.json `providers`)")
+	} else {
+		// Sort provider names for stable output
+		names := make([]string, 0, len(providers))
+		for n := range providers {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+
+		for _, name := range names {
+			prov := providers[name]
+			fmt.Printf("── %s ──\n", name)
+			fmt.Printf("  endpoint: %s\n", prov.BaseURL)
+			if prov.AuthEnv != "" {
+				fmt.Printf("  auth env: %s\n", prov.AuthEnv)
+			}
+			if len(prov.Models) == 0 {
+				fmt.Println("  models:   (none listed — any model name will be passed through without validation)")
+			} else {
+				fmt.Println("  models:")
+				for _, m := range prov.Models {
+					fmt.Printf("    %s/%s\n", name, m)
+				}
+			}
+			fmt.Println()
+		}
+	}
+
+	if defaultModel != "" {
+		fmt.Printf("Default model (cron/heartbeat/evolve): %s\n", defaultModel)
+	}
+	fmt.Printf("Usage: %s --model <name>   (e.g. `%s --model minimax/MiniMax-M2.7-highspeed`)\n", appName, appName)
 }
 
 // handleClean cleans old session temp dirs in /tmp

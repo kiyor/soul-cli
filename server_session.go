@@ -284,12 +284,15 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 
 	// Start stdout → SSE/WS bridge
 	go bridgeStdout(proc, sess.broadcaster,
-		// onInit: sync session name from Claude Code metadata
+		// onInit: sync session name + model from Claude Code metadata
 		func(raw json.RawMessage) {
 			var init InitMessage
 			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
 				sess.mu.Lock()
 				sess.ClaudeSID = init.SessionID
+				if init.Model != "" {
+					sess.Model = init.Model
+				}
 				sess.mu.Unlock()
 				// Record Claude session ID → weiran session mapping for history lookup
 				setClaudeSessionID(sess.ID, init.SessionID)
@@ -468,7 +471,13 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
 				sess.mu.Lock()
 				sess.ClaudeSID = init.SessionID
+				if init.Model != "" {
+					sess.Model = init.Model
+				}
 				sess.mu.Unlock()
+				if sess.hub != nil {
+					sess.hub.notifySessions()
+				}
 			}
 		},
 		func(raw json.RawMessage) {
@@ -583,7 +592,13 @@ func (sm *sessionManager) setReplaceSoul(id string, enabled bool) error {
 			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
 				sess.mu.Lock()
 				sess.ClaudeSID = init.SessionID
+				if init.Model != "" {
+					sess.Model = init.Model
+				}
 				sess.mu.Unlock()
+				if sess.hub != nil {
+					sess.hub.notifySessions()
+				}
 			}
 		},
 		func(raw json.RawMessage) {
@@ -633,6 +648,121 @@ func (sm *sessionManager) setReplaceSoul(id string, enabled bool) error {
 		sm.hub.notifySessions()
 	}
 	fmt.Fprintf(os.Stderr, "[%s] server: session %s replace_soul=%v reloaded\n", appName, shortID(id), enabled)
+	return nil
+}
+
+// setModel reloads the underlying claude process with a different model
+// (e.g. "zai/glm-5.1"). All session state — conversation history,
+// replace_soul, chrome, mcp config — is preserved across the reload.
+func (sm *sessionManager) setModel(id string, model string) error {
+	sess := sm.getSession(id)
+	if sess == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	sess.mu.Lock()
+	if sess.Model == model && sess.process != nil && sess.process.alive() {
+		sess.mu.Unlock()
+		return nil // no-op
+	}
+	oldProc := sess.process
+	resumeID := sess.ClaudeSID // preserve conversation history
+	opts := sessionOpts{
+		WorkDir:          sess.Project,
+		SystemPromptFile: sess.promptFile,
+		Model:            model,
+		MCPConfig:        sess.mcpConfig,
+		Chrome:           sess.ChromeEnabled,
+		ReplaceSoul:      sess.ReplaceSoul,
+		ResumeID:         resumeID,
+	}
+	sess.mu.Unlock()
+
+	if oldProc != nil {
+		oldProc.suppressClose.Store(true)
+		if oldProc.alive() {
+			oldProc.shutdown()
+		}
+	}
+
+	sess.setStatus("starting")
+
+	newProc, err := spawnClaude(opts)
+	if err != nil {
+		sess.setStatus("error")
+		return fmt.Errorf("respawn claude: %w", err)
+	}
+
+	sess.mu.Lock()
+	sess.process = newProc
+	sess.Model = model
+	sess.ClaudeSID = ""
+	sess.mu.Unlock()
+
+	sess.setStatus("running")
+
+	go bridgeStdout(newProc, sess.broadcaster,
+		func(raw json.RawMessage) {
+			var init InitMessage
+			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
+				sess.mu.Lock()
+				sess.ClaudeSID = init.SessionID
+				if init.Model != "" {
+					sess.Model = init.Model
+				}
+				sess.mu.Unlock()
+				if sess.hub != nil {
+					sess.hub.notifySessions()
+				}
+			}
+		},
+		func(raw json.RawMessage) {
+			var result ResultMessage
+			if json.Unmarshal(raw, &result) == nil {
+				sess.mu.Lock()
+				sess.TotalCost += result.TotalCostUSD
+				sess.NumTurns += result.NumTurns
+				if result.SessionID != "" {
+					sess.ClaudeSID = result.SessionID
+				}
+				newStatus := "idle"
+				if result.Subtype == "error" {
+					newStatus = "error"
+				}
+				sess.mu.Unlock()
+				sess.setStatus(newStatus)
+			}
+			sess.touch()
+		})
+
+	go func() {
+		<-newProc.done
+		sess.mu.Lock()
+		alreadyStopped := sess.Status == "stopped"
+		sess.mu.Unlock()
+		if alreadyStopped {
+			return
+		}
+		if newProc.exitCode != 0 {
+			sess.setStatus("error")
+		} else {
+			sess.setStatus("stopped")
+		}
+	}()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := newProc.stderr.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	if sm.hub != nil {
+		sm.hub.notifySessions()
+	}
+	fmt.Fprintf(os.Stderr, "[%s] server: session %s model=%s reloaded\n", appName, shortID(id), model)
 	return nil
 }
 
@@ -748,7 +878,7 @@ func (sm *sessionManager) reap() {
 // If a session resuming the same Claude session ID is already active, return it.
 // replaceSoul: pointer — nil means "inherit from original session's persisted flag",
 // non-nil means "explicitly use this value".
-func (sm *sessionManager) resumeSession(sessionID, message, displayName, categoryOverride string, replaceSoul *bool) (*serverSession, error) {
+func (sm *sessionManager) resumeSession(sessionID, message, displayName, categoryOverride, model string, replaceSoul *bool) (*serverSession, error) {
 	sm.mu.Lock()
 	// Dedup: check if already resumed (by ClaudeSID or ResumedFrom), only if alive
 	for _, s := range sm.sessions {
@@ -809,6 +939,7 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 		Name:        displayName,
 		ResumedFrom: sessionID,
 		Project:     workspace,
+		Model:       model,
 		Status:      "starting",
 		Category:    resolvedCategory,
 		CreatedAt:   now,
@@ -840,12 +971,16 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 		promptFlag, promptOut,
 		"--resume", sessionID,
 	}
+	if model != "" {
+		args = append(args, "--model", providerModelName(model))
+	}
 
 	cmd := exec.Command(claudeBin, args...)
 	cmd.Dir = workspace
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
-	env = injectProxyEnvWithSession(env, id)
+	// Use model-aware env injection for provider models
+	env = injectProxyEnvWithModel(env, id, model)
 	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
@@ -891,12 +1026,15 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 	}
 
 	go bridgeStdout(proc, sess.broadcaster,
-		// onInit: sync session name
+		// onInit: sync session name + model
 		func(raw json.RawMessage) {
 			var init InitMessage
 			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
 				sess.mu.Lock()
 				sess.ClaudeSID = init.SessionID
+				if init.Model != "" {
+					sess.Model = init.Model
+				}
 				sess.mu.Unlock()
 				// Record agent identity (resume inherits from original)
 				recordSessionAgent(init.SessionID, "main", appName, "server-resume")
@@ -1009,7 +1147,7 @@ func readClaudeSessionName(sessionID string) string {
 	}
 	// Claude Code stores session meta as numeric-ID .json files,
 	// each containing a "sessionId" (UUID) and optional "name".
-	sessDir := filepath.Join(home, ".claude", "sessions")
+	sessDir := filepath.Join(claudeConfigDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
 	if err != nil {
 		return ""
@@ -1037,7 +1175,7 @@ func readClaudeSessionName(sessionID string) string {
 
 // findSessionJSONL locates the JSONL file for a given session ID.
 func findSessionJSONL(sessionID string) string {
-	claudeProjects := filepath.Join(home, ".claude", "projects")
+	claudeProjects := filepath.Join(claudeConfigDir, "projects")
 	entries, err := os.ReadDir(claudeProjects)
 	if err != nil {
 		return ""

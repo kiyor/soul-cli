@@ -397,7 +397,7 @@ func (c *wsClient) handleMessage(raw []byte) {
 			c.sendJSON(map[string]string{"type": "error", "error": "rate limit exceeded"})
 			return
 		}
-		sess, err := c.hub.sm.resumeSession(msg.SID, msg.Message, msg.Name, "", msg.ReplaceSoul)
+		sess, err := c.hub.sm.resumeSession(msg.SID, msg.Message, msg.Name, "", msg.Model, msg.ReplaceSoul)
 		if err != nil {
 			c.sendJSON(map[string]string{"type": "error", "error": err.Error()})
 			return

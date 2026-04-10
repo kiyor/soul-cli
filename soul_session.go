@@ -20,17 +20,24 @@ const soulSessionSchema = `CREATE TABLE IF NOT EXISTS soul_sessions (
 	claude_session_id TEXT NOT NULL DEFAULT '',
 	budget_limit_usd  REAL NOT NULL DEFAULT 2.0,
 	budget_used_usd   REAL NOT NULL DEFAULT 0,
+	rounds            INTEGER NOT NULL DEFAULT 0,
 	context           TEXT NOT NULL DEFAULT '',
 	started_at        TEXT NOT NULL,
 	updated_at        TEXT NOT NULL,
 	ended_at          TEXT
 )`
 
+const soulSessionMigrationRounds = `ALTER TABLE soul_sessions ADD COLUMN rounds INTEGER NOT NULL DEFAULT 0`
+
 // ensureSoulSessionTable adds the soul_sessions table if it doesn't exist.
 // Called from openDB alongside other schemas.
 func ensureSoulSessionTable(db *sql.DB) error {
-	_, err := db.Exec(soulSessionSchema)
-	return err
+	if _, err := db.Exec(soulSessionSchema); err != nil {
+		return err
+	}
+	// Migration: add rounds column if missing (idempotent)
+	db.Exec(soulSessionMigrationRounds) // ignore error = column already exists
+	return nil
 }
 
 // getActiveSoulSession returns the claude_session_id for an active (running/suspended) soul session.
@@ -191,7 +198,7 @@ func endStaleSoulSessions() {
 func detectNewSession(before time.Time) string {
 	// Claude Code stores sessions in ~/.claude/projects/<encoded-workspace>/*.jsonl
 	encodedWS := encodeProjectPath(workspace)
-	projDir := filepath.Join(home, ".claude", "projects", encodedWS)
+	projDir := filepath.Join(claudeConfigDir, "projects", encodedWS)
 
 	entries, err := os.ReadDir(projDir)
 	if err != nil {
@@ -228,6 +235,42 @@ func encodeProjectPath(path string) string {
 	// Let's just do the simple replacement
 	s = strings.ReplaceAll(s, "-.", "--")
 	return s
+}
+
+// incrementSoulSessionRounds bumps the rounds counter for the active soul session.
+func incrementSoulSessionRounds(agent string) {
+	db, err := openDB()
+	if err != nil {
+		return
+	}
+	defer db.Close()
+
+	now := time.Now().Format(time.RFC3339)
+	db.Exec(`UPDATE soul_sessions SET rounds = rounds + 1, updated_at = ?
+		WHERE agent_id = ? AND status IN ('running', 'suspended')`, now, agent)
+}
+
+// shouldCompactSoulSession returns true if the active soul session has exceeded maxRounds.
+// Returns false if maxRounds <= 0 (disabled) or no active session.
+func shouldCompactSoulSession(agent string, maxRounds int) bool {
+	if maxRounds <= 0 {
+		return false
+	}
+	db, err := openDB()
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+
+	var rounds int
+	err = db.QueryRow(
+		`SELECT rounds FROM soul_sessions
+		 WHERE agent_id = ? AND status IN ('running', 'suspended')
+		 ORDER BY updated_at DESC LIMIT 1`, agent).Scan(&rounds)
+	if err != nil {
+		return false
+	}
+	return rounds >= maxRounds
 }
 
 // getProxyCostForSession aggregates cost from proxy_requests table for a session.

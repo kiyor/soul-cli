@@ -164,9 +164,11 @@ body{
 .hi{
   padding:9px 10px;border-radius:10px;cursor:pointer;
   border:1px solid transparent;margin-bottom:2px;opacity:.6;
-  transition:opacity .15s var(--spring),background .15s;min-height:44px;
+  transition:opacity .15s var(--spring),background .15s,border-color .15s;min-height:44px;
 }
 .hi:active{opacity:1;background:rgba(255,255,255,.03)}
+.hi.hi-live{opacity:.85;border-color:rgba(139,92,246,.15);background:rgba(139,92,246,.04)}
+.hi.hi-active{opacity:1;border-color:rgba(139,92,246,.35);background:rgba(139,92,246,.10)}
 .hi .hi-title{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px}
 .hi .hi-meta{font-size:10px;color:var(--muted2);font-family:var(--mono);display:flex;gap:6px;flex-wrap:wrap}
 .hi .hi-summary{font-size:10px;color:var(--muted2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -187,9 +189,10 @@ body{
 
 /* ── Main Content ── */
 .main{display:flex;flex-direction:column;overflow:hidden;position:relative}
-.model-badge{position:absolute;top:8px;right:46px;z-index:10;font-size:11px;color:var(--muted2);background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:6px;padding:2px 8px;backdrop-filter:blur(8px);pointer-events:none;transition:opacity .2s}
+.badge-row{position:absolute;top:8px;right:46px;z-index:10;display:flex;gap:6px;align-items:center;pointer-events:none}
+.model-badge{font-size:11px;color:var(--muted2);background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:6px;padding:2px 8px;backdrop-filter:blur(8px);transition:opacity .2s}
 .model-badge:empty{opacity:0}
-.cost-badge{position:absolute;top:8px;right:120px;z-index:10;font-size:11px;color:#d2a8ff;background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:6px;padding:2px 8px;backdrop-filter:blur(8px);pointer-events:none;transition:opacity .2s;font-family:var(--mono)}
+.cost-badge{font-size:11px;color:#d2a8ff;background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:6px;padding:2px 8px;backdrop-filter:blur(8px);transition:opacity .2s;font-family:var(--mono)}
 .cost-badge:empty{opacity:0}
 /* 本我 badge — replace-soul (--system-prompt-file) mode indicator */
 .soul-badge{flex-shrink:0;z-index:11;font-family:"Noto Serif SC","STKaiti","Songti SC",serif;font-size:11px;font-weight:600;letter-spacing:2px;color:#1a0a1a;background:linear-gradient(135deg,#ff6bcf 0%,#c084fc 100%);border:1px solid rgba(0,0,0,.45);border-radius:10px;padding:1px 8px;box-shadow:0 0 10px rgba(255,107,207,.5),inset 0 1px 0 rgba(255,255,255,.35);backdrop-filter:blur(8px);cursor:help;display:none;animation:soul-pulse 3s ease-in-out infinite;margin-right:6px}
@@ -876,8 +879,10 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 
   <!-- Main -->
   <div class="main" id="main">
-    <div class="model-badge" id="model-badge"></div>
-    <div class="cost-badge" id="cost-badge"></div>
+    <div class="badge-row">
+      <div class="cost-badge" id="cost-badge"></div>
+      <div class="model-badge" id="model-badge"></div>
+    </div>
     <div class="context-bar hidden" id="context-bar"><div class="context-track"><div class="context-fill" id="context-fill"></div></div><span class="context-pct" id="context-pct"></span></div>
     <div class="cwd-badge" id="cwd-badge"></div>
     <div class="content" id="content">
@@ -904,7 +909,9 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
         <select class="settings-select" id="select-model" onchange="applyModel(this.value)">
           <option value="">—</option>
           <option value="opus">Opus 4.6</option>
+          <option value="opus[1m]">Opus 4.6 (1M)</option>
           <option value="sonnet">Sonnet 4.6</option>
+          <option value="sonnet[1m]">Sonnet 4.6 (1M)</option>
           <option value="haiku">Haiku 4.5</option>
         </select>
       </div>
@@ -962,7 +969,9 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   <select id="m-model" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border2);background:rgba(15,22,38,.6);color:var(--text);font-size:14px;font-family:var(--sans)">
     <option value="">— Default —</option>
     <option value="opus">Opus 4.6</option>
+    <option value="opus[1m]">Opus 4.6 (1M)</option>
     <option value="sonnet">Sonnet 4.6</option>
+    <option value="sonnet[1m]">Sonnet 4.6 (1M)</option>
     <option value="haiku">Haiku 4.5</option>
   </select>
   <label>Initial message</label>
@@ -1738,7 +1747,8 @@ function handleSessionsUpdate(list){
     el.classList.toggle('active',s.id===activeSessionId);
     const rawCost=s.proxy_cost_usd||s.total_cost_usd||0;
     const cost=rawCost>0?fmtCost(rawCost):'';
-    el.innerHTML=`<div class="si-top"><span class="si-name">${esc(s.name||shortId(s.id))}</span><span class="si-dot ${s.status}"></span></div><div class="si-meta"><span>${s.model||'default'}</span><span>${s.status}</span><span>${s.num_turns||0}t</span>${cost?'<span>'+cost+'</span>':''}</div><div class="si-actions"><button class="si-rename" onclick="event.stopPropagation();promptRename('${s.id}','${esc(s.name||'')}')">&#9998;</button><button class="si-del" onclick="openDestroySheet('${s.id}')">&times;</button></div>`;
+    const modelDisplay=shortModelName(s.model);
+    el.innerHTML=`<div class="si-top"><span class="si-name">${esc(s.name||shortId(s.id))}</span><span class="si-dot ${s.status}"></span></div><div class="si-meta"><span class="${modelClass(s.model)}">${modelDisplay}</span><span>${s.status}</span><span>${s.num_turns||0}t</span>${cost?'<span>'+cost+'</span>':''}</div><div class="si-actions"><button class="si-rename" onclick="event.stopPropagation();promptRename('${s.id}','${esc(s.name||'')}')">&#9998;</button><button class="si-del" onclick="openDestroySheet('${s.id}')">&times;</button></div>`;
   });
   existing.forEach((el,id)=>{if(!newIds.has(id))el.remove()});
   // Refresh history tab so new/renamed sessions appear there too
@@ -2238,6 +2248,7 @@ async function sendMessage(){
 
   const msg=[text,imgMarkdown].filter(Boolean).join('\n');
   wsSend({type:'send',sid:activeSessionId,message:msg});
+  setThinking(true);
 }
 
 // ── Create / Destroy / Resume ──
@@ -2407,6 +2418,11 @@ function renderHistory(query){
     let activeSid=null;
     if(sessions[s.id]){activeSid=s.id}
     else{for(const[aid,as] of Object.entries(sessions)){if(as.resumed_from===s.id||as.claude_session_id===s.id){activeSid=aid;break}}}
+    // Highlight: hi-live = server has this session alive, hi-active = currently viewing
+    if(activeSid){
+      el.classList.add('hi-live');
+      if(activeSid===activeSessionId)el.classList.add('hi-active');
+    }
     el.innerHTML=`<div class="hi-title" title="${esc(d)}">${catBadge}${esc(d)}</div><div class="hi-meta">${esc(meta)}</div>${s.summary?'<div class="hi-summary">'+esc(s.summary)+'</div>':''}`;
     el.onclick=()=>{
       if(activeSid){selectSession(activeSid);if(isMobile)closeSidebar();return}
@@ -2522,9 +2538,11 @@ function closeSettingsPanel(){
 }
 
 const MODEL_MAP={
-  opus:'claude-opus-4-6',
-  sonnet:'claude-sonnet-4-6',
-  haiku:'claude-haiku-4-5-20251001'
+  'opus':'claude-opus-4-6',
+  'opus[1m]':'claude-opus-4-6[1m]',
+  'sonnet':'claude-sonnet-4-6',
+  'sonnet[1m]':'claude-sonnet-4-6[1m]',
+  'haiku':'claude-haiku-4-5-20251001'
 };
 let providerModels={}; // populated from /api/providers, e.g. {zai:[], minimax:[]}
 
@@ -2563,27 +2581,17 @@ function applyModel(val){
 function applyProviderModel(providerModel){
   if(!activeSessionId)return;
   addSystemMsg('Switching to '+providerModel+' — reloading session...');
-  // Delete current session and create new one with provider model
-  const sess=sessions[activeSessionId];
-  const oldId=activeSessionId;
-  fetch('/api/sessions',{
+  // Respawn the existing session with a new model, preserving conversation
+  // history, replace_soul, chrome, and all other session state.
+  fetch('/api/sessions/'+activeSessionId+'/set-model',{
     method:'POST',
     headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},
-    body:JSON.stringify({
-      name:sess?sess.name:'session-'+Date.now(),
-      project:sess?sess.project:'',
-      model:providerModel,
-      soul_files:true,
-      replace_soul:sess?sess.replace_soul:true
-    })
+    body:JSON.stringify({model:providerModel})
   }).then(r=>r.json()).then(d=>{
-    if(d.error){addErrorMsg('Reload failed: '+d.error);return}
-    // Delete old session
-    fetch('/api/sessions/'+oldId,{method:'DELETE',headers:{'Authorization':'Bearer '+TOKEN}});
-    // Switch to new session
+    if(d.error){addErrorMsg('Model switch failed: '+d.error);return}
     addSystemMsg('Switched to '+providerModel+' ✓');
     loadSessions();
-  }).catch(e=>addErrorMsg('Reload failed: '+e.message));
+  }).catch(e=>addErrorMsg('Model switch failed: '+e.message));
 }
 
 function applyEffort(effort){
@@ -2674,7 +2682,10 @@ function syncSettingsDropdowns(){
   if(currentModel){
     const m=currentModel.toLowerCase();
     let short='';
-    if(m.includes('opus'))short='opus';
+    if(m.includes('[1m]')){
+      if(m.includes('opus'))short='opus[1m]';
+      else if(m.includes('sonnet'))short='sonnet[1m]';
+    }else if(m.includes('opus'))short='opus';
     else if(m.includes('sonnet'))short='sonnet';
     else if(m.includes('haiku'))short='haiku';
     else if(m.includes('/'))short=m; // provider/model format
@@ -3043,9 +3054,12 @@ function updateCostBadge(s){
 function getContextWindow(model){
   if(!model)return 200000;
   const m=model.toLowerCase();
-  if(m.includes('opus'))return 1000000;
+  if(m.includes('[1m]'))return 1000000;
+  if(m.includes('opus'))return 200000;
   if(m.includes('sonnet'))return 200000;
   if(m.includes('haiku'))return 200000;
+  if(m.includes('glm'))return 200000;
+  if(m.includes('minimax'))return 200000;
   return 200000;
 }
 
@@ -3140,12 +3154,15 @@ async function showSniffUsage(){
   el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted2)">Loading...</div>';
 
   try{
-    const [usageR,statsR]=await Promise.all([
+    const [usageR,statsR,glmR]=await Promise.all([
       fetch('/api/proxy/usage',{headers:{'Authorization':'Bearer '+TOKEN}}),
-      fetch('/api/proxy/stats?group=hour&days=1',{headers:{'Authorization':'Bearer '+TOKEN}})
+      fetch('/api/proxy/stats?group=hour&days=1',{headers:{'Authorization':'Bearer '+TOKEN}}),
+      fetch('/api/glm/quota',{headers:{'Authorization':'Bearer '+TOKEN}}).catch(()=>null)
     ]);
     const usage=await usageR.json();
     const statsData=await statsR.json();
+    let glmData=null;
+    if(glmR&&glmR.ok){try{glmData=await glmR.json()}catch(e){}}
     let html='';
 
     // Rate limit card
@@ -3191,6 +3208,59 @@ async function showSniffUsage(){
       if(rl.status&&rl.status!=='allowed')html+=`<div class="sniff-stat"><span class="label">Status</span><span class="value" style="color:var(--warn)">${rl.status}</span></div>`;
       if(rl.is_overage)html+=`<div class="sniff-stat"><span class="label">Overage</span><span class="value" style="color:var(--bad)">Active</span></div>`;
       html+=`</div>`;
+    }
+
+    // GLM Quota card (only if zai provider configured)
+    if(glmData&&glmData.success&&glmData.data){
+      const d=glmData.data;
+      const limits=d.limits||[];
+      if(limits.length>0){
+        html+=`<div class="sniff-card"><h3>GLM Quota <span style="font-size:11px;color:var(--muted);text-transform:none;font-weight:normal">(${d.level||'unknown'})</span></h3>`;
+        limits.forEach(l=>{
+          if(l.type==='TOKENS_LIMIT'){
+            const unitMap={1:'daily',2:'weekly',3:'3-month',4:'monthly',5:'monthly',6:'6-month'};
+            const unitLabel=unitMap[l.unit]||l.unit+'-period';
+            const pct=l.percentage||0;
+            const color=pct>80?'var(--bad)':pct>50?'var(--warn)':'var(--good)';
+            html+=`<div class="sniff-stat"><span class="label">Tokens (${unitLabel})</span><span class="value" style="color:${color}">${pct}%</span></div>`;
+            html+=`<div class="sniff-bar"><div class="sniff-bar-fill" style="width:${pct}%;background:${color}"></div></div>`;
+            if(l.nextResetTime){
+              const diff=l.nextResetTime-Date.now();
+              if(diff>0){
+                const days=Math.floor(diff/86400000);
+                const hrs=Math.floor((diff%86400000)/3600000);
+                html+=`<div class="sniff-stat"><span class="label">Resets in</span><span class="value">${days>0?days+'d '+hrs+'h':hrs+'h'}</span></div>`;
+              }
+            }
+          }
+          if(l.type==='TIME_LIMIT'){
+            const unitMap={1:'daily',2:'weekly',3:'quarterly',4:'yearly',5:'monthly'};
+            const unitLabel=unitMap[l.unit]||l.unit+'-period';
+            const pct=l.percentage||0;
+            const color=pct>80?'var(--bad)':pct>50?'var(--warn)':'var(--good)';
+            const used=l.currentValue||0;
+            const total=l.usage||0;
+            const remaining=l.remaining||0;
+            html+=`<div class="sniff-stat"><span class="label">Time (${unitLabel})</span><span class="value" style="color:${color}">${pct}%</span></div>`;
+            html+=`<div class="sniff-bar"><div class="sniff-bar-fill" style="width:${pct}%;background:${color}"></div></div>`;
+            html+=`<div class="sniff-stat"><span class="label">Used / Total</span><span class="value">${fmtDur(used*1000)} / ${fmtDur(total*1000)}</span></div>`;
+            if(l.usageDetails&&l.usageDetails.length>0){
+              l.usageDetails.filter(u=>u.usage>0).forEach(u=>{
+                html+=`<div class="sniff-stat"><span class="label" style="padding-left:12px">↳ ${u.modelCode}</span><span class="value">${fmtDur(u.usage*1000)}</span></div>`;
+              });
+            }
+            if(l.nextResetTime){
+              const diff=l.nextResetTime-Date.now();
+              if(diff>0){
+                const days=Math.floor(diff/86400000);
+                const hrs=Math.floor((diff%86400000)/3600000);
+                html+=`<div class="sniff-stat"><span class="label">Resets in</span><span class="value">${days>0?days+'d '+hrs+'h':hrs+'h'}</span></div>`;
+              }
+            }
+          }
+        });
+        html+=`</div>`;
+      }
     }
 
     // Today's model usage card
@@ -3299,7 +3369,8 @@ function sniffExportCSV(){
   p.delete('limit');p.delete('offset');p.delete('sort');p.delete('dir');
   window.open('/api/proxy/logs/export?'+p+'&token='+TOKEN);
 }
-function modelClass(m){if(!m)return '';const l=m.toLowerCase();if(l.includes('opus'))return 'model-opus';if(l.includes('haiku'))return 'model-haiku';return 'model-sonnet'}
+function modelClass(m){if(!m)return '';const l=m.toLowerCase();if(l.includes('opus'))return 'model-opus';if(l.includes('haiku'))return 'model-haiku';if(l.includes('glm'))return 'model-sonnet';if(l.includes('minimax'))return 'model-sonnet';return 'model-sonnet'}
+function shortModelName(m){if(!m)return 'default';const l=m.toLowerCase();if(l.includes('[1m]')){if(l.includes('opus'))return 'opus(1M)';if(l.includes('sonnet'))return 'sonnet(1M)'}if(l.includes('opus'))return 'opus';if(l.includes('sonnet'))return 'sonnet';if(l.includes('haiku'))return 'haiku';if(l.includes('/'))return m.split('/').pop();return m.replace(/^claude-/,'')}
 function statusClass(s){if(s>=500)return 'status-5xx';if(s>=400)return 'status-4xx';return 'status-2xx'}
 function durClass(ms){if(ms<2000)return 'dur-fast';if(ms<10000)return 'dur-med';return 'dur-slow'}
 function fmtCost(c){if(!c||c===0)return '$0';if(c<0.001)return '$'+c.toFixed(6);if(c<0.1)return '$'+c.toFixed(4);return '$'+c.toFixed(2)}

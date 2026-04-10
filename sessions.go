@@ -213,7 +213,7 @@ func printSessionTable(filtered []sessionInfo, query string) {
 }
 
 func scanAllSessions() []sessionInfo {
-	claudeProjects := filepath.Join(home, ".claude", "projects")
+	claudeProjects := filepath.Join(claudeConfigDir, "projects")
 	var sessions []sessionInfo
 
 	// load weiran DB summaries for enrichment
@@ -415,7 +415,7 @@ func loadSummaryMap() map[string]string {
 
 func loadSessionNames() map[string]string {
 	m := make(map[string]string)
-	sessDir := filepath.Join(home, ".claude", "sessions")
+	sessDir := filepath.Join(claudeConfigDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
 	if err != nil {
 		return m
@@ -484,7 +484,7 @@ func recentSessions(limit int) []sessionFile {
 	var all []sessionFile
 
 	// Claude Code sessions
-	ccDir := filepath.Join(home, ".claude", "projects")
+	ccDir := filepath.Join(claudeConfigDir, "projects")
 	if entries, err := os.ReadDir(ccDir); err == nil {
 		for _, e := range entries {
 			if !e.IsDir() {

@@ -29,6 +29,7 @@ func TestParseArgs_Print(t *testing.T) {
 }
 
 func TestParseArgs_PrintWithExtra(t *testing.T) {
+	overrideModel = "" // reset global
 	mode, prompt, extra := parseArgs([]string{"-p", "task", "--model", "haiku"})
 	if mode != "print" {
 		t.Errorf("mode = %q, want print", mode)
@@ -36,9 +37,32 @@ func TestParseArgs_PrintWithExtra(t *testing.T) {
 	if prompt != "task" {
 		t.Errorf("prompt = %q, want 'task'", prompt)
 	}
-	if len(extra) != 2 || extra[0] != "--model" || extra[1] != "haiku" {
-		t.Errorf("extra = %v, want [--model haiku]", extra)
+	// --model is consumed by parseArgs (sets overrideModel), not passed as extra
+	if len(extra) != 0 {
+		t.Errorf("extra = %v, want []", extra)
 	}
+	if overrideModel != "haiku" {
+		t.Errorf("overrideModel = %q, want 'haiku'", overrideModel)
+	}
+	overrideModel = "" // cleanup
+}
+
+func TestParseArgs_Category(t *testing.T) {
+	overrideCategory = "" // reset global
+	mode, prompt, extra := parseArgs([]string{"--category", "cron", "-p", "do stuff"})
+	if mode != "print" {
+		t.Errorf("mode = %q, want print", mode)
+	}
+	if prompt != "do stuff" {
+		t.Errorf("prompt = %q, want 'do stuff'", prompt)
+	}
+	if overrideCategory != "cron" {
+		t.Errorf("overrideCategory = %q, want 'cron'", overrideCategory)
+	}
+	if len(extra) != 0 {
+		t.Errorf("extra = %v, want []", extra)
+	}
+	overrideCategory = "" // cleanup
 }
 
 func TestParseArgs_Cron(t *testing.T) {

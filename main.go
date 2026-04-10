@@ -38,6 +38,10 @@ var (
 	lockfile  string // /tmp/<appName>.lock
 	dbPath    string // <appDir>/sessions.db
 
+	// Claude Code config directory (sessions, projects, settings).
+	// Defaults to ~/.claude; override with CLAUDE_CONFIG_DIR env var for instance isolation.
+	claudeConfigDir string
+
 	// Per-session temp directory, initialized by initSessionDir()
 	sessionDir string // /tmp/<agent>-0405-0924/
 	promptOut  string // sessionDir/prompt.md
@@ -49,6 +53,10 @@ var (
 	// Custom model override: --model provider/model (e.g. zai/glm-5.1, minimax/MiniMax-M2.7)
 	// When set, injects provider's baseUrl + apiKey as ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
 	overrideModel string
+
+	// Category override: --category cron|heartbeat|evolve
+	// Used with -p to mark one-shot sessions as non-interactive in server_sessions DB.
+	overrideCategory string
 
 	// Default model for cron/heartbeat (from config.json "defaultModel")
 	defaultModel string
@@ -122,6 +130,12 @@ func initAppName() {
 	openclawConfigPath = filepath.Join(appHome, "openclaw.json")
 	lockfile = filepath.Join(os.TempDir(), appName+".lock")
 	appBin = filepath.Join(home, "go", "bin", appName)
+
+	// Claude Code config dir isolation: CLAUDE_CONFIG_DIR env → default ~/.claude
+	claudeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
+	if claudeConfigDir == "" {
+		claudeConfigDir = filepath.Join(home, ".claude")
+	}
 }
 
 // initWorkspace reads workspace path and agent name from openclaw.json and initializes all derived paths.
@@ -715,6 +729,11 @@ func main() {
 		execClaude(args)
 
 	case "print":
+		// If --category is set and server is running, delegate to server
+		// so the session gets the correct category in server_sessions DB.
+		if overrideCategory != "" && delegatePrintToServer(printPrompt, overrideCategory) {
+			return
+		}
 		args := append(base, "-p", printPrompt)
 		args = append(args, extra...)
 		execClaude(args)
@@ -876,6 +895,44 @@ func delegateToServer(mode string) bool {
 	return false
 }
 
+// delegatePrintToServer sends a -p task to the running server with a specific category.
+// Returns true if the server handled it, false if server is not running.
+func delegatePrintToServer(prompt, category string) bool {
+	cfg := loadServerConfig()
+	addr := fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
+
+	name := fmt.Sprintf("%s-%s-%s", agentName, category, time.Now().Format("0102-1504"))
+	payload := map[string]interface{}{
+		"name":            name,
+		"category":        category,
+		"initial_message": prompt,
+		"soul_files":      replaceSoul,
+	}
+	if overrideModel != "" {
+		payload["model"] = overrideModel
+	}
+	body, _ := json.Marshal(payload)
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, _ := http.NewRequest("POST", addr+"/api/sessions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] server not reachable, falling back to direct exec\n", appName)
+		return false
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+		fmt.Fprintf(os.Stderr, "[%s] delegated -p to server (category=%s): %s\n", appName, category, string(respBody))
+		return true
+	}
+
+	fmt.Fprintf(os.Stderr, "[%s] server returned %d for -p delegation, falling back to direct exec\n", appName, resp.StatusCode)
+	return false
+}
+
 func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 	mode = "interactive"
 	for i := 0; i < len(args); i++ {
@@ -966,6 +1023,11 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			// Custom model: --model provider/model (e.g. zai/glm-5.1, minimax/MiniMax-M2.7)
 			if i+1 < len(args) {
 				overrideModel = args[i+1]
+				i++
+			}
+		case "--category":
+			if i+1 < len(args) {
+				overrideCategory = args[i+1]
 				i++
 			}
 		case "-p":
