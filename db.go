@@ -526,19 +526,33 @@ func handleDB(args []string) {
 		fmt.Printf("rejected: %s\n", args[1])
 
 	case "fts-index":
-		// weiran db fts-index — incrementally index daily notes into FTS5
+		// weiran db fts-index — incrementally index daily notes + session content into FTS5
 		handleFTSIndex()
+
+	case "fts-index-sessions":
+		// weiran db fts-index-sessions — index session JSONL content only
+		start := time.Now()
+		added, skipped, err := indexSessionContent()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] fts-index-sessions: %v\n", appName, err)
+			os.Exit(1)
+		}
+		fmt.Printf("fts-index-sessions: %d added/updated, %d skipped (%.2fs)\n", added, skipped, time.Since(start).Seconds())
 
 	case "fts-rebuild":
 		// weiran db fts-rebuild — drop and recreate FTS5 indexes from source tables
 		handleFTSRebuild()
 
 	case "search-fts":
-		// weiran db search-fts <query> [--scope=daily|session|both] [--limit=N] [--json]
+		// weiran db search-fts <query> [--scope=daily|session|content|both] [--limit=N] [--json]
 		handleFTSSearch(args[1:])
 
+	case "events":
+		// weiran db events [--since=24h] [--mode=cron] [--type=timeout] [--notify]
+		handleEventLog(args[1:])
+
 	default:
-		fmt.Printf("unknown subcommand: %s\nusage: %s db <recall|pending|summarized|save|save-batch|list|stats|search|search-fts|fts-index|fts-rebuild|gc|patterns|pattern-save|pattern-save-batch|feedback|cultivate|pattern-reject>\n", args[0], appName)
+		fmt.Printf("unknown subcommand: %s\nusage: %s db <recall|pending|summarized|save|save-batch|list|stats|search|search-fts|fts-index|fts-index-sessions|fts-rebuild|gc|patterns|pattern-save|pattern-save-batch|feedback|cultivate|pattern-reject|events>\n", args[0], appName)
 	}
 }
 

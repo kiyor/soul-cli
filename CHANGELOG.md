@@ -2,12 +2,35 @@
 
 ## Unreleased
 
+## v1.11.0
+
+### Session IPC (Inter-Process Communication)
+
+- **`{cli} session` subcommand family**: Full IPC between concurrent server sessions
+  - `session list` — list active sessions (ID, name, status, model, marks own session)
+  - `session read <id>` — read a session's full message history
+  - `session search <id> "keyword"` — FTS search within a session's history
+  - `session send <id> "message"` — inject a user message into another session's stdin (wakes idle sessions)
+  - `session close <id>` — destroy a session (self-close protection)
+- **Anti-loop enforcement**: Per-pair bidirectional interaction counter (default 10 rounds), HTTP 429 on exceed
+- **Participant tracking**: `participants` field on session records which sessions have sent IPC messages
+- **Short ID resolution**: All IPC commands accept UUID prefix (e.g. `b265` → full UUID)
+- **WebSocket broadcast**: IPC events (`ipc_message`) broadcast to connected UI clients
+- **Dynamic env var prefix**: IPC env vars (`{CLI}_SERVER_URL`, `{CLI}_AUTH_TOKEN`, `{CLI}_SESSION_ID`) derived from binary name at runtime — `weiran` → `WEIRAN_*`, `my-soul` → `MY_SOUL_*`
+
+### OpenAI / GPT Model Support
+
+- **GPT provider integration**: `--model gpt/gpt-5.4` routes through Claude Code's OAuth proxy to OpenAI models
+- **Provider auto-detection**: Recognizes `gpt/` prefix alongside existing `minimax/`, `zai/` providers
+
 ### FTS5 Full-Text Search
 
 - **SQLite FTS5 integration**: New `daily_notes` table + `daily_notes_fts` virtual table for keyword search across all daily notes (memory/*.md). External-content mode — no data duplication, triggers keep FTS in sync.
 - **Session summaries FTS**: `session_summaries_fts` virtual table over existing `sessions.summary` column, also via external content + triggers.
+- **Session content FTS**: `session_content_fts` indexes extracted user/assistant text from JSONL session files (both OpenClaw and Claude Code formats).
 - **`weiran db fts-index`**: Scan and index all daily notes (incremental: skips unchanged files via mtime+hash).
-- **`weiran db search-fts <query>`**: BM25-ranked keyword search with `[highlighted]` snippets across daily notes and/or session summaries. Scope: `daily`, `session`, or `both`.
+- **`weiran db fts-index-sessions`**: Index session JSONL content only.
+- **`weiran db search-fts <query>`**: BM25-ranked keyword search with `[highlighted]` snippets. Scope: `daily`, `session`, `content`, or `both`.
 - **`weiran db fts-rebuild`**: Rebuild FTS5 indexes from scratch (escape hatch for corruption).
 - **`GET /api/search`**: HTTP endpoint for FTS5 search (auth required). Query params: `q`, `scope`, `limit`.
 - **Cron hook**: `indexDailyNotes()` runs after every cron memory consolidation, keeping the index fresh.
@@ -23,14 +46,20 @@
 - **Telegram notification**: Optional notification on reset via existing `sendTelegram()`.
 - **Backward compat**: Existing `endStaleSoulSessions()` in soul_session.go untouched — heartbeat/cron callers still work.
 
+### Framework Template System
+
+- **`{CLI}` template variable**: Uppercase app name for env var references in FRAMEWORK.md (e.g. `{CLI}_SERVER_URL` → `WEIRAN_SERVER_URL`)
+- **Existing `{cli}`**: Lowercase binary name (e.g. `{cli} session list` → `weiran session list`)
+
 ### Fixes
 
-- **Provider mode leaks `CLAUDE_CODE_OAUTH_TOKEN` into third-party endpoints** (`server_proxy.go::injectProxyEnvWithModel`): When `--model provider/model` was active, the function still injected `CLAUDE_CODE_OAUTH_TOKEN` at the end, so Claude Code's interactive login check would prefer that token over the provider's API key and ship it to non-Anthropic endpoints (MiniMax, etc.), producing 401 / "login required" errors. `weiran --model minimax/MiniMax-M2.7-highspeed` failed in interactive mode while `-p` one-shot mode worked because `-p` bypasses the login check. Z.AI appeared to work only because its `authEnv` defaults to `ANTHROPIC_AUTH_TOKEN` (same slot OAuth tokens occupy) and the Z.AI key happened to overwrite it. Fix: strip `CLAUDE_CODE_OAUTH_TOKEN` entirely whenever a provider override is applied.
+- **Provider mode leaks `CLAUDE_CODE_OAUTH_TOKEN` into third-party endpoints** (`server_proxy.go::injectProxyEnvWithModel`): When `--model provider/model` was active, the function still injected `CLAUDE_CODE_OAUTH_TOKEN` at the end, so Claude Code's interactive login check would prefer that token over the provider's API key and ship it to non-Anthropic endpoints (MiniMax, etc.), producing 401 / "login required" errors. Fix: strip `CLAUDE_CODE_OAUTH_TOKEN` entirely whenever a provider override is applied.
+- **Stop injecting `CLAUDE_CONFIG_DIR` default** in interactive mode — let Claude Code use its own default.
 
 ### Model Discovery & Validation
 
 - **`weiran models` subcommand**: Lists every available model grouped by provider — native Anthropic aliases (opus/sonnet/haiku) plus custom `provider/model` combos from `config.json`. Shows endpoint, auth env, and the default model used by cron/heartbeat/evolve.
-- **Model-name validation warning**: `--model provider/model` now warns loudly to stderr when the model name is not in the provider's `models` whitelist, listing the valid names. Catches typos before the first token is generated — critical for providers like MiniMax that silently fall back to a default model when given an unknown name (e.g. `minimax2.7-highspeed` → `MiniMax-M2.7` instead of the `-highspeed` variant).
+- **Model-name validation warning**: `--model provider/model` now warns loudly to stderr when the model name is not in the provider's `models` whitelist.
 - **`loadAllProviders` helper**: Shared reader for the providers section of `config.json`, reused by `resolveProvider` and `handleModels`.
 
 ## v1.10.0

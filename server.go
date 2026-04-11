@@ -28,16 +28,17 @@ var indexHTML []byte
 // ── Server Config ──
 
 type serverConfig struct {
-	Token           string              `json:"token"`
-	Host            string              `json:"host"`
-	Port            int                 `json:"port"`
-	MaxSessions     int                 `json:"maxSessions"`
-	IdleTimeoutMin  int                 `json:"idleTimeoutMin"`
-	MaxLifetimeHrs  int                 `json:"maxLifetimeHours"`
-	RateLimitPerMin int                 `json:"rateLimitPerMin"`
-	Telegram        telegramBotConfig   `json:"telegram"`
-	Proxy           proxyConfig         `json:"proxy"`
-	SessionReset    sessionResetConfig  `json:"sessionReset"`
+	Token                string              `json:"token"`
+	Host                 string              `json:"host"`
+	Port                 int                 `json:"port"`
+	MaxSessions          int                 `json:"maxSessions"`
+	IdleTimeoutMin       int                 `json:"idleTimeoutMin"`
+	MaxLifetimeHrs       int                 `json:"maxLifetimeHours"`
+	RateLimitPerMin      int                 `json:"rateLimitPerMin"`
+	MaxInteractionRounds int                 `json:"maxInteractionRounds"`
+	Telegram             telegramBotConfig   `json:"telegram"`
+	Proxy                proxyConfig         `json:"proxy"`
+	SessionReset         sessionResetConfig  `json:"sessionReset"`
 }
 
 // sessionResetConfig mirrors SessionResetPolicy for JSON config loading.
@@ -58,13 +59,14 @@ type telegramBotConfig struct {
 
 func defaultServerConfig() serverConfig {
 	return serverConfig{
-		Host:            "0.0.0.0",
-		Port:            9847,
-		MaxSessions:     5,
-		IdleTimeoutMin:  30,
-		MaxLifetimeHrs:  4,
-		RateLimitPerMin: 60,
-		Proxy:           defaultProxyConfig(),
+		Host:                 "0.0.0.0",
+		Port:                 9847,
+		MaxSessions:          5,
+		IdleTimeoutMin:       30,
+		MaxLifetimeHrs:       4,
+		RateLimitPerMin:      60,
+		MaxInteractionRounds: defaultMaxInteractionRounds,
+		Proxy:                defaultProxyConfig(),
 	}
 }
 
@@ -104,6 +106,9 @@ func loadServerConfig() serverConfig {
 			}
 			if wrapper.Server.RateLimitPerMin > 0 {
 				cfg.RateLimitPerMin = wrapper.Server.RateLimitPerMin
+			}
+			if wrapper.Server.MaxInteractionRounds > 0 {
+				cfg.MaxInteractionRounds = wrapper.Server.MaxInteractionRounds
 			}
 			cfg.Telegram = wrapper.Server.Telegram
 			// Session reset policy (always copy; defaults are filled in by loadResetPolicyFromConfig)
@@ -199,6 +204,10 @@ func handleServer(args []string) {
 		cfg.Token = envToken
 	}
 
+	// Stash server config globals for IPC env injection
+	serverPort = cfg.Port
+	serverAuthToken = cfg.Token
+
 	// Refuse to start without auth token
 	if cfg.Token == "" {
 		fmt.Fprintf(os.Stderr, "[%s] server: refusing to start without auth token\n", appName)
@@ -253,7 +262,7 @@ func handleServer(args []string) {
 	}))
 
 	// FTS5 full-text search over daily notes + session summaries
-	// GET /api/search?q=<query>&scope=<daily|session|both>&limit=<N>
+	// GET /api/search?q=<query>&scope=<daily|session|content|both>&limit=<N>
 	mux.HandleFunc("GET /api/search", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("q")
 		if q == "" {
@@ -306,37 +315,46 @@ func handleServer(args []string) {
 			Name   string   `json:"name"`
 			Models []string `json:"models,omitempty"`
 		}
-		// Read providers from config.json
-		configPaths := []string{
-			filepath.Join(appHome, "data", "config.json"),
-			filepath.Join(workspace, "scripts", appName, "config.json"),
-		}
-		var providers []providerInfo
-		for _, p := range configPaths {
-			data, err := os.ReadFile(p)
-			if err != nil {
+		providers, _ := loadAllProviders()
+		var infos []providerInfo
+		for name, prov := range providers {
+			if prov.BaseURL == "" && prov.Type != "openai" {
 				continue
 			}
-			var raw struct {
-				Providers map[string]struct {
-					BaseURL string   `json:"baseUrl"`
-					Models  []string `json:"models,omitempty"`
-				} `json:"providers"`
-			}
-			if json.Unmarshal(data, &raw) == nil && len(raw.Providers) > 0 {
-				for name, prov := range raw.Providers {
-					if prov.BaseURL == "" {
-						continue
-					}
-					providers = append(providers, providerInfo{Name: name, Models: prov.Models})
-				}
-				break
-			}
+			infos = append(infos, providerInfo{Name: name, Models: prov.Models})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"providers":    providers,
+			"providers":    infos,
 			"defaultModel": defaultModel,
 		})
+	}))
+
+	// OpenAI/Codex proxy management: start proxy in server process and return port.
+	// CLI uses this to avoid starting its own embedded proxy (which dies on syscall.Exec).
+	// GET /api/proxy/openai?provider=codex
+	mux.HandleFunc("GET /api/proxy/openai", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		providerName := r.URL.Query().Get("provider")
+		if providerName == "" {
+			http.Error(w, "provider query param required", http.StatusBadRequest)
+			return
+		}
+		provider := resolveProvider(providerName)
+		if provider == nil || provider.Type != "openai" {
+			http.Error(w, "provider not found or not openai type", http.StatusNotFound)
+			return
+		}
+		// Singleton per provider: reuse if already started
+		if cached, ok := serverOpenAIProxies.Load(providerName); ok {
+			writeJSON(w, http.StatusOK, map[string]int{"port": cached.(int)})
+			return
+		}
+		port, err := startOpenAIProxy(*provider)
+		if err != nil {
+			http.Error(w, "start proxy: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		serverOpenAIProxies.Store(providerName, port)
+		writeJSON(w, http.StatusOK, map[string]int{"port": port})
 	}))
 
 	// List available skills
@@ -355,7 +373,7 @@ func handleServer(args []string) {
 				if _, err := os.Stat(skillMd); err != nil {
 					continue
 				}
-				name, desc := parseSkillFrontmatter(skillMd)
+				name, desc, _ := parseSkillFrontmatter(skillMd)
 				if name == "" {
 					name = e.Name()
 				}
@@ -608,6 +626,14 @@ func handleServer(args []string) {
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 	}))
+
+	// IPC: send message from one session to another
+	mux.HandleFunc("POST /api/sessions/{id}/message-from", authMiddleware(cfg.Token,
+		handleIPCMessageFrom(sm, hub, cfg.MaxInteractionRounds)))
+
+	// IPC: query interaction count between two sessions
+	mux.HandleFunc("GET /api/sessions/{id}/interaction-count", authMiddleware(cfg.Token,
+		handleIPCInteractionCount()))
 
 	// Upload file to session (multipart)
 	mux.HandleFunc("POST /api/sessions/{id}/upload", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {

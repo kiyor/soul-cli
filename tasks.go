@@ -22,10 +22,16 @@ Read recent daily notes:
 {{.Notes}}
 Recent session list:
 {{.Sessions}}
+{{if .EventDigest}}
+### Event Log (last 48h)
+{{.EventDigest}}
+If there are unclassified crashes (event_type=crash with recognizable error patterns),
+add new classification rules to ` + "`classifyExitEvent()`" + ` in ` + "`claude.go`" + ` during Phase 4.
+{{end}}
 Ask yourself:
 - Did the user correct my behavior? → New feedback candidate (Phase 2)
 - Are there recurring action patterns? → Consider automating or creating a skill
-- Are there failure patterns? → Fix root cause
+- Are there failure patterns in the event log? → Fix root cause or add classification
 - Did the user express new preferences or needs? → Update USER.md or SOUL.md
 
 ## Phase 1: Invariant Check (always run)
@@ -180,6 +186,9 @@ func evolveTask() string {
 		wrapStep = "6"
 	}
 
+	// Generate event log digest for evolve awareness
+	eventDigest := buildEventDigest(48 * time.Hour)
+
 	data := map[string]interface{}{
 		"Today":       today,
 		"Notes":       notesList.String(),
@@ -192,6 +201,7 @@ func evolveTask() string {
 		"CodeBlock":   codeBlock,
 		"SoulStepNum": soulStep,
 		"WrapStepNum": wrapStep,
+		"EventDigest": eventDigest,
 	}
 
 	var buf bytes.Buffer

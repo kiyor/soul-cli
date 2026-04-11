@@ -53,6 +53,17 @@ Key subsystems:
 
 **Session DB** (SQLite via `modernc.org/sqlite`): Tracks which JSONL session files have been summarized. Uses SHA-256 hash (head+tail for large files) to detect changes. DB path: `<appHome>/data/sessions.db`.
 
+**FTS5 Full-Text Search**: Three external-content FTS5 virtual tables over the session DB:
+1. `daily_notes_fts` — indexes `workspace/memory/*.md` daily diary files
+2. `session_summaries_fts` — indexes session summaries (heart-beat patrol notes)
+3. `session_content_fts` — indexes extracted user/assistant text from session JSONL files (both OpenClaw and Claude Code sessions). Handles both JSONL formats: OpenClaw (`type:"message"`) and Claude Code (`type:"user"/"assistant"`).
+
+Key subcommands:
+- `weiran db fts-index` — incrementally index daily notes + session content
+- `weiran db fts-index-sessions` — index session JSONL content only
+- `weiran db fts-rebuild` — rebuild all FTS5 indexes from source tables
+- `weiran db search-fts <query> [--scope=daily|session|content|both] [--limit=N] [--json]` — unified BM25-ranked search
+
 **Post-Hooks** (`runHooks`): After cron/heartbeat/evolve runs, executes: (1) import summaries.json into DB, (2) send report.txt via Telegram, (3) safety check (soul files, memory bloat, sensitive info in git diff, config drift), (4) user scripts in `hooks/{cron,heartbeat,evolve}.d/*.sh`.
 
 **Skill/Project Index**: Scans `~/.openclaw/skills/` and `~/.openclaw/workspace/skills/` for `SKILL.md` files with YAML frontmatter. Scans multiple project roots for `CLAUDE.md` files. Both produce markdown tables injected into the prompt.

@@ -29,14 +29,16 @@ type skillEntry struct {
 	Name        string
 	Description string
 	Dir         string // source directory
+	Modes       string // "all", "interactive", "interactive,evolve", "" (= all)
 }
 
-// parseSkillFrontmatter extracts name and description from SKILL.md
+// parseSkillFrontmatter extracts name, description, and modes from SKILL.md
 // supports YAML frontmatter and fallback (extract from # heading + first paragraph)
-func parseSkillFrontmatter(path string) (name, desc string) {
+// modes: "all", "interactive", "interactive,evolve", "" (= all)
+func parseSkillFrontmatter(path string) (name, desc, modes string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	defer f.Close()
 
@@ -65,6 +67,12 @@ func parseSkillFrontmatter(path string) (name, desc string) {
 		if inFrontmatter {
 			if strings.HasPrefix(line, "name:") {
 				name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+				inDesc = false
+				continue
+			}
+			if strings.HasPrefix(line, "modes:") {
+				modes = strings.TrimSpace(strings.TrimPrefix(line, "modes:"))
+				modes = strings.Trim(modes, "\"'")
 				inDesc = false
 				continue
 			}
@@ -147,10 +155,25 @@ func buildSkillIndex() string {
 				continue
 			}
 
-			name, desc := parseSkillFrontmatter(skillMd)
+			name, desc, modes := parseSkillFrontmatter(skillMd)
 			if name == "" {
 				name = skillName
 			}
+
+			// Mode filtering: skip skills not intended for current mode
+			if modes != "" && modes != "all" && currentMode != "" {
+				allowed := false
+				for _, m := range strings.Split(modes, ",") {
+					if strings.TrimSpace(m) == currentMode {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					continue
+				}
+			}
+
 			// truncate description: strip trigger conditions, keep only feature description
 			// "触发" is the Chinese equivalent of "Trigger" — supports bilingual SKILL.md files
 			for _, cut := range []string{"Trigger", "trigger", "触发"} {
@@ -165,7 +188,7 @@ func buildSkillIndex() string {
 			}
 
 			seen[skillName] = true
-			skills = append(skills, skillEntry{Name: name, Description: desc, Dir: dir})
+			skills = append(skills, skillEntry{Name: name, Description: desc, Dir: dir, Modes: modes})
 		}
 	}
 

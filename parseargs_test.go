@@ -41,8 +41,9 @@ func TestParseArgs_PrintWithExtra(t *testing.T) {
 	if len(extra) != 0 {
 		t.Errorf("extra = %v, want []", extra)
 	}
-	if overrideModel != "haiku" {
-		t.Errorf("overrideModel = %q, want 'haiku'", overrideModel)
+	// resolveFuzzyModel expands "haiku" to its full native model ID
+	if overrideModel != "claude-haiku-4-5-20251001" {
+		t.Errorf("overrideModel = %q, want 'claude-haiku-4-5-20251001'", overrideModel)
 	}
 	overrideModel = "" // cleanup
 }

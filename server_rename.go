@@ -52,6 +52,19 @@ func openServerDB() (*sql.DB, error) {
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN replace_soul INTEGER NOT NULL DEFAULT 0`)
 		// Migration: add total_cost_usd — persisted from proxy log aggregation
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN total_cost_usd REAL NOT NULL DEFAULT 0`)
+
+		// Migration: add participants for IPC tracking (JSON array of session IDs that sent messages)
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'`)
+
+		// Migration: session_interactions table for IPC anti-loop tracking
+		serverDB.Exec(`CREATE TABLE IF NOT EXISTS session_interactions (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			from_id     TEXT NOT NULL,
+			to_id       TEXT NOT NULL,
+			snippet     TEXT NOT NULL DEFAULT '',
+			created_at  TEXT NOT NULL
+		)`)
+		serverDB.Exec(`CREATE INDEX IF NOT EXISTS idx_si_pair ON session_interactions(from_id, to_id)`)
 	})
 	if err != nil {
 		return nil, err

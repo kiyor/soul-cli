@@ -113,6 +113,9 @@ type sessionOpts struct {
 	// --resume <id> so the new process inherits conversation history.
 	// Used by setReplaceSoul to preserve context across mode toggle.
 	ResumeID string
+	// ServerSessionID — the server session ID, injected as
+	// {APPNAME}_SESSION_ID env var for IPC CLI commands.
+	ServerSessionID string
 }
 
 // claudeProcess wraps a running Claude Code subprocess with stream-json pipes.
@@ -178,9 +181,29 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 
 	// Filter environment: remove CLAUDECODE to prevent nested detection
 	env := filterEnv(os.Environ(), "CLAUDECODE")
-	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-cli")
 	// Use model-aware env injection: provider models route directly, Anthropic models use proxy
 	env = injectProxyEnvWithModel(env, "", opts.Model)
+
+	// IPC env vars: inject session ID, server URL, and auth token so child
+	// processes can use `{cli} session send/read/search` CLI commands.
+	// Env var prefix is derived from appName (e.g. "weiran" → "WEIRAN_").
+	prefix := ipcEnvPrefix()
+	if opts.ServerSessionID != "" {
+		env = append(env, prefix+"_SESSION_ID="+opts.ServerSessionID)
+	}
+	if serverURL := os.Getenv(prefix + "_SERVER_URL"); serverURL != "" {
+		env = append(env, prefix+"_SERVER_URL="+serverURL)
+	} else if isServerMode {
+		// Self-referencing: build URL from server config
+		env = append(env, fmt.Sprintf(prefix+"_SERVER_URL=http://127.0.0.1:%d", serverPort))
+	}
+	if authToken := os.Getenv(prefix + "_AUTH_TOKEN"); authToken != "" {
+		env = append(env, prefix+"_AUTH_TOKEN="+authToken)
+	} else if serverAuthToken != "" {
+		env = append(env, prefix+"_AUTH_TOKEN="+serverAuthToken)
+	}
+
 	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()

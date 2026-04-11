@@ -12,6 +12,9 @@ import (
 
 // ── Telegram Notify ──
 
+// disableTelegram is set to true in tests to prevent real Telegram API calls.
+var disableTelegram bool
+
 var cachedTelegramToken string
 
 func getTelegramToken() string {
@@ -60,6 +63,9 @@ func sendTelegram(text string) {
 // trySendTelegram sends a text message, returns error instead of os.Exit (hook-safe)
 // tries Markdown first, falls back to plain text on failure
 func trySendTelegram(text string) error {
+	if disableTelegram {
+		return nil
+	}
 	token := getTelegramToken()
 	if token == "" {
 		return fmt.Errorf("Telegram bot token not found")
@@ -110,6 +116,9 @@ func trySendTelegram(text string) error {
 // trySendTelegramPhoto sends a photo, returns error instead of os.Exit
 // tries Markdown first, falls back to plain text on failure
 func trySendTelegramPhoto(photoURL, caption string) error {
+	if disableTelegram {
+		return nil
+	}
 	token := getTelegramToken()
 	if token == "" {
 		return fmt.Errorf("Telegram bot token not found")

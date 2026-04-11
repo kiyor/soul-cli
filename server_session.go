@@ -120,6 +120,7 @@ func (s *serverSession) snapshot() map[string]any {
 		"subscribers":       s.broadcaster.count(),
 		"last_event":        s.broadcaster.lastEventAt(),
 		"idle_seconds":      s.broadcaster.idleSeconds(),
+		"participants":      getParticipants(s.ID),
 	}
 }
 
@@ -232,26 +233,29 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		GalID:       opts.GalID,
 	}
 
-	// Load GAL save for resume if provided
-	if opts.GalID != "" {
-		galPath := filepath.Join(workspace, "memory", "gal", opts.GalID+".json")
-		if data, err := os.ReadFile(galPath); err == nil {
-			galContext = string(data)
-		}
-	}
-
 	// Build soul prompt if enabled
 	var promptFile string
 	if opts.Soul {
 		initSessionDir()
-		// Only inject HEARTBEAT.md for heartbeat/cron sessions
-		includeHeartbeat = opts.Category == CategoryHeartbeat || opts.Category == CategoryCron
-		// Allow per-session environment override (e.g. Telegram mode)
-		if opts.EnvOverride != "" {
-			sessionEnvOverride = opts.EnvOverride
+
+		// Build prompt with per-session overrides (concurrency-safe)
+		ovr := promptOverrides{
+			EnvOverride: opts.EnvOverride,
 		}
-		result := buildPrompt()
-		sessionEnvOverride = "" // reset after use
+		if opts.Category == CategoryHeartbeat {
+			ovr.Mode = "heartbeat"
+		} else if opts.Category == CategoryCron {
+			ovr.Mode = "cron"
+		}
+		// Load GAL save for resume if provided
+		if opts.GalID != "" {
+			galPath := filepath.Join(workspace, "memory", "gal", opts.GalID+".json")
+			if data, err := os.ReadFile(galPath); err == nil {
+				ovr.GalContext = string(data)
+			}
+		}
+
+		result := buildPromptWithOverrides(ovr)
 		writePrompt(result)
 		promptFile = promptOut
 		sess.promptFile = promptFile
@@ -265,6 +269,7 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		MCPConfig:        opts.MCP,
 		ReplaceSoul:      opts.ReplaceSoul,
 		ResumeID:         opts.ResumeID,
+		ServerSessionID:  id,
 	}
 	proc, err := spawnClaude(spawnOpts)
 	if err != nil {
@@ -433,6 +438,7 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 		Model:            sess.Model,
 		MCPConfig:        sess.mcpConfig,
 		Chrome:           enabled,
+		ServerSessionID:  sess.ID,
 	}
 	sess.mu.Unlock()
 
@@ -559,6 +565,7 @@ func (sm *sessionManager) setReplaceSoul(id string, enabled bool) error {
 		Chrome:           sess.ChromeEnabled,
 		ReplaceSoul:      enabled,
 		ResumeID:         resumeID,
+		ServerSessionID:  sess.ID,
 	}
 	sess.mu.Unlock()
 
@@ -675,6 +682,7 @@ func (sm *sessionManager) setModel(id string, model string) error {
 		Chrome:           sess.ChromeEnabled,
 		ReplaceSoul:      sess.ReplaceSoul,
 		ResumeID:         resumeID,
+		ServerSessionID:  sess.ID,
 	}
 	sess.mu.Unlock()
 
@@ -951,9 +959,9 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 		hub:         sm.hub,
 	}
 
-	// Build soul prompt
+	// Build soul prompt (concurrency-safe via overrides)
 	initSessionDir()
-	result := buildPrompt()
+	result := buildPromptWithOverrides(promptOverrides{})
 	writePrompt(result)
 	sess.promptFile = promptOut
 
@@ -978,7 +986,7 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 	cmd := exec.Command(claudeBin, args...)
 	cmd.Dir = workspace
 	env := filterEnv(os.Environ(), "CLAUDECODE")
-	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-cli")
 	// Use model-aware env injection for provider models
 	env = injectProxyEnvWithModel(env, id, model)
 	cmd.Env = env

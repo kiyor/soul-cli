@@ -32,8 +32,9 @@ Real description here.
 	os.WriteFile(f, []byte(content), 0644)
 
 	desc := extractProjectDesc(f)
-	if desc != "What This Is" {
-		t.Errorf("desc = %q, want 'What This Is'", desc)
+	// "What This Is" is a generic heading that gets skipped; first substantive line is returned
+	if desc != "Real description here." {
+		t.Errorf("desc = %q, want 'Real description here.'", desc)
 	}
 }
 

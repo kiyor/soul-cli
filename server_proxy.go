@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -99,18 +98,19 @@ func (ps *proxyState) addTokens(model string, input, output, cacheRead, cacheCre
 		acc = &TokenAccumulator{}
 		ps.Today.Models[model] = acc
 	}
-	atomic.AddInt64(&acc.InputTokens, input)
-	atomic.AddInt64(&acc.OutputTokens, output)
-	atomic.AddInt64(&acc.CacheReadTokens, cacheRead)
-	atomic.AddInt64(&acc.CacheCreationTokens, cacheCreate)
-	atomic.AddInt64(&acc.RequestCount, 1)
+	// Plain adds under write lock — no need for atomic since mu.Lock is held
+	acc.InputTokens += input
+	acc.OutputTokens += output
+	acc.CacheReadTokens += cacheRead
+	acc.CacheCreationTokens += cacheCreate
+	acc.RequestCount++
 
 	// Total
-	atomic.AddInt64(&ps.Total.InputTokens, input)
-	atomic.AddInt64(&ps.Total.OutputTokens, output)
-	atomic.AddInt64(&ps.Total.CacheReadTokens, cacheRead)
-	atomic.AddInt64(&ps.Total.CacheCreationTokens, cacheCreate)
-	atomic.AddInt64(&ps.Total.RequestCount, 1)
+	ps.Total.InputTokens += input
+	ps.Total.OutputTokens += output
+	ps.Total.CacheReadTokens += cacheRead
+	ps.Total.CacheCreationTokens += cacheCreate
+	ps.Total.RequestCount++
 }
 
 func (ps *proxyState) snapshot() map[string]any {
@@ -349,6 +349,7 @@ func extractUsageFromSSE(body []byte) (model string, input, output, cacheRead, c
 
 // modelPricing maps model names to [input, output] prices per 1M tokens (USD).
 // Synced from claude-pool main.go — keep in sync when Anthropic updates pricing.
+// MiniMax: CNY ÷ 7. GLM (Z.AI): already USD. Source dates: 2026-04-10.
 var modelPricing = map[string][2]float64{
 	// Claude 4.5/4.6 (short names used by Claude Code)
 	"claude-opus-4-5":            {5.0, 25.0},
@@ -372,6 +373,28 @@ var modelPricing = map[string][2]float64{
 	"claude-3-5-haiku-20241022":  {0.8, 4.0},
 	"claude-3-opus-20240229":     {15.0, 75.0},
 	"claude-3-haiku-20240307":    {0.25, 1.25},
+
+	// MiniMax (platform.minimaxi.com/docs/guides/pricing-paygo, CNY ÷ 7)
+	"MiniMax-M2.7":             {0.30, 1.20}, // ¥2.1/¥8.4
+	"MiniMax-M2.7-highspeed":   {0.60, 2.40}, // ¥4.2/¥16.8
+	"MiniMax-M2.5":             {0.30, 1.20}, // ¥2.1/¥8.4
+	"MiniMax-M2.5-highspeed":   {0.60, 2.40}, // ¥4.2/¥16.8
+	"M2-her":                   {0.30, 1.20}, // ¥2.1/¥8.4
+
+	// GLM / Z.AI (docs.z.ai/guides/overview/pricing, USD)
+	"glm-5.1":              {1.40, 4.40},
+	"glm-5":                {1.00, 3.20},
+	"glm-5-turbo":          {1.20, 4.00},
+	"glm-4.7":              {0.60, 2.20},
+	"glm-4.7-flashx":       {0.07, 0.40},
+	"glm-4.7-flash":        {0.00, 0.00}, // free
+	"glm-4.6":              {0.60, 2.20},
+	"glm-4.5":              {0.60, 2.20},
+	"glm-4.5-x":            {2.20, 8.90},
+	"glm-4.5-air":          {0.20, 1.10},
+	"glm-4.5-airx":         {1.10, 4.50},
+	"glm-4.5-flash":        {0.00, 0.00}, // free
+	"glm-4-32b-0414-128k":  {0.10, 0.10},
 }
 
 // calcCost computes USD cost with cache-aware pricing.
@@ -381,7 +404,19 @@ var modelPricing = map[string][2]float64{
 func calcCost(model string, inputTokens, outputTokens, cacheRead, cacheCreate int64) float64 {
 	p, ok := modelPricing[model]
 	if !ok {
-		p = [2]float64{3.0, 15.0} // default sonnet
+		// Try prefix matching for versioned models (e.g. "claude-sonnet-4-20260514")
+		for k, v := range modelPricing {
+			if strings.HasPrefix(model, k) {
+				p = v
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			// Conservative fallback: use Sonnet pricing. Models with free tiers
+			// (GLM flash, etc.) should be added to modelPricing explicitly.
+			p = [2]float64{3.0, 15.0}
+		}
 	}
 	inputRate := p[0] / 1_000_000
 	outputRate := p[1] / 1_000_000
@@ -403,8 +438,12 @@ func initProxyDB() {
 		fmt.Fprintf(os.Stderr, "[%s] proxy-db: failed to open %s: %v\n", appName, dbFile, err)
 		return
 	}
-	proxyDB.Exec("PRAGMA journal_mode=WAL")
-	proxyDB.Exec("PRAGMA busy_timeout=5000")
+	if _, err := proxyDB.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] proxy-db: WAL mode failed: %v\n", appName, err)
+	}
+	if _, err := proxyDB.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] proxy-db: busy_timeout failed: %v\n", appName, err)
+	}
 
 	_, err = proxyDB.Exec(`CREATE TABLE IF NOT EXISTS proxy_requests (
 		id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -560,9 +599,11 @@ func startProxyServer(cfg proxyConfig) {
 			req.URL.Host = upstream.Host
 			req.Host = upstream.Host
 
-			// Strip our internal headers before sending upstream
-			// (they start with X-Proxy- but we keep them on req for ModifyResponse to read)
+			// NOTE: X-Proxy-* headers are kept on the request object so that
+			// ModifyResponse can read them. They are stripped below in Transport
+			// before they actually reach the upstream server.
 		},
+		Transport: &headerStrippingTransport{base: http.DefaultTransport},
 		ModifyResponse: func(resp *http.Response) error {
 			req := resp.Request
 
@@ -649,6 +690,26 @@ func startProxyServer(cfg proxyConfig) {
 			fmt.Fprintf(os.Stderr, "[%s] proxy: fatal: %v\n", appName, err)
 		}
 	}()
+}
+
+// headerStrippingTransport strips internal X-Proxy-* headers before sending
+// the request upstream, preventing metadata leakage to the Anthropic API.
+// The headers remain on the *http.Request object for ModifyResponse to read.
+type headerStrippingTransport struct {
+	base http.RoundTripper
+}
+
+func (t *headerStrippingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Clone headers so we don't modify the original (ModifyResponse needs them)
+	h2 := req.Header.Clone()
+	for key := range h2 {
+		if strings.HasPrefix(key, "X-Proxy-") {
+			h2.Del(key)
+		}
+	}
+	req2 := req.Clone(req.Context())
+	req2.Header = h2
+	return t.base.RoundTrip(req2)
 }
 
 // streamCaptureReader wraps an SSE stream body, buffering it to extract usage on Close.
@@ -1082,6 +1143,56 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(body)
 	}))
+
+	// GET /api/minimax/quota — MiniMax coding plan remains (only if minimax provider configured)
+	mux.HandleFunc("GET /api/minimax/quota", authMiddleware(token, func(w http.ResponseWriter, r *http.Request) {
+		apiKey := ""
+		configPaths := []string{
+			filepath.Join(appHome, "data", "config.json"),
+			filepath.Join(workspace, "scripts", appName, "config.json"),
+		}
+		for _, p := range configPaths {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			var raw struct {
+				Providers map[string]struct {
+					APIKey  string `json:"apiKey"`
+					BaseURL string `json:"baseUrl"`
+				} `json:"providers"`
+			}
+			if json.Unmarshal(data, &raw) == nil {
+				if mm, ok := raw.Providers["minimax"]; ok && mm.APIKey != "" {
+					apiKey = mm.APIKey
+				}
+			}
+			break
+		}
+		if apiKey == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"configured": false})
+			return
+		}
+
+		req, err := http.NewRequestWithContext(r.Context(), "GET", "https://www.minimaxi.com/v1/api/openplatform/coding_plan/remains", nil)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "MiniMax request failed: " + err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	}))
 }
 
 // intParam parses an integer query parameter with a default.
@@ -1100,6 +1211,10 @@ func intParam(q url.Values, key string, def int) int {
 // In server mode, uses activeProxyPort directly.
 // In CLI mode, detects if weiran server proxy is running.
 var activeProxyPort int // set when proxy starts in server process
+
+// serverOpenAIProxies caches per-provider OpenAI proxy ports started in server process.
+// Key: provider name (string), Value: port (int). Used by /api/proxy/openai endpoint.
+var serverOpenAIProxies sync.Map
 
 var (
 	detectedProxyPort int
@@ -1218,18 +1333,38 @@ func injectProxyEnvWithModel(env []string, sessionID string, model string) []str
 		env = append(filtered, e)
 	}
 
-	// When a third-party provider (MiniMax, Z.AI, etc.) is active, CLAUDE_CODE_OAUTH_TOKEN
-	// must be stripped entirely. Otherwise Claude Code's interactive login check prefers
-	// the OAuth token, then sends it to the non-Anthropic endpoint and gets 401/auth errors.
-	// -p one-shot mode bypasses the login check which is why it "kind of" worked before.
+	// When a third-party provider (MiniMax, Z.AI, etc.) is active:
+	// 1. Strip CLAUDE_CODE_OAUTH_TOKEN — otherwise Claude Code's login check prefers
+	//    the OAuth token, then sends it to the non-Anthropic endpoint and gets 401.
+	// 2. Inject CLAUDE_CODE_ENTRYPOINT — skips the interactive login check.
+	//    Default is sdk-cli (official value). BUT providers that use ANTHROPIC_API_KEY
+	//    (MiniMax — its Anthropic endpoint requires x-api-key header) hit Claude Code's
+	//    `hasExternalApiKey` branch, which in v2.1.101+ still runs verifyApiKey even
+	//    with sdk-cli and fails against the non-Anthropic endpoint ("Not logged in ·
+	//    Please run /login"). For those, use sdk-go — an unrecognized entrypoint that
+	//    slips past the verify path. Providers on ANTHROPIC_AUTH_TOKEN (GLM, Z.AI)
+	//    take a different branch and work fine with sdk-cli.
 	if providerApplied {
-		filtered := make([]string, 0, len(env))
+		usesApiKey := false
 		for _, v := range env {
-			if strings.HasPrefix(v, "CLAUDE_CODE_OAUTH_TOKEN=") {
+			if strings.HasPrefix(v, "ANTHROPIC_API_KEY=") {
+				usesApiKey = true
+				break
+			}
+		}
+		entrypoint := "sdk-cli"
+		if usesApiKey {
+			entrypoint = "sdk-go"
+		}
+		filtered := make([]string, 0, len(env)+1)
+		for _, v := range env {
+			if strings.HasPrefix(v, "CLAUDE_CODE_OAUTH_TOKEN=") ||
+				strings.HasPrefix(v, "CLAUDE_CODE_ENTRYPOINT=") {
 				continue
 			}
 			filtered = append(filtered, v)
 		}
+		filtered = append(filtered, "CLAUDE_CODE_ENTRYPOINT="+entrypoint)
 		return filtered
 	}
 

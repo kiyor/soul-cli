@@ -52,6 +52,18 @@ func runHooks(mode string) {
 	autoCleanTmp()
 	journal = append(journal, hookRecord{Name: "autoCleanTmp", Duration: time.Since(t0).Seconds()})
 
+	// built-in hook 5: incremental FTS5 index (daily notes + session content)
+	t0 = time.Now()
+	if n, s, err := indexDailyNotes(); err == nil {
+		_ = s
+		journal = append(journal, hookRecord{Name: fmt.Sprintf("ftsIndexNotes(%d)", n), Duration: time.Since(t0).Seconds()})
+	}
+	t0 = time.Now()
+	if n, s, err := indexSessionContent(); err == nil {
+		_ = s
+		journal = append(journal, hookRecord{Name: fmt.Sprintf("ftsIndexSessions(%d)", n), Duration: time.Since(t0).Seconds()})
+	}
+
 	// user-defined hooks: hooks/{mode}.d/*.sh executed in filename order
 	hookDir := filepath.Join(hooksDir, mode+".d")
 	entries, err := os.ReadDir(hookDir)

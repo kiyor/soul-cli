@@ -25,7 +25,7 @@ description: |
 Content here.
 `), 0644)
 
-	name, desc := parseSkillFrontmatter(skill)
+	name, desc, _ := parseSkillFrontmatter(skill)
 	if name != "test-skill" {
 		t.Errorf("name = %q, want %q", name, "test-skill")
 	}
@@ -43,7 +43,7 @@ description: "Write and publish technical blog posts."
 ---
 `), 0644)
 
-	name, desc := parseSkillFrontmatter(skill)
+	name, desc, _ := parseSkillFrontmatter(skill)
 	if name != "blog" {
 		t.Errorf("name = %q, want %q", name, "blog")
 	}
@@ -62,7 +62,7 @@ func TestParseSkillFrontmatter_NoFrontmatter(t *testing.T) {
 ## 触发条件
 `), 0644)
 
-	name, desc := parseSkillFrontmatter(skill)
+	name, desc, _ := parseSkillFrontmatter(skill)
 	if name != "LoRA Forge" {
 		t.Errorf("name = %q, want %q", name, "LoRA Forge")
 	}
@@ -82,7 +82,7 @@ func TestParseSkillFrontmatter_NoFrontmatterNoSeparator(t *testing.T) {
 ## 触发条件
 `), 0644)
 
-	name, desc := parseSkillFrontmatter(skill)
+	name, desc, _ := parseSkillFrontmatter(skill)
 	if name != "Selfie Skill" {
 		t.Errorf("name = %q, want %q", name, "Selfie Skill")
 	}
@@ -145,13 +145,150 @@ func TestBuildSkillIndex_DescTruncation(t *testing.T) {
 			continue
 		}
 		desc := strings.TrimSpace(parts[2])
-		if len(desc) > 110 { // 100 + "…" + margin
-			t.Errorf("desc too long (%d chars): %s", len(desc), desc[:50])
+		// Truncation is 100 runes (not bytes); CJK chars are 3 bytes each.
+		// 100 runes + "…" = max ~304 bytes for full CJK.
+		if len([]rune(desc)) > 110 { // 100 rune limit + "…" + margin
+			t.Errorf("desc too long (%d runes): %s", len([]rune(desc)), string([]rune(desc)[:50]))
 		}
 		// Should not contain trigger keywords (already truncated)
 		if strings.Contains(desc, "触发:") || strings.Contains(desc, "Triggers:") {
 			t.Errorf("desc should not contain trigger text: %s", desc)
 		}
+	}
+}
+
+func TestParseSkillFrontmatter_WithModes(t *testing.T) {
+	dir := t.TempDir()
+	skill := filepath.Join(dir, "SKILL.md")
+	os.WriteFile(skill, []byte(`---
+name: selfie
+description: "Generate self-portraits."
+modes: interactive
+---
+`), 0644)
+
+	name, desc, modes := parseSkillFrontmatter(skill)
+	if name != "selfie" {
+		t.Errorf("name = %q, want %q", name, "selfie")
+	}
+	if desc != "Generate self-portraits." {
+		t.Errorf("desc = %q", desc)
+	}
+	if modes != "interactive" {
+		t.Errorf("modes = %q, want %q", modes, "interactive")
+	}
+}
+
+func TestParseSkillFrontmatter_MultiModes(t *testing.T) {
+	dir := t.TempDir()
+	skill := filepath.Join(dir, "SKILL.md")
+	os.WriteFile(skill, []byte(`---
+name: vault
+description: "Manage secrets."
+modes: interactive,evolve
+---
+`), 0644)
+
+	_, _, modes := parseSkillFrontmatter(skill)
+	if modes != "interactive,evolve" {
+		t.Errorf("modes = %q, want %q", modes, "interactive,evolve")
+	}
+}
+
+func TestParseSkillFrontmatter_NoModes(t *testing.T) {
+	dir := t.TempDir()
+	skill := filepath.Join(dir, "SKILL.md")
+	os.WriteFile(skill, []byte(`---
+name: memory-recall
+description: "Recall memories."
+---
+`), 0644)
+
+	_, _, modes := parseSkillFrontmatter(skill)
+	if modes != "" {
+		t.Errorf("modes = %q, want empty", modes)
+	}
+}
+
+func TestBuildSkillIndex_ModeFilter(t *testing.T) {
+	// Create temp skill dirs
+	dir := t.TempDir()
+
+	// skill-a: interactive only
+	skillA := filepath.Join(dir, "skill-a")
+	os.MkdirAll(skillA, 0755)
+	os.WriteFile(filepath.Join(skillA, "SKILL.md"), []byte(`---
+name: skill-a
+description: "Interactive only skill."
+modes: interactive
+---
+`), 0644)
+
+	// skill-b: no modes restriction (= all)
+	skillB := filepath.Join(dir, "skill-b")
+	os.MkdirAll(skillB, 0755)
+	os.WriteFile(filepath.Join(skillB, "SKILL.md"), []byte(`---
+name: skill-b
+description: "Available in all modes."
+---
+`), 0644)
+
+	// skill-c: heartbeat,cron only
+	skillC := filepath.Join(dir, "skill-c")
+	os.MkdirAll(skillC, 0755)
+	os.WriteFile(filepath.Join(skillC, "SKILL.md"), []byte(`---
+name: skill-c
+description: "Automation only."
+modes: heartbeat,cron
+---
+`), 0644)
+
+	// Override skillDirs for this test
+	origDirs := skillDirs
+	origMode := currentMode
+	skillDirs = []string{dir}
+	defer func() {
+		skillDirs = origDirs
+		currentMode = origMode
+	}()
+
+	// Test heartbeat mode
+	currentMode = "heartbeat"
+	idx := buildSkillIndex()
+	if strings.Contains(idx, "skill-a") {
+		t.Error("heartbeat mode should NOT contain skill-a (interactive only)")
+	}
+	if !strings.Contains(idx, "skill-b") {
+		t.Error("heartbeat mode should contain skill-b (no mode restriction)")
+	}
+	if !strings.Contains(idx, "skill-c") {
+		t.Error("heartbeat mode should contain skill-c (heartbeat,cron)")
+	}
+
+	// Test interactive mode
+	currentMode = "interactive"
+	idx = buildSkillIndex()
+	if !strings.Contains(idx, "skill-a") {
+		t.Error("interactive mode should contain skill-a")
+	}
+	if !strings.Contains(idx, "skill-b") {
+		t.Error("interactive mode should contain skill-b")
+	}
+	if strings.Contains(idx, "skill-c") {
+		t.Error("interactive mode should NOT contain skill-c (heartbeat,cron only)")
+	}
+
+	// Test evolve mode
+	currentMode = "evolve"
+	idx = buildSkillIndex()
+	if strings.Contains(idx, "skill-a") {
+		t.Error("evolve mode should NOT contain skill-a (interactive only)")
+	}
+	if !strings.Contains(idx, "skill-b") {
+		t.Error("evolve mode should contain skill-b (no restriction)")
+	}
+	if strings.Contains(idx, "skill-c") {
+		t.Error("evolve mode should NOT contain skill-c (heartbeat,cron only)")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -55,9 +56,77 @@ func handlePrompt() {
 	}
 }
 
+// modeProfile controls which prompt sections are included for each mode.
+type modeProfile struct {
+	SoulFiles        []string // which soul files to load
+	IncludeHeartbeat bool
+	IncludeFeedback  bool
+	IncludeDailyNotes bool
+	DailyNoteBudget  int // 0 = use default 15000
+	IncludeCCSessions bool
+	IncludeTelegram  bool
+	IncludeSkills    bool
+	IncludeProjects  bool
+}
+
+func profileForMode(mode string) modeProfile {
+	all := []string{"SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md"}
+	switch mode {
+	case "heartbeat":
+		return modeProfile{
+			SoulFiles:         []string{"IDENTITY.md", "USER.md", "AGENTS.md"},
+			IncludeHeartbeat:  true,
+			IncludeFeedback:   true,
+			IncludeDailyNotes: true,
+			DailyNoteBudget:   8000,
+			IncludeCCSessions: true,
+			IncludeTelegram:   false,
+			IncludeSkills:     false,
+			IncludeProjects:   true,
+		}
+	case "cron":
+		return modeProfile{
+			SoulFiles:         []string{"SOUL.md", "IDENTITY.md", "USER.md"},
+			IncludeHeartbeat:  true,
+			IncludeFeedback:   true,
+			IncludeDailyNotes: true,
+			DailyNoteBudget:   15000,
+			IncludeCCSessions: true,
+			IncludeTelegram:   true,
+			IncludeSkills:     false,
+			IncludeProjects:   true,
+		}
+	case "evolve":
+		return modeProfile{
+			SoulFiles:         all,
+			IncludeHeartbeat:  false,
+			IncludeFeedback:   true,
+			IncludeDailyNotes: true,
+			DailyNoteBudget:   10000,
+			IncludeCCSessions: true,
+			IncludeTelegram:   false,
+			IncludeSkills:     true,
+			IncludeProjects:   true,
+		}
+	default: // interactive, print, server
+		return modeProfile{
+			SoulFiles:         all,
+			IncludeHeartbeat:  false,
+			IncludeFeedback:   true,
+			IncludeDailyNotes: true,
+			DailyNoteBudget:   15000,
+			IncludeCCSessions: true,
+			IncludeTelegram:   true,
+			IncludeSkills:     true,
+			IncludeProjects:   true,
+		}
+	}
+}
+
 // ── Prompt assembly ──
 
 func buildPrompt() buildPromptResult {
+	profile := profileForMode(currentMode)
 	var sections []promptSection
 	var b strings.Builder
 
@@ -75,12 +144,16 @@ func buildPrompt() buildPromptResult {
 		sections = append(sections, promptSection{name: "CORE.md", tokens: estimateTokens(b.String()[secStart:])})
 	}
 
-	// Core identity files (with per-file truncation)
+	// Core identity files (with per-file truncation, filtered by mode profile)
 	totalChars := 0
-	for _, name := range []string{"SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md"} {
+	for _, name := range profile.SoulFiles {
 		content, ok := loadFileWithBudget(filepath.Join(workspace, name), maxBootstrapFileChars)
 		if !ok {
 			continue
+		}
+		// Resolve secret references (vault://, env://) — primarily for TOOLS.md
+		if strings.Contains(content, "://") {
+			content = resolveSecretRefs(content)
 		}
 		if totalChars+len(content) > maxBootstrapTotalChars {
 			fmt.Fprintf(&b, "\n# === %s ===\n\n⚠️ [skipped: bootstrap total exceeded %d char limit]\n", name, maxBootstrapTotalChars)
@@ -95,6 +168,7 @@ func buildPrompt() buildPromptResult {
 	// Framework rules (embedded at compile time, applies to all instances)
 	if frameworkRules != "" {
 		fwContent := strings.ReplaceAll(frameworkRules, "{cli}", appName)
+		fwContent = strings.ReplaceAll(fwContent, "{CLI}", strings.ToUpper(strings.ReplaceAll(appName, "-", "_")))
 		if totalChars+len(fwContent) <= maxBootstrapTotalChars {
 			totalChars += len(fwContent)
 			secStart := b.Len()
@@ -115,8 +189,8 @@ func buildPrompt() buildPromptResult {
 		}
 	}
 
-	// Heartbeat rules — only injected in heartbeat/cron modes, not interactive/server
-	if includeHeartbeat {
+	// Heartbeat rules — only injected when mode profile enables it
+	if profile.IncludeHeartbeat {
 		if content, ok := loadFileWithBudget(filepath.Join(workspace, "HEARTBEAT.md"), 4000); ok {
 			if totalChars+len(content) <= maxBootstrapTotalChars {
 				totalChars += len(content)
@@ -129,31 +203,33 @@ func buildPrompt() buildPromptResult {
 
 	// Feedback memories (high-priority behavioral rules from memory/topics/feedback_*.md)
 	// Uses frontmatter name+description for concise one-liners; full details in the files.
-	feedbackDir := filepath.Join(workspace, "memory", "topics")
-	if entries, err := os.ReadDir(feedbackDir); err == nil {
-		var feedbackBuf strings.Builder
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasPrefix(e.Name(), "feedback_") || !strings.HasSuffix(e.Name(), ".md") {
-				continue
+	if profile.IncludeFeedback {
+		feedbackDir := filepath.Join(workspace, "memory", "topics")
+		if entries, err := os.ReadDir(feedbackDir); err == nil {
+			var feedbackBuf strings.Builder
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasPrefix(e.Name(), "feedback_") || !strings.HasSuffix(e.Name(), ".md") {
+					continue
+				}
+				content, ok := loadFileWithBudget(filepath.Join(feedbackDir, e.Name()), 2000)
+				if !ok {
+					continue
+				}
+				name, desc := parseFeedbackFrontmatter(content)
+				if name == "" && desc == "" {
+					continue
+				}
+				if desc != "" {
+					feedbackBuf.WriteString(fmt.Sprintf("- **%s**: %s\n", name, desc))
+				} else {
+					feedbackBuf.WriteString(fmt.Sprintf("- **%s**\n", name))
+				}
 			}
-			content, ok := loadFileWithBudget(filepath.Join(feedbackDir, e.Name()), 2000)
-			if !ok {
-				continue
+			if feedbackBuf.Len() > 0 {
+				secStart := b.Len()
+				fmt.Fprintf(&b, "\n# === Feedback (behavioral rules) ===\n\nHigh-priority rules from past corrections. Details in `memory/topics/feedback_*.md`.\n\n%s\n", feedbackBuf.String())
+				sections = append(sections, promptSection{name: "Feedback", tokens: estimateTokens(b.String()[secStart:])})
 			}
-			name, desc := parseFeedbackFrontmatter(content)
-			if name == "" && desc == "" {
-				continue
-			}
-			if desc != "" {
-				feedbackBuf.WriteString(fmt.Sprintf("- **%s**: %s\n", name, desc))
-			} else {
-				feedbackBuf.WriteString(fmt.Sprintf("- **%s**\n", name))
-			}
-		}
-		if feedbackBuf.Len() > 0 {
-			secStart := b.Len()
-			fmt.Fprintf(&b, "\n# === Feedback (behavioral rules) ===\n\nHigh-priority rules from past corrections. Details in `memory/topics/feedback_*.md`.\n\n%s\n", feedbackBuf.String())
-			sections = append(sections, promptSection{name: "Feedback", tokens: estimateTokens(b.String()[secStart:])})
 		}
 	}
 
@@ -177,65 +253,82 @@ func buildPrompt() buildPromptResult {
 	}
 
 	// GAL resume context: injected when session is created with gal_id
-	if galContext != "" {
+	galCtx := galContext // legacy global
+	if activeOverrides != nil && activeOverrides.GalContext != "" {
+		galCtx = activeOverrides.GalContext
+	}
+	if galCtx != "" {
 		secStart := b.Len()
 		fmt.Fprintf(&b, "\n# === GAL Resume Context ===\n\n")
 		fmt.Fprintf(&b, "A GAL (visual novel) save has been loaded for this session. Read the save data below, then offer to resume from the bookmark or start a new playthrough. Use the interactive components (weiran-choices, weiran-gallery, etc.) to continue the story. Refer to `/gal` skill (skills/gal/SKILL.md) for narrative rules.\n\n")
-		fmt.Fprintf(&b, "```json\n%s\n```\n", galContext)
+		fmt.Fprintf(&b, "```json\n%s\n```\n", galCtx)
 		sections = append(sections, promptSection{name: "GAL context", tokens: estimateTokens(b.String()[secStart:])})
-		galContext = "" // clear after use
+		galContext = "" // clear legacy global after use
 	}
 
 	// Today + yesterday daily notes (tail-first: newest content preserved on truncation)
-	today := time.Now().Format("2006-01-02")
-	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	dailyBudget := 15000 // per-file budget for daily notes (less than general maxBootstrapFileChars)
-	for _, day := range []string{today, yesterday} {
-		p := filepath.Join(workspace, "memory", day+".md")
-		content, ok := loadFileTailWithBudget(p, dailyBudget)
-		if !ok {
-			continue
+	if profile.IncludeDailyNotes {
+		today := time.Now().Format("2006-01-02")
+		yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+		dailyBudget := 15000
+		if profile.DailyNoteBudget > 0 {
+			dailyBudget = profile.DailyNoteBudget
 		}
-		if totalChars+len(content) > maxBootstrapTotalChars {
-			fmt.Fprintf(&b, "\n# === Daily Note: %s ===\n\n⚠️ [skipped: bootstrap total exceeded limit]\n", day)
-			break
+		for _, day := range []string{today, yesterday} {
+			p := filepath.Join(workspace, "memory", day+".md")
+			content, ok := loadFileTailWithBudget(p, dailyBudget)
+			if !ok {
+				continue
+			}
+			if totalChars+len(content) > maxBootstrapTotalChars {
+				fmt.Fprintf(&b, "\n# === Daily Note: %s ===\n\n⚠️ [skipped: bootstrap total exceeded limit]\n", day)
+				break
+			}
+			totalChars += len(content)
+			secStart := b.Len()
+			fmt.Fprintf(&b, "\n# === Daily Note: %s ===\n\n%s\n", day, content)
+			sections = append(sections, promptSection{name: "daily/" + day, tokens: estimateTokens(b.String()[secStart:])})
 		}
-		totalChars += len(content)
-		secStart := b.Len()
-		fmt.Fprintf(&b, "\n# === Daily Note: %s ===\n\n%s\n", day, content)
-		sections = append(sections, promptSection{name: "daily/" + day, tokens: estimateTokens(b.String()[secStart:])})
 	}
 
 	// Recent 5 Claude Code session user prompt summaries
-	ccCtx := buildCCSessionContext(5, 3000)
-	if ccCtx != "" {
-		secStart := b.Len()
-		fmt.Fprintf(&b, "\n# === Recent Claude Code session summaries ===\n\n%s\n", ccCtx)
-		sections = append(sections, promptSection{name: "CC sessions", tokens: estimateTokens(b.String()[secStart:])})
+	if profile.IncludeCCSessions {
+		ccCtx := buildCCSessionContext(5, 3000)
+		if ccCtx != "" {
+			secStart := b.Len()
+			fmt.Fprintf(&b, "\n# === Recent Claude Code session summaries ===\n\n%s\n", ccCtx)
+			sections = append(sections, promptSection{name: "CC sessions", tokens: estimateTokens(b.String()[secStart:])})
+		}
 	}
 
 	// Telegram current session conversation history (tail, within token limit)
-	if tgCtx, tgPath := buildTelegramContext(8000); tgCtx != "" {
-		secStart := b.Len()
-		fmt.Fprintf(&b, "\n# === Telegram current conversation (recent) ===\n\n")
-		fmt.Fprintf(&b, "> Full session JSONL: `%s`\n\n", tgPath)
-		b.WriteString(tgCtx)
-		b.WriteString("\n")
-		sections = append(sections, promptSection{name: "Telegram ctx", tokens: estimateTokens(b.String()[secStart:])})
+	if profile.IncludeTelegram {
+		if tgCtx, tgPath := buildTelegramContext(8000); tgCtx != "" {
+			secStart := b.Len()
+			fmt.Fprintf(&b, "\n# === Telegram current conversation (recent) ===\n\n")
+			fmt.Fprintf(&b, "> Full session JSONL: `%s`\n\n", tgPath)
+			b.WriteString(tgCtx)
+			b.WriteString("\n")
+			sections = append(sections, promptSection{name: "Telegram ctx", tokens: estimateTokens(b.String()[secStart:])})
+		}
 	}
 
 	// Skill index
-	if idx := buildSkillIndex(); idx != "" {
-		secStart := b.Len()
-		fmt.Fprintf(&b, "\n# === Skills ===\n\n%s\n", idx)
-		sections = append(sections, promptSection{name: "Skills", tokens: estimateTokens(b.String()[secStart:])})
+	if profile.IncludeSkills {
+		if idx := buildSkillIndex(); idx != "" {
+			secStart := b.Len()
+			fmt.Fprintf(&b, "\n# === Skills ===\n\n%s\n", idx)
+			sections = append(sections, promptSection{name: "Skills", tokens: estimateTokens(b.String()[secStart:])})
+		}
 	}
 
 	// Project index
-	if idx := buildProjectIndex(); idx != "" {
-		secStart := b.Len()
-		fmt.Fprintf(&b, "\n# === Projects ===\n\n%s\n", idx)
-		sections = append(sections, promptSection{name: "Projects", tokens: estimateTokens(b.String()[secStart:])})
+	if profile.IncludeProjects {
+		if idx := buildProjectIndex(); idx != "" {
+			secStart := b.Len()
+			fmt.Fprintf(&b, "\n# === Projects ===\n\n%s\n", idx)
+			sections = append(sections, promptSection{name: "Projects", tokens: estimateTokens(b.String()[secStart:])})
+		}
 	}
 
 	return buildPromptResult{content: b.String(), sections: sections}
@@ -854,8 +947,12 @@ func loadBootProtocol() string {
 	content := string(data)
 
 	// Per-session environment override takes priority (e.g. Telegram mode)
-	if sessionEnvOverride != "" {
-		content = injectServerModeContext2(content, sessionEnvOverride)
+	envOvr := sessionEnvOverride // legacy global
+	if activeOverrides != nil && activeOverrides.EnvOverride != "" {
+		envOvr = activeOverrides.EnvOverride
+	}
+	if envOvr != "" {
+		content = injectServerModeContext2(content, envOvr)
 	} else if isServerMode {
 		content = injectServerModeContext(content)
 	}
@@ -863,8 +960,45 @@ func loadBootProtocol() string {
 	return content + "\n---\n\n"
 }
 
-// sessionEnvOverride, when non-empty, replaces the environment section in BOOT.md.
-// Set by createSessionWithOpts for per-session overrides (e.g. Telegram mode).
+// promptOverrides allows callers to pass per-session state into buildPrompt
+// without touching globals. This eliminates race conditions when multiple
+// sessions are created concurrently in server mode.
+type promptOverrides struct {
+	Mode           string // override currentMode for prompt profile selection
+	GalContext     string // GAL save JSON injected into prompt for resume
+	EnvOverride    string // replaces the environment section in BOOT.md
+}
+
+// activeOverrides is set before calling buildPrompt() and cleared after.
+// Protected by promptOverrideMu for server-mode concurrency safety.
+var (
+	activeOverrides  *promptOverrides
+	promptOverrideMu sync.Mutex
+)
+
+// buildPromptWithOverrides is the concurrency-safe entry point for server mode.
+// It acquires the prompt build lock, applies overrides, calls buildPrompt, and
+// cleans up. This replaces the old pattern of setting globals before buildPrompt.
+func buildPromptWithOverrides(ovr promptOverrides) buildPromptResult {
+	promptOverrideMu.Lock()
+	defer promptOverrideMu.Unlock()
+
+	// Save and restore globals that buildPrompt reads
+	origMode := currentMode
+	if ovr.Mode != "" {
+		currentMode = ovr.Mode
+	}
+	activeOverrides = &ovr
+	defer func() {
+		currentMode = origMode
+		activeOverrides = nil
+	}()
+
+	return buildPrompt()
+}
+
+// sessionEnvOverride is DEPRECATED — use promptOverrides.EnvOverride instead.
+// Kept only for non-server callsites (main.go interactive mode).
 var sessionEnvOverride string
 
 const telegramModeEnv = `## Current Environment

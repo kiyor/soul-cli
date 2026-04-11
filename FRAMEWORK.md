@@ -60,6 +60,41 @@ Behavioral rules from `memory/topics/feedback_*.md` are auto-loaded into the pro
 - Prefer action over confirmation. Do it, then report. Only ask before destructive operations (先做后报，破坏性操作才问).
 - Think in closed loops: does the task close end-to-end? Does the system actually work?
 
+## Session IPC
+
+Sessions running under the same `{cli} server` can communicate with each other. The server injects `{CLI}_SERVER_URL`, `{CLI}_AUTH_TOKEN`, and `{CLI}_SESSION_ID` env vars into each session process — these are required for IPC and set automatically. (The prefix is derived from the binary name, e.g. `weiran` → `WEIRAN_*`, `my-soul` → `MY_SOUL_*`.)
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `{cli} session list` | List all active sessions (ID, name, status, model) |
+| `{cli} session read <id>` | Read a session's full message history |
+| `{cli} session search <id> "keyword"` | Search a session's history via FTS |
+| `{cli} session send <id> "message"` | Send a message to another session (wakes idle sessions) |
+| `{cli} session close <id>` | Destroy a session (cannot close your own) |
+
+Short ID prefixes work everywhere (e.g. `b265` resolves to the full UUID).
+
+### Behavior
+
+- **Send** injects the message as a user turn into the target session's stdin, prefixed with `[From session <short_id> (<name>)]`. The target session can read `WEIRAN_SESSION_ID` to reply back.
+- **Bidirectional**: if session A sends to B, B can `{cli} session send <A_id> "reply"` to respond. Both directions count toward the anti-loop limit.
+- **Anti-loop**: server enforces a per-pair interaction round limit (default 10 bidirectional rounds). Once exceeded, further sends return HTTP 429.
+- **Participants**: the server tracks which sessions have sent IPC messages to each session (stored in `participants` field).
+- **Close**: destroys the target session's process. Cannot close your own session. Use for cleanup after spawning helper sessions.
+
+### When to use IPC
+
+- Delegate a sub-task to a cheaper model session, then read its results
+- Coordinate multi-session workflows (e.g. research → implement → review)
+- Clean up spawned sessions after they finish
+
+### When NOT to use IPC
+
+- If satisfied with a result from another session, stay silent — do not reply just to acknowledge
+- Don't use IPC as a chat loop — keep interactions purposeful and bounded
+
 ## Version Control
 
 - Your workspace prompt files (SOUL.md, AGENTS.md, USER.md, memory/, etc.) should be tracked in git.

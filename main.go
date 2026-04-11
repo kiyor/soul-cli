@@ -49,7 +49,9 @@ var (
 
 	jiraToken string // read from config.json or JIRA_TOKEN env var
 
-	isServerMode bool // set to true when running as `weiran server`
+	isServerMode    bool   // set to true when running as `weiran server`
+	serverPort      int    // port the server is listening on (set in handleServer)
+	serverAuthToken string // auth token for server API (set in handleServer)
 
 	// Custom model override: --model provider/model (e.g. zai/glm-5.1, minimax/MiniMax-M2.7)
 	// When set, injects provider's baseUrl + apiKey as ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
@@ -94,9 +96,6 @@ var (
 	// Current run mode (cron/heartbeat/interactive etc.), used for metrics recording
 	currentMode string
 
-	// includeHeartbeat controls whether HEARTBEAT.md is injected into the prompt.
-	// Only set true for heartbeat/cron modes — interactive/server sessions don't need it.
-	includeHeartbeat bool
 
 	// replaceSoul enables Id Mode (本我) — use --system-prompt-file (replace CC's
 	// native system prompt) instead of --append-system-prompt-file.
@@ -438,8 +437,8 @@ Usage:
   {{NAME}} --standard            Standard mode — append soul to CC's native system prompt
   {{NAME}} -p "task"             one-shot task, exits when done
   {{NAME}} --standard -p "task"  one-shot task in Standard mode
-  {{NAME}} --model zai/glm-5.1    use custom provider endpoint (see '{{NAME}} models')
-  {{NAME}} --model minimax/MiniMax-M2.7-highspeed  use MiniMax endpoint
+  {{NAME}} --model glm            fuzzy match: "glm"→zai/glm-5.1, "highspeed"→minimax, "opus"→native
+  {{NAME}} --model zai/glm-5.1    fully qualified (see '{{NAME}} models')
   {{NAME}} models                 list all available models (native + provider/model)
   {{NAME}} -r                    resume session (opens TUI picker if no ID given)
   {{NAME}} -r <session-id>       resume specific session
@@ -657,6 +656,9 @@ func main() {
 	case "init":
 		handleInit(extra)
 		return
+	case "session":
+		handleSessionIPC(extra)
+		return
 	case "server":
 		handleServer(extra)
 		return
@@ -786,9 +788,23 @@ func main() {
 		}
 
 		task := cronTask()
+		beforeCron := time.Now()
+
+		// P0: Log previous crash (metrics only, no prompt injection — cron is stateless)
+		if crash := getLastCrashInfo("cron"); crash != nil {
+			fmt.Fprintf(os.Stderr, "[%s] previous cron crashed (exit %d at %s): %s\n",
+				appName, crash.ExitCode, crash.Timestamp, crash.Error)
+			alertOnRepeatedCrash("cron")
+		}
+
 		args := append(base, "-p", task)
 		args = append(args, extra...)
 		exitCode := runClaude(args)
+
+		// Track session ID for crash recovery metrics
+		if newSID := detectNewSession(beforeCron); newSID != "" {
+			lastClaudeSessionID = newSID
+		}
 
 		// Refresh FTS5 index for daily notes after memory consolidation.
 		// Best-effort: failure here never blocks cron completion.
@@ -808,7 +824,6 @@ func main() {
 			os.Exit(0)
 		}
 
-		includeHeartbeat = true
 		mustLock()
 		defer releaseLock()
 
@@ -825,9 +840,17 @@ func main() {
 		hb := heartbeatTask()
 		beforeRun := time.Now()
 
+		// P0: Log previous crash (metrics only, no prompt injection — heartbeat is stateless)
+		if crash := getLastCrashInfo("heartbeat"); crash != nil {
+			fmt.Fprintf(os.Stderr, "[%s] previous heartbeat crashed (exit %d at %s): %s\n",
+				appName, crash.ExitCode, crash.Timestamp, crash.Error)
+			alertOnRepeatedCrash("heartbeat")
+		}
+
 		// Check for active soul session to resume
 		if claudeSID := getActiveSoulSession(agentName); claudeSID != "" {
 			fmt.Fprintf(os.Stderr, "["+appName+"] resuming soul session (claude %s)\n", shortID(claudeSID))
+			lastClaudeSessionID = claudeSID
 			args := append(base, "--resume", claudeSID, "-p", hb)
 			args = append(args, extra...)
 			exitCode := runClaude(args)
@@ -846,6 +869,7 @@ func main() {
 		// Detect and link the Claude session ID created by this run
 		if soulID > 0 {
 			if newSID := detectNewSession(beforeRun); newSID != "" {
+				lastClaudeSessionID = newSID
 				linkSoulSession(soulID, newSID)
 			}
 		}
@@ -1036,6 +1060,10 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			mode = "init"
 			extra = args[i+1:]
 			return
+		case "session":
+			mode = "session"
+			extra = args[i+1:]
+			return
 		case "server":
 			mode = "server"
 			extra = args[i+1:]
@@ -1053,9 +1081,16 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			// Standard mode: append to CC's native system prompt instead of replacing
 			replaceSoul = false
 		case "--model":
-			// Custom model: --model provider/model (e.g. zai/glm-5.1, minimax/MiniMax-M2.7)
+			// Custom model: supports fuzzy matching (e.g. "glm", "highspeed", "minimax", "opus")
 			if i+1 < len(args) {
-				overrideModel = args[i+1]
+				resolved, err := resolveFuzzyModel(args[i+1])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[%s] %v\n", appName, err)
+					os.Exit(1)
+				}
+				if resolved != "" {
+					overrideModel = resolved
+				}
 				i++
 			}
 		case "--category":

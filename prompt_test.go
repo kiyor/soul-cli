@@ -228,6 +228,84 @@ func TestBuildPrompt_ContainsStartupProtocol(t *testing.T) {
 	}
 }
 
+func TestProfileForMode(t *testing.T) {
+	tests := []struct {
+		mode          string
+		wantSoulCount int
+		wantSkills    bool
+		wantTelegram  bool
+		wantHeartbeat bool
+		wantBudget    int
+	}{
+		{"interactive", 5, true, true, false, 15000},
+		{"heartbeat", 3, false, false, true, 8000},
+		{"cron", 3, false, true, true, 15000},
+		{"evolve", 5, true, false, false, 10000},
+		{"", 5, true, true, false, 15000},       // default
+		{"server", 5, true, true, false, 15000},  // default
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			p := profileForMode(tt.mode)
+			if len(p.SoulFiles) != tt.wantSoulCount {
+				t.Errorf("SoulFiles count = %d, want %d (files: %v)", len(p.SoulFiles), tt.wantSoulCount, p.SoulFiles)
+			}
+			if p.IncludeSkills != tt.wantSkills {
+				t.Errorf("IncludeSkills = %v, want %v", p.IncludeSkills, tt.wantSkills)
+			}
+			if p.IncludeTelegram != tt.wantTelegram {
+				t.Errorf("IncludeTelegram = %v, want %v", p.IncludeTelegram, tt.wantTelegram)
+			}
+			if p.IncludeHeartbeat != tt.wantHeartbeat {
+				t.Errorf("IncludeHeartbeat = %v, want %v", p.IncludeHeartbeat, tt.wantHeartbeat)
+			}
+			if p.DailyNoteBudget != tt.wantBudget {
+				t.Errorf("DailyNoteBudget = %d, want %d", p.DailyNoteBudget, tt.wantBudget)
+			}
+			// All profiles should include feedback, daily notes, CC sessions, and projects
+			if !p.IncludeFeedback {
+				t.Error("IncludeFeedback should be true for all modes")
+			}
+			if !p.IncludeDailyNotes {
+				t.Error("IncludeDailyNotes should be true for all modes")
+			}
+			if !p.IncludeCCSessions {
+				t.Error("IncludeCCSessions should be true for all modes")
+			}
+			if !p.IncludeProjects {
+				t.Error("IncludeProjects should be true for all modes")
+			}
+		})
+	}
+}
+
+func TestBuildPrompt_HeartbeatMode(t *testing.T) {
+	origMode := currentMode
+	currentMode = "heartbeat"
+	defer func() { currentMode = origMode }()
+
+	result := buildPrompt()
+	// Heartbeat should NOT include SOUL.md or TOOLS.md
+	if strings.Contains(result.content, "# === SOUL.md ===") {
+		t.Error("heartbeat prompt should not include SOUL.md")
+	}
+	if strings.Contains(result.content, "# === TOOLS.md ===") {
+		t.Error("heartbeat prompt should not include TOOLS.md")
+	}
+	// Should include IDENTITY.md and AGENTS.md
+	if !strings.Contains(result.content, "# === IDENTITY.md ===") {
+		t.Error("heartbeat prompt should include IDENTITY.md")
+	}
+	// Should NOT include Skills section
+	if strings.Contains(result.content, "# === Skills ===") {
+		t.Error("heartbeat prompt should not include Skills")
+	}
+	// Should NOT include Telegram
+	if strings.Contains(result.content, "# === Telegram current conversation") {
+		t.Error("heartbeat prompt should not include Telegram context")
+	}
+}
+
 func TestBuildPrompt_HasReasonableSize(t *testing.T) {
 	result := buildPrompt()
 	tokens := estimateTokens(result.content)

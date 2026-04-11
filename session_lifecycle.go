@@ -88,11 +88,15 @@ func kvGet(db *sql.DB, key string) string {
 	return v
 }
 
-func kvSet(db *sql.DB, key, value string) {
+func kvSet(db *sql.DB, key, value string) error {
 	now := time.Now().Format(time.RFC3339)
-	db.Exec(`INSERT INTO lifecycle_kv(key, value, updated_at) VALUES(?,?,?)
+	_, err := db.Exec(`INSERT INTO lifecycle_kv(key, value, updated_at) VALUES(?,?,?)
 	         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
 		key, value, now)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] lifecycle kvSet(%s): %v\n", appName, key, err)
+	}
+	return err
 }
 
 // ─── expiry actions ────────────────────────────────────────────────────────
@@ -163,7 +167,11 @@ func maybeDailyReset(atHour int, notify bool) (int, error) {
 
 	// Always stamp today to prevent re-firing later in the same day, even
 	// if there were no rows to reset this time around.
-	kvSet(db, "last_daily_reset", today)
+	if err := kvSet(db, "last_daily_reset", today); err != nil {
+		// If we can't persist the key, the reset will re-fire next tick.
+		// Log the error but still return the count of sessions we did reset.
+		fmt.Fprintf(os.Stderr, "[%s] WARNING: daily reset idempotency key failed to persist: %v\n", appName, err)
+	}
 
 	if n > 0 {
 		fmt.Fprintf(os.Stderr, "[%s] daily reset at %02d:00 → ended %d active soul sessions\n", appName, atHour, n)

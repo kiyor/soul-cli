@@ -324,7 +324,7 @@ func writeIfNotExists(path, content string, force bool) (bool, error) {
 			return false, nil // exists, skip
 		}
 	}
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		return false, err
 	}
 	return true, nil

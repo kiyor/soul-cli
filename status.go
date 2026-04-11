@@ -824,7 +824,15 @@ func handleConfig() {
 	fmt.Println("\n── Agent ──")
 	fmt.Printf("  name:         %s\n", agentName)
 	fmt.Printf("  tg chat:      %s\n", tgChatID)
-	fmt.Printf("  jira token:   %s\n", jiraToken)
+	maskedJira := "(not set)"
+	if jiraToken != "" {
+		if len(jiraToken) > 8 {
+			maskedJira = jiraToken[:4] + "…" + jiraToken[len(jiraToken)-4:]
+		} else {
+			maskedJira = "****"
+		}
+	}
+	fmt.Printf("  jira token:   %s\n", maskedJira)
 
 	fmt.Println("\n── Skill Dirs ──")
 	for _, d := range skillDirs {
@@ -898,7 +906,16 @@ func handleModels() {
 		for _, name := range names {
 			prov := providers[name]
 			fmt.Printf("── %s ──\n", name)
-			fmt.Printf("  endpoint: %s\n", prov.BaseURL)
+			if prov.Type == "openai" {
+				fmt.Printf("  type: openai proxy → %s\n", func() string {
+					if prov.ChatURL != "" {
+						return prov.ChatURL
+					}
+					return codexEndpoint
+				}())
+			} else {
+				fmt.Printf("  endpoint: %s\n", prov.BaseURL)
+			}
 			if prov.AuthEnv != "" {
 				fmt.Printf("  auth env: %s\n", prov.AuthEnv)
 			}

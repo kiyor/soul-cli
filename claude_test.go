@@ -219,3 +219,301 @@ func TestMustLock_BadPidInLockFile(t *testing.T) {
 
 	releaseLock()
 }
+
+// ── Crash Recovery Tests ──
+
+func TestGetLastCrashInfo_NoCrash(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "data", "sessions.db")
+	os.MkdirAll(filepath.Dir(dbPath), 0755)
+	defer func() { dbPath = origDB }()
+
+	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+	os.WriteFile(metricsPath, []byte(`{"ts":"`+time.Now().Format(time.RFC3339)+`","mode":"heartbeat","exit_code":0,"duration_s":30}`+"\n"), 0644)
+
+	if crash := getLastCrashInfo("heartbeat"); crash != nil {
+		t.Errorf("expected nil for successful last run, got %+v", crash)
+	}
+}
+
+func TestGetLastCrashInfo_WithCrash(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "data", "sessions.db")
+	os.MkdirAll(filepath.Dir(dbPath), 0755)
+	defer func() { dbPath = origDB }()
+
+	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+	ts := time.Now().Add(-5 * time.Minute).Format(time.RFC3339)
+	os.WriteFile(metricsPath, []byte(`{"ts":"`+ts+`","mode":"heartbeat","exit_code":1,"session_id":"abc123","error":"timeout after 300s"}`+"\n"), 0644)
+
+	crash := getLastCrashInfo("heartbeat")
+	if crash == nil {
+		t.Fatal("expected crash info, got nil")
+	}
+	if crash.ExitCode != 1 {
+		t.Errorf("exit_code = %d, want 1", crash.ExitCode)
+	}
+	if crash.SessionID != "abc123" {
+		t.Errorf("session_id = %q, want %q", crash.SessionID, "abc123")
+	}
+	if crash.Error != "timeout after 300s" {
+		t.Errorf("error = %q, want %q", crash.Error, "timeout after 300s")
+	}
+}
+
+func TestGetLastCrashInfo_ExpiredCrash(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "data", "sessions.db")
+	os.MkdirAll(filepath.Dir(dbPath), 0755)
+	defer func() { dbPath = origDB }()
+
+	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+	ts := time.Now().Add(-2 * time.Hour).Format(time.RFC3339)
+	os.WriteFile(metricsPath, []byte(`{"ts":"`+ts+`","mode":"heartbeat","exit_code":1,"error":"old crash"}`+"\n"), 0644)
+
+	if crash := getLastCrashInfo("heartbeat"); crash != nil {
+		t.Errorf("expected nil for expired crash (>1h), got %+v", crash)
+	}
+}
+
+func TestGetLastCrashInfo_MixedModes(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "data", "sessions.db")
+	os.MkdirAll(filepath.Dir(dbPath), 0755)
+	defer func() { dbPath = origDB }()
+
+	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+	ts := time.Now().Add(-5 * time.Minute).Format(time.RFC3339)
+	content := `{"ts":"` + ts + `","mode":"cron","exit_code":1,"error":"cron fail"}` + "\n" +
+		`{"ts":"` + ts + `","mode":"heartbeat","exit_code":0}` + "\n"
+	os.WriteFile(metricsPath, []byte(content), 0644)
+
+	// heartbeat was successful (last record)
+	if crash := getLastCrashInfo("heartbeat"); crash != nil {
+		t.Errorf("heartbeat should be nil (last was success), got %+v", crash)
+	}
+
+	// cron crashed (only record for that mode)
+	crash := getLastCrashInfo("cron")
+	if crash == nil {
+		t.Fatal("cron should have crash info")
+	}
+	if crash.ExitCode != 1 {
+		t.Errorf("cron exit_code = %d, want 1", crash.ExitCode)
+	}
+}
+
+func TestGetLastCrashInfo_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "data", "sessions.db")
+	os.MkdirAll(filepath.Dir(dbPath), 0755)
+	defer func() { dbPath = origDB }()
+
+	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+	os.WriteFile(metricsPath, []byte(""), 0644)
+
+	if crash := getLastCrashInfo("heartbeat"); crash != nil {
+		t.Errorf("expected nil for empty file, got %+v", crash)
+	}
+}
+
+func TestGetLastCrashInfo_NoFile(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "data", "sessions.db")
+	os.MkdirAll(filepath.Dir(dbPath), 0755)
+	defer func() { dbPath = origDB }()
+
+	if crash := getLastCrashInfo("heartbeat"); crash != nil {
+		t.Errorf("expected nil for missing file, got %+v", crash)
+	}
+}
+
+func TestBuildEventDigest(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "data", "sessions.db")
+	os.MkdirAll(filepath.Dir(dbPath), 0755)
+	defer func() { dbPath = origDB }()
+
+	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+	ts := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
+
+	content := `{"ts":"` + ts + `","mode":"heartbeat","exit_code":0,"event_type":"success"}` + "\n" +
+		`{"ts":"` + ts + `","mode":"cron","exit_code":1,"event_type":"crash","error":"some weird new error"}` + "\n" +
+		`{"ts":"` + ts + `","mode":"cron","exit_code":1,"event_type":"timeout","error":"timeout after 5m0s"}` + "\n"
+	os.WriteFile(metricsPath, []byte(content), 0644)
+
+	digest := buildEventDigest(24 * time.Hour)
+	if digest == "" {
+		t.Fatal("expected non-empty digest")
+	}
+	if !strings.Contains(digest, "3 runs") {
+		t.Errorf("digest should show 3 runs, got: %s", digest)
+	}
+	if !strings.Contains(digest, "2 failures") {
+		t.Errorf("digest should show 2 failures, got: %s", digest)
+	}
+	if !strings.Contains(digest, "Unclassified crashes") {
+		t.Errorf("digest should highlight unclassified crashes, got: %s", digest)
+	}
+	if !strings.Contains(digest, "some weird new error") {
+		t.Errorf("digest should include the unclassified error text, got: %s", digest)
+	}
+}
+
+func TestBuildEventDigest_Empty(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "data", "sessions.db")
+	os.MkdirAll(filepath.Dir(dbPath), 0755)
+	defer func() { dbPath = origDB }()
+
+	// No metrics file
+	if digest := buildEventDigest(24 * time.Hour); digest != "" {
+		t.Errorf("expected empty digest for missing metrics, got: %s", digest)
+	}
+}
+
+func TestResolveFuzzyModel(t *testing.T) {
+	// Set up a temp config.json with test providers
+	dir := t.TempDir()
+	cfg := `{
+		"providers": {
+			"minimax": {
+				"baseUrl": "https://api.minimaxi.com/anthropic",
+				"apiKey": "test-key",
+				"models": ["MiniMax-M2.7-highspeed"]
+			},
+			"zai": {
+				"baseUrl": "https://api.z.ai/api/anthropic",
+				"models": ["glm-5.1"]
+			}
+		}
+	}`
+	if err := os.MkdirAll(filepath.Join(dir, "data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data", "config.json"), []byte(cfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Override appHome so loadAllProviders finds our test config
+	origAppHome := appHome
+	appHome = dir
+	defer func() { appHome = origAppHome }()
+
+	tests := []struct {
+		input    string
+		want     string
+		wantErr  bool
+	}{
+		// Native aliases
+		{"opus", "claude-opus-4-6", false},
+		{"haiku", "claude-haiku-4-5-20251001", false},
+		{"sonnet", "claude-sonnet-4-6", false},
+
+		// Exact provider/model
+		{"zai/glm-5.1", "zai/glm-5.1", false},
+		{"minimax/MiniMax-M2.7-highspeed", "minimax/MiniMax-M2.7-highspeed", false},
+
+		// Provider-only -> first model
+		{"minimax", "minimax/MiniMax-M2.7-highspeed", false},
+		{"zai", "zai/glm-5.1", false},
+
+		// Fuzzy substring
+		{"highspeed", "minimax/MiniMax-M2.7-highspeed", false},
+		{"glm", "zai/glm-5.1", false},
+		{"M2.7", "minimax/MiniMax-M2.7-highspeed", false},
+		{"m2.7", "minimax/MiniMax-M2.7-highspeed", false},
+
+		// No match
+		{"nonexistent", "", true},
+
+		// Empty -> empty
+		{"", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := resolveFuzzyModel(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("resolveFuzzyModel(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("resolveFuzzyModel(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassifyExitEvent(t *testing.T) {
+	tests := []struct {
+		name     string
+		exitCode int
+		errMsg   string
+		stderr   string
+		want     string
+	}{
+		{"success", 0, "", "", "success"},
+		{"timeout_from_err", 1, "timeout after 5m0s", "", "timeout"},
+		{"timeout_from_stderr", 1, "", "claude timed out", "timeout"},
+		{"login_expired", 1, "", "Error: not logged in. Please run claude login", "login_expired"},
+		{"oauth_issue", 1, "", "OAuth token expired", "login_expired"},
+		{"context_overflow", 1, "", "prompt is too long for context window", "context_overflow"},
+		{"rate_limit_429", 1, "", "HTTP 429 too many requests", "rate_limit"},
+		{"rate_limit_quota", 1, "", "quota exceeded for model", "rate_limit"},
+		{"network_refused", 1, "", "connection refused", "network_error"},
+		{"api_500", 1, "", "500 Internal Server Error", "api_error"},
+		{"api_502", 1, "", "502 Bad Gateway", "api_error"},
+		{"oom_killed", 137, "", "", "oom_killed"},
+		{"segfault", 139, "", "", "segfault"},
+		{"generic_crash", 1, "", "", "crash"},
+		{"generic_nonzero", 2, "", "some unknown error", "crash"},
+		{"entrypoint_issue", 1, "", "CLAUDE_CODE_ENTRYPOINT not set", "login_expired"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyExitEvent(tt.exitCode, tt.errMsg, tt.stderr)
+			if got != tt.want {
+				t.Errorf("classifyExitEvent(%d, %q, %q) = %q, want %q",
+					tt.exitCode, tt.errMsg, tt.stderr, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLimitedBuffer(t *testing.T) {
+	var lb limitedBuffer
+	lb.limit = 10
+
+	lb.Write([]byte("hello"))
+	if lb.String() != "hello" {
+		t.Errorf("got %q, want %q", lb.String(), "hello")
+	}
+
+	lb.Write([]byte(" world and more"))
+	got := lb.String()
+	if len(got) != 10 {
+		t.Errorf("len = %d, want 10", len(got))
+	}
+	// Should keep the last 10 bytes: "d and more"
+	if got != "d and more" {
+		t.Errorf("got %q, want %q", got, "d and more")
+	}
+}
+
+func TestLimitedBuffer_ZeroLimit(t *testing.T) {
+	var lb limitedBuffer
+	// limit=0 means unlimited
+	lb.Write([]byte("all the data"))
+	if lb.String() != "all the data" {
+		t.Errorf("got %q", lb.String())
+	}
+}

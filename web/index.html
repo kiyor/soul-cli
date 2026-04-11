@@ -328,6 +328,7 @@ body{
 .msg.gal-replay{opacity:.85;border-left:2px solid rgba(236,72,153,.45)}
 .msg.gal-replay .meta::after{content:" · 回放";color:rgba(236,72,153,.7);font-size:.85em}
 .msg.error-msg{border-color:rgba(239,68,68,.18);background:rgba(30,14,14,.5)}
+.msg.ipc-msg{border-color:rgba(168,85,247,.18);background:rgba(25,14,30,.5)}
 .msghead{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,.04);background:rgba(0,0,0,.10)}
 .avatar{width:26px;height:26px;border-radius:9px;display:grid;place-items:center;font-weight:900;font-size:11px;border:1px solid rgba(255,255,255,.06);flex-shrink:0}
 .avatar.user{background:linear-gradient(135deg,rgba(106,161,255,.2),rgba(106,161,255,.06));color:rgba(180,210,255,.9)}
@@ -495,11 +496,62 @@ body{
 .tool-chevron{margin-left:auto;color:var(--muted2);font-size:12px;transition:transform .25s var(--spring)}
 .tool-block.collapsed .tool-chevron{transform:rotate(-90deg)}
 
+/* Todo list view (TodoWrite tool) */
+.todo-card{
+  margin:8px 0;border-radius:10px;border:1px solid rgba(139,92,246,.12);
+  background:rgba(14,18,34,.7);overflow:hidden;
+}
+.todo-card .tool-head{
+  display:flex;align-items:center;gap:8px;padding:8px 12px;
+  border-bottom:1px solid rgba(255,255,255,.04);background:rgba(139,92,246,.04);
+}
+.todo-list{padding:4px 0}
+.todo-item{
+  display:flex;align-items:flex-start;gap:10px;padding:7px 14px;
+  transition:background .1s;border-left:3px solid transparent;
+}
+.todo-item+.todo-item{border-top:1px solid rgba(255,255,255,.03)}
+.todo-item:hover{background:rgba(255,255,255,.02)}
+.todo-icon{
+  flex-shrink:0;width:20px;height:20px;border-radius:6px;
+  display:grid;place-items:center;font-size:12px;margin-top:1px;
+  border:1.5px solid rgba(255,255,255,.15);background:transparent;
+  transition:all .15s;
+}
+.todo-item.pending .todo-icon{border-color:rgba(255,255,255,.12);color:var(--muted2)}
+.todo-item.in_progress .todo-icon{
+  border-color:rgba(139,92,246,.5);background:rgba(139,92,246,.12);
+  color:var(--accent2);
+  animation:todoPulse 2s ease-in-out infinite;
+}
+.todo-item.completed .todo-icon{
+  border-color:rgba(33,192,122,.4);background:rgba(33,192,122,.12);
+  color:var(--good);
+}
+@keyframes todoPulse{0%,100%{box-shadow:0 0 0 0 rgba(139,92,246,0)}50%{box-shadow:0 0 0 3px rgba(139,92,246,.15)}}
+.todo-text{
+  flex:1;min-width:0;font-size:13px;line-height:1.5;
+}
+.todo-content{
+  color:var(--text);font-weight:500;
+}
+.todo-item.completed .todo-content{
+  color:var(--muted2);text-decoration:line-through;text-decoration-color:rgba(126,143,182,.4);
+}
+.todo-active{
+  font-size:11px;color:var(--accent2);margin-top:1px;font-style:italic;
+}
+.todo-count{
+  font-size:10px;color:var(--muted2);font-family:var(--mono);margin-left:auto;
+}
+
 /* Hide tool chain by default, show when toggled */
 .msg.ai:has(.tool-block),.msg.system-msg:has(.tool-block),.msg.tool-msg{display:none}
 .show-tools .msg.ai:has(.tool-block),.show-tools .msg.system-msg:has(.tool-block),.show-tools .msg.tool-msg{display:block}
 /* Code-edit tool blocks (Edit/MultiEdit/Write/NotebookEdit) — always visible */
 .msg.tool-msg.code-edit{display:block}
+/* Todo list blocks — always visible */
+.msg.tool-msg:has(.todo-card){display:block}
 .tool-block.code-edit{background:rgba(10,14,22,.92);border-color:rgba(139,92,246,.16)}
 .tool-block.code-edit .tool-head{background:rgba(139,92,246,.05)}
 .tool-block.code-edit .tool-body{padding:0;max-height:none;white-space:normal;word-break:normal;color:inherit}
@@ -1604,8 +1656,8 @@ function connectWS(){
   ws.onopen=()=>{
     setConnState('ok');
     wsRetryDelay=1000;
-    // Re-subscribe to active session
-    if(activeSessionId)wsSend({type:'subscribe',sid:activeSessionId});
+    // Re-subscribe to active session (skip replay — messages already in DOM)
+    if(activeSessionId)wsSend({type:'subscribe',sid:activeSessionId,skip_replay:true});
   };
 
   ws.onmessage=(e)=>{
@@ -1680,6 +1732,11 @@ function handleWSMessage(msg){
     case 'sent':
       break;
     case 'pong':
+      break;
+    case 'ipc_message':
+      if(msg.sid===activeSessionId){
+        toast(`IPC from ${msg.from_name||msg.from?.substring(0,8)||'?'} (round ${msg.round})`,'info');
+      }
       break;
     case 'error':
       toast(msg.error||'Error','error');
@@ -1780,7 +1837,14 @@ function handleSessionEvent(event,data){
       if(data.is_error)addErrorMsg(data.result||'error');
       break;
     case 'user':
-      if(data.message&&data.message.content)addUserMsg(typeof data.message.content==='string'?data.message.content:JSON.stringify(data.message.content));
+      if(data.message&&data.message.content){
+        const content=typeof data.message.content==='string'?data.message.content:JSON.stringify(data.message.content);
+        if(data.ipc){
+          addIPCMsg(content,data.from);
+        }else{
+          addUserMsg(content);
+        }
+      }
       break;
     case 'control_response':
       handleControlResponse(data);
@@ -2050,6 +2114,15 @@ function addSystemMsg(text,markdown){
   scrollBottomSmooth();
 }
 
+function addIPCMsg(text,fromId){
+  const el=document.createElement('div');el.className='msg ipc-msg';
+  const short=fromId?(fromId.substring(0,8)):'???';
+  el.innerHTML=`<div class="msghead"><div class="avatar" style="background:rgba(168,85,247,.15);color:rgba(216,180,254,.9)">⇄</div><div class="who"><span class="name" style="color:var(--accent2,#a855f7)">IPC from ${esc(short)}</span><span class="meta">${timeStr()}</span></div></div><div class="body"><div class="md">${marked.parse(text)}</div></div>`;
+  document.getElementById('messages').appendChild(el);
+  scrollBottomSmooth();
+  injectLinkPreviews(el);
+}
+
 function addErrorMsg(text){
   const el=document.createElement('div');el.className='msg error-msg';
   el.innerHTML=`<div class="msghead"><div class="avatar" style="background:rgba(239,68,68,.12);color:rgba(255,180,180,.9)">!</div><div class="who"><span class="name" style="color:var(--bad)">Error</span><span class="meta">${timeStr()}</span></div></div><div class="body"><div class="md">${esc(text)}</div></div>`;
@@ -2074,11 +2147,46 @@ function renderWriteLines(content){
   html+='</div>';
   return html;
 }
+
+function renderTodoList(todos){
+  const total=todos.length;
+  const done=todos.filter(t=>t.status==='completed').length;
+  const active=todos.find(t=>t.status==='in_progress');
+  const statusIcon=(s)=>{
+    if(s==='completed')return '✓';
+    if(s==='in_progress')return '◉';
+    return '○';
+  };
+  let html=`<div class="todo-card">`;
+  html+=`<div class="tool-head"><span class="tool-badge"><span class="icon">📋</span>Todo</span>`;
+  html+=`<span class="todo-count">${done}/${total}</span>`;
+  html+=`</div>`;
+  html+=`<div class="todo-list">`;
+  todos.forEach(t=>{
+    const cls=t.status||'pending';
+    const icon=statusIcon(cls);
+    const content=esc(t.content||'');
+    const activeForm=t.activeForm&&cls==='in_progress'?`<div class="todo-active">${esc(t.activeForm)}</div>`:'';
+    html+=`<div class="todo-item ${cls}">`;
+    html+=`<div class="todo-icon">${icon}</div>`;
+    html+=`<div class="todo-text"><div class="todo-content">${content}</div>${activeForm}</div>`;
+    html+=`</div>`;
+  });
+  html+=`</div></div>`;
+  return html;
+}
+
 function addToolUseMsg(name,input){
   let inp;
   if(typeof input==='object'&&input!==null){inp=input}
   else if(typeof input==='string'){try{const p=JSON.parse(input);inp=(typeof p==='object'&&p!==null)?p:{}}catch(e){inp={}}}
   else{inp={}}
+  // TodoWrite — always visible, rendered as list view
+  if(name==='TodoWrite'&&Array.isArray(inp.todos)){
+    const el=document.createElement('div');el.className='msg ai tool-msg';
+    el.innerHTML=renderTodoList(inp.todos);
+    document.getElementById('messages').appendChild(el);scrollBottomSmooth();return;
+  }
   // Special-case code-edit tools — always visible, rendered as diff
   if(name==='Edit'&&inp.old_string!==undefined){
     const el=document.createElement('div');el.className='msg ai tool-msg code-edit';
@@ -2590,7 +2698,7 @@ function applyProviderModel(providerModel){
   }).then(r=>r.json()).then(d=>{
     if(d.error){addErrorMsg('Model switch failed: '+d.error);return}
     addSystemMsg('Switched to '+providerModel+' ✓');
-    loadSessions();
+    scheduleHistoryRefresh();
   }).catch(e=>addErrorMsg('Model switch failed: '+e.message));
 }
 
@@ -3154,15 +3262,18 @@ async function showSniffUsage(){
   el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted2)">Loading...</div>';
 
   try{
-    const [usageR,statsR,glmR]=await Promise.all([
+    const [usageR,statsR,glmR,mmR]=await Promise.all([
       fetch('/api/proxy/usage',{headers:{'Authorization':'Bearer '+TOKEN}}),
       fetch('/api/proxy/stats?group=hour&days=1',{headers:{'Authorization':'Bearer '+TOKEN}}),
-      fetch('/api/glm/quota',{headers:{'Authorization':'Bearer '+TOKEN}}).catch(()=>null)
+      fetch('/api/glm/quota',{headers:{'Authorization':'Bearer '+TOKEN}}).catch(()=>null),
+      fetch('/api/minimax/quota',{headers:{'Authorization':'Bearer '+TOKEN}}).catch(()=>null)
     ]);
     const usage=await usageR.json();
     const statsData=await statsR.json();
     let glmData=null;
     if(glmR&&glmR.ok){try{glmData=await glmR.json()}catch(e){}}
+    let mmData=null;
+    if(mmR&&mmR.ok){try{mmData=await mmR.json()}catch(e){}}
     let html='';
 
     // Rate limit card
@@ -3255,6 +3366,54 @@ async function showSniffUsage(){
                 const days=Math.floor(diff/86400000);
                 const hrs=Math.floor((diff%86400000)/3600000);
                 html+=`<div class="sniff-stat"><span class="label">Resets in</span><span class="value">${days>0?days+'d '+hrs+'h':hrs+'h'}</span></div>`;
+              }
+            }
+          }
+        });
+        html+=`</div>`;
+      }
+    }
+
+    // MiniMax Quota card (only if minimax provider configured)
+    if(mmData&&mmData.model_remains&&Array.isArray(mmData.model_remains)){
+      // Focus on the coding plan entry: MiniMax-M*
+      const codingEntries=mmData.model_remains.filter(e=>e.model_name==='MiniMax-M*'||e.model_name==='coding-plan-vlm'||e.model_name==='coding-plan-search');
+      if(codingEntries.length>0){
+        html+=`<div class="sniff-card"><h3>MiniMax Quota <span style="font-size:11px;color:var(--muted);text-transform:none;font-weight:normal">(coding plan)</span></h3>`;
+        codingEntries.forEach(e=>{
+          // Note: *_usage_count is actually REMAINING, not used. Used = total - remaining.
+          const intTot=e.current_interval_total_count||0;
+          const intRem=e.current_interval_usage_count||0;
+          const intUse=Math.max(0,intTot-intRem);
+          const wkTot=e.current_weekly_total_count||0;
+          const wkRem=e.current_weekly_usage_count||0;
+          const wkUse=Math.max(0,wkTot-wkRem);
+          const intPct=intTot>0?(intUse/intTot*100):0;
+          const wkPct=wkTot>0?(wkUse/wkTot*100):0;
+          const intColor=intPct>80?'var(--bad)':intPct>50?'var(--warn)':'var(--good)';
+          const wkColor=wkPct>80?'var(--bad)':wkPct>50?'var(--warn)':'var(--good)';
+          html+=`<div class="sniff-stat" style="margin-top:6px"><span class="label" style="font-weight:600">${e.model_name}</span><span class="value"></span></div>`;
+          if(intTot>0){
+            html+=`<div class="sniff-stat"><span class="label">5h Interval</span><span class="value" style="color:${intColor}">${intUse}/${intTot} (${intPct.toFixed(1)}%)</span></div>`;
+            html+=`<div class="sniff-bar"><div class="sniff-bar-fill" style="width:${intPct.toFixed(1)}%;background:${intColor}"></div></div>`;
+            if(e.remains_time){
+              const diff=e.remains_time;
+              if(diff>0){
+                const hrs=Math.floor(diff/3600000);
+                const mins=Math.floor((diff%3600000)/60000);
+                html+=`<div class="sniff-stat"><span class="label">Resets in</span><span class="value">${hrs>0?hrs+'h '+mins+'m':mins+'m'}</span></div>`;
+              }
+            }
+          }
+          if(wkTot>0){
+            html+=`<div class="sniff-stat"><span class="label">Weekly</span><span class="value" style="color:${wkColor}">${wkUse}/${wkTot} (${wkPct.toFixed(1)}%)</span></div>`;
+            html+=`<div class="sniff-bar"><div class="sniff-bar-fill" style="width:${wkPct.toFixed(1)}%;background:${wkColor}"></div></div>`;
+            if(e.weekly_remains_time){
+              const diff=e.weekly_remains_time;
+              if(diff>0){
+                const days=Math.floor(diff/86400000);
+                const hrs=Math.floor((diff%86400000)/3600000);
+                html+=`<div class="sniff-stat"><span class="label">Week resets in</span><span class="value">${days>0?days+'d '+hrs+'h':hrs+'h'}</span></div>`;
               }
             }
           }

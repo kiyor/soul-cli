@@ -101,6 +101,9 @@ func TestGetTelegramToken_DirectToken(t *testing.T) {
 
 func TestTrySendTelegram_NoToken(t *testing.T) {
 	setTestHome(t, "/nonexistent")
+	// Temporarily re-enable telegram so we actually test the no-token path
+	disableTelegram = false
+	t.Cleanup(func() { disableTelegram = true })
 
 	err := trySendTelegram("test message")
 	if err == nil {
@@ -110,6 +113,8 @@ func TestTrySendTelegram_NoToken(t *testing.T) {
 
 func TestTrySendTelegramPhoto_NoToken(t *testing.T) {
 	setTestHome(t, "/nonexistent")
+	disableTelegram = false
+	t.Cleanup(func() { disableTelegram = true })
 
 	err := trySendTelegramPhoto("https://example.com/img.jpg", "caption")
 	if err == nil {

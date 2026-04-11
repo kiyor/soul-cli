@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -62,7 +63,9 @@ func releaseLock() {
 
 // ── exec claude ──
 
-// execClaude replaces current process (for interactive/print modes, does not return)
+// execClaude replaces current process (for interactive/print modes, does not return).
+// Exception: if an embedded OpenAI proxy is active, uses subprocess mode instead of
+// syscall.Exec — exec replaces the process image and kills the proxy goroutine.
 func execClaude(args []string) {
 	os.Chdir(workspace)
 
@@ -72,9 +75,39 @@ func execClaude(args []string) {
 		os.Exit(1)
 	}
 
-	argv := append([]string{"claude"}, args...)
 	env := injectProxyEnv(os.Environ())
 
+	// Debug: show auth-related env vars
+	for _, v := range env {
+		if strings.HasPrefix(v, "ANTHROPIC_") || strings.HasPrefix(v, "CLAUDE_CODE_ENTRYPOINT=") || strings.HasPrefix(v, "CLAUDE_CODE_OAUTH") {
+			if strings.HasPrefix(v, "ANTHROPIC_API_KEY=") || strings.HasPrefix(v, "CLAUDE_CODE_OAUTH_TOKEN=") {
+				fmt.Fprintf(os.Stderr, "[%s] env: %s=<set>\n", appName, strings.SplitN(v, "=", 2)[0])
+			} else {
+				fmt.Fprintf(os.Stderr, "[%s] env: %s\n", appName, v)
+			}
+		}
+	}
+
+	// If an embedded OpenAI/Codex proxy is running, we cannot use syscall.Exec:
+	// exec replaces the entire process image, killing the proxy goroutine before
+	// Claude Code can establish a connection. Use subprocess mode instead.
+	if activeOpenAIProxyPort > 0 {
+		cmd := exec.Command(bin, args...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Env = env
+		if err := cmd.Run(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			fmt.Fprintf(os.Stderr, "["+appName+"] claude failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	argv := append([]string{"claude"}, args...)
 	if err := syscall.Exec(bin, argv, env); err != nil {
 		fmt.Fprintf(os.Stderr, "["+appName+"] exec failed: %v\n", err)
 		os.Exit(1)
@@ -102,8 +135,11 @@ func runClaude(args []string) int {
 	cmd := exec.Command(claudeBin, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = append(injectProxyEnv(os.Environ()), "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+	// Tee stderr: real-time output to terminal + capture tail for event classification
+	var stderrBuf limitedBuffer
+	stderrBuf.limit = 4096 // keep last 4KB of stderr for classification
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+	cmd.Env = append(injectProxyEnv(os.Environ()), "CLAUDE_CODE_ENTRYPOINT=sdk-cli")
 
 	// timeout protection: set timeout for cron/heartbeat modes
 	timeout := cronTimeout()
@@ -114,7 +150,7 @@ func runClaude(args []string) int {
 	// start subprocess
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "["+appName+"] claude start failed: %v\n", err)
-		trackClaudeExit(1, 0, err.Error())
+		trackClaudeExit(1, 0, err.Error(), "")
 		return 1
 	}
 
@@ -158,8 +194,8 @@ func runClaude(args []string) int {
 		fmt.Fprint(os.Stderr, "["+appName+"] claude exited normally\n")
 	}
 
-	// persist exit code to metrics.jsonl for trend analysis
-	trackClaudeExit(exitCode, duration, errMsg)
+	// persist exit code + event type to metrics.jsonl
+	trackClaudeExit(exitCode, duration, errMsg, stderrBuf.String())
 	return exitCode
 }
 
@@ -270,17 +306,20 @@ func getModelEndpoint() string {
 
 // providerConfig holds baseURL and apiKey for a model provider.
 type providerConfig struct {
-	BaseURL string   `json:"baseUrl"`
-	APIKey  string   `json:"apiKey"`
-	AuthEnv string   `json:"authEnv"` // env var name for the key, default "ANTHROPIC_AUTH_TOKEN"; use "ANTHROPIC_API_KEY" for MiniMax etc.
-	Models  []string `json:"models"`  // available model names for this provider
+	BaseURL  string   `json:"baseUrl"`
+	APIKey   string   `json:"apiKey"`
+	AuthEnv  string   `json:"authEnv"`  // env var name for the key, default "ANTHROPIC_AUTH_TOKEN"; use "ANTHROPIC_API_KEY" for MiniMax etc.
+	Models   []string `json:"models"`   // available model names for this provider
+	Type     string   `json:"type"`     // "" or "anthropic" (default, passthrough) or "openai" (needs embedded translation proxy)
+	ChatURL  string   `json:"chatUrl"`  // OpenAI-compatible chat completions endpoint (used when Type=="openai")
+	AuthFile string   `json:"authFile"` // path to auth JSON (e.g. ~/.codex/auth.json, used when Type=="openai")
 }
 
 // resolveProvider looks up a provider's endpoint config from config.json "providers" section.
 // config.json is soul-cli's own config (in data/config.json).
 func resolveProvider(providerName string) *providerConfig {
 	all, _ := loadAllProviders()
-	if prov, ok := all[providerName]; ok && prov.BaseURL != "" {
+	if prov, ok := all[providerName]; ok && (prov.BaseURL != "" || prov.Type == "openai") {
 		return &prov
 	}
 	return nil
@@ -316,11 +355,29 @@ func injectModelOverrideEnv(env []string) ([]string, bool) {
 }
 
 // injectProviderEnv injects ANTHROPIC_BASE_URL + auth env for the given model's provider.
-// model must be in "provider/modelName" format (e.g. "zai/glm-5.1").
+// model can be fully qualified ("provider/model"), a native alias ("opus"), or a fuzzy name ("glm").
 // Returns the modified env and whether the override was applied.
 func injectProviderEnv(env []string, model string) ([]string, bool) {
 	if model == "" {
 		return env, false
+	}
+
+	// Fuzzy resolve if not already provider/model format
+	if !strings.Contains(model, "/") {
+		// Check native aliases first — those don't need provider injection
+		if _, ok := nativeModelAliases[model]; ok {
+			return env, false
+		}
+		// Try fuzzy match against provider models
+		resolved, err := resolveFuzzyModel(model)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] %v\n", appName, err)
+			return env, false
+		}
+		if resolved == "" || !strings.Contains(resolved, "/") {
+			return env, false
+		}
+		model = resolved
 	}
 
 	parts := strings.SplitN(model, "/", 2)
@@ -362,8 +419,6 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[%s] using provider %q → %s\n", appName, providerName, provider.BaseURL)
-
 	// Filter out conflicting env vars
 	filtered := make([]string, 0, len(env)+3)
 	for _, v := range env {
@@ -375,14 +430,36 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 		filtered = append(filtered, v)
 	}
 
-	filtered = append(filtered, "ANTHROPIC_BASE_URL="+provider.BaseURL)
-	if provider.APIKey != "" {
-		authEnv := provider.AuthEnv
-		if authEnv == "" {
-			authEnv = "ANTHROPIC_AUTH_TOKEN"
+	if provider.Type == "openai" {
+		// Prefer server-managed proxy (server process is long-lived; CLI can use syscall.Exec normally).
+		// Fall back to embedded proxy only when no server is running.
+		var port int
+		if serverPort := detectServerOpenAIProxy(providerName); serverPort > 0 {
+			port = serverPort
+			fmt.Fprintf(os.Stderr, "[%s] using provider %q → server openai proxy http://127.0.0.1:%d\n", appName, providerName, port)
+		} else {
+			var err error
+			port, err = startOpenAIProxy(*provider)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] failed to start openai proxy: %v\n", appName, err)
+				return env, false
+			}
+			fmt.Fprintf(os.Stderr, "[%s] using provider %q → embedded openai proxy http://127.0.0.1:%d\n", appName, providerName, port)
 		}
-		filtered = append(filtered, authEnv+"="+provider.APIKey)
+		filtered = append(filtered, fmt.Sprintf("ANTHROPIC_BASE_URL=http://127.0.0.1:%d", port))
+		filtered = append(filtered, "ANTHROPIC_AUTH_TOKEN=dummy")
+	} else {
+		fmt.Fprintf(os.Stderr, "[%s] using provider %q → %s\n", appName, providerName, provider.BaseURL)
+		filtered = append(filtered, "ANTHROPIC_BASE_URL="+provider.BaseURL)
+		if provider.APIKey != "" {
+			authEnv := provider.AuthEnv
+			if authEnv == "" {
+				authEnv = "ANTHROPIC_AUTH_TOKEN"
+			}
+			filtered = append(filtered, authEnv+"="+provider.APIKey)
+		}
 	}
+
 	// Extend timeout for third-party providers (they can be slower)
 	filtered = append(filtered, "API_TIMEOUT_MS=3000000")
 
@@ -403,22 +480,198 @@ func isProviderModel(model string) bool {
 	return strings.Contains(model, "/")
 }
 
+// nativeModelAliases maps short names to full Anthropic model IDs.
+// These are handled by Claude Code directly (no provider injection needed).
+var nativeModelAliases = map[string]string{
+	"opus":      "claude-opus-4-6",
+	"opus[1m]":  "claude-opus-4-6[1m]",
+	"sonnet":    "claude-sonnet-4-6",
+	"sonnet[1m]": "claude-sonnet-4-6[1m]",
+	"haiku":     "claude-haiku-4-5-20251001",
+}
+
+// resolveFuzzyModel takes a user-supplied --model value and resolves it to a
+// fully qualified model string. Supports:
+//
+//   - Exact match: "zai/glm-5.1", "minimax/MiniMax-M2.7-highspeed", "opus"
+//   - Provider-only: "minimax" → first model under that provider
+//   - Fuzzy substring: "highspeed" → "minimax/MiniMax-M2.7-highspeed"
+//                       "glm" → "zai/glm-5.1"
+//                       "M2.7" → "minimax/MiniMax-M2.7-highspeed"
+//
+// Returns ("", nil) if no match found.
+func resolveFuzzyModel(input string) (string, error) {
+	if input == "" {
+		return "", nil
+	}
+
+	inputLower := strings.ToLower(input)
+
+	// 1. Exact native alias (opus, sonnet, haiku)
+	if resolved, ok := nativeModelAliases[input]; ok {
+		return resolved, nil
+	}
+
+	// 2. Already fully qualified (contains "/") — validate & pass through
+	if strings.Contains(input, "/") {
+		return input, nil
+	}
+
+	// 3. Check if it's a full native model ID (e.g. "claude-opus-4-6")
+	for _, full := range nativeModelAliases {
+		if input == full {
+			return input, nil
+		}
+	}
+
+	// 4. Build candidate list from all providers + their models
+	allProviders, _ := loadAllProviders()
+	type candidate struct {
+		full    string // "provider/model"
+		prov    string // provider name
+		model   string // model name under provider
+	}
+	var candidates []candidate
+
+	for provName, prov := range allProviders {
+		for _, m := range prov.Models {
+			candidates = append(candidates, candidate{
+				full:  provName + "/" + m,
+				prov:  provName,
+				model: m,
+			})
+		}
+	}
+
+	// 5. Exact provider name match → first model of that provider
+	for _, c := range candidates {
+		if inputLower == strings.ToLower(c.prov) {
+			return c.full, nil
+		}
+	}
+
+	// 6. Fuzzy: match against "model" part (case-insensitive substring)
+	var matches []candidate
+	for _, c := range candidates {
+		if strings.Contains(strings.ToLower(c.model), inputLower) {
+			matches = append(matches, c)
+		}
+	}
+	// Also try matching against full "provider/model"
+	if len(matches) == 0 {
+		for _, c := range candidates {
+			if strings.Contains(strings.ToLower(c.full), inputLower) {
+				matches = append(matches, c)
+			}
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("no model matches %q (try `%s models`)", input, appName)
+	case 1:
+		return matches[0].full, nil
+	default:
+		// Multiple matches — list them and pick the shortest (most specific)
+		fmt.Fprintf(os.Stderr, "[%s] ⚠️  %q is ambiguous, matched %d models:\n", appName, input, len(matches))
+		for _, m := range matches {
+			fmt.Fprintf(os.Stderr, "    %s\n", m.full)
+		}
+		// Pick the one with the shortest model name (most specific)
+		best := matches[0]
+		for _, m := range matches[1:] {
+			if len(m.model) < len(best.model) {
+				best = m
+			}
+		}
+		fmt.Fprintf(os.Stderr, "[%s] → using %q (shortest match)\n", appName, best.full)
+		return best.full, nil
+	}
+}
+
+// lastClaudeSessionID is set after runClaude detects a new session.
+// Used by trackClaudeExit to include session ID in metrics for crash recovery.
+var lastClaudeSessionID string
+
+// limitedBuffer keeps the last N bytes written to it (ring-style, but simple: just truncate head).
+type limitedBuffer struct {
+	buf   []byte
+	limit int
+}
+
+func (lb *limitedBuffer) Write(p []byte) (n int, err error) {
+	lb.buf = append(lb.buf, p...)
+	if lb.limit > 0 && len(lb.buf) > lb.limit {
+		lb.buf = lb.buf[len(lb.buf)-lb.limit:]
+	}
+	return len(p), nil
+}
+
+func (lb *limitedBuffer) String() string { return string(lb.buf) }
+
+// classifyExitEvent determines the event type from exit code, error message, and stderr output.
+func classifyExitEvent(exitCode int, errMsg, stderr string) string {
+	if exitCode == 0 {
+		return "success"
+	}
+
+	combined := errMsg + " " + stderr
+
+	// Check patterns from most specific to least
+	patterns := []struct {
+		eventType string
+		keywords  []string
+	}{
+		{"timeout", []string{"timeout after", "timed out"}},
+		{"login_expired", []string{"not logged in", "login required", "authenticate", "OAuth", "oauth", "CLAUDE_CODE_ENTRYPOINT"}},
+		{"context_overflow", []string{"context window", "context length", "token limit", "max_tokens", "prompt is too long"}},
+		{"rate_limit", []string{"rate limit", "429", "too many requests", "quota exceeded"}},
+		{"network_error", []string{"connection refused", "no such host", "network unreachable", "ECONNREFUSED", "ETIMEDOUT"}},
+		{"api_error", []string{"500 Internal Server", "502 Bad Gateway", "503 Service", "504 Gateway"}},
+	}
+
+	lower := strings.ToLower(combined)
+	for _, p := range patterns {
+		for _, kw := range p.keywords {
+			if strings.Contains(lower, strings.ToLower(kw)) {
+				return p.eventType
+			}
+		}
+	}
+
+	// Signal-based classification
+	if exitCode == 137 {
+		return "oom_killed" // SIGKILL, usually OOM
+	}
+	if exitCode == 139 {
+		return "segfault" // SIGSEGV
+	}
+
+	return "crash" // generic non-zero exit
+}
+
 // trackClaudeExit appends claude subprocess exit info to metrics.jsonl
-func trackClaudeExit(exitCode int, duration time.Duration, errMsg string) {
+func trackClaudeExit(exitCode int, duration time.Duration, errMsg, stderr string) {
 	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+
+	eventType := classifyExitEvent(exitCode, errMsg, stderr)
 
 	rec := struct {
 		Timestamp string  `json:"ts"`
 		Mode      string  `json:"mode"`
 		ExitCode  int     `json:"exit_code"`
+		EventType string  `json:"event_type"`
 		Duration  float64 `json:"duration_s"`
 		Error     string  `json:"error,omitempty"`
+		SessionID string  `json:"session_id,omitempty"`
 	}{
 		Timestamp: time.Now().Format(time.RFC3339),
 		Mode:      currentMode,
 		ExitCode:  exitCode,
+		EventType: eventType,
 		Duration:  duration.Seconds(),
 		Error:     errMsg,
+		SessionID: lastClaudeSessionID,
 	}
 
 	data, err := json.Marshal(rec)
@@ -454,4 +707,318 @@ func rotateMetrics(path string, maxLines, keepLines int) {
 	}
 	kept := lines[len(lines)-keepLines:]
 	os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0644)
+}
+
+// crashInfo describes a recent crash for crash recovery.
+type crashInfo struct {
+	Timestamp string `json:"ts"`
+	Mode      string `json:"mode"`
+	ExitCode  int    `json:"exit_code"`
+	EventType string `json:"event_type"`
+	SessionID string `json:"session_id"`
+	Error     string `json:"error"`
+}
+
+// getLastCrashInfo returns info about the most recent crash for the given mode,
+// or nil if the last run was successful or the crash is older than 1 hour.
+func getLastCrashInfo(mode string) *crashInfo {
+	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		return nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		var rec crashInfo
+		if json.Unmarshal([]byte(lines[i]), &rec) != nil {
+			continue
+		}
+		if rec.Mode != mode {
+			continue
+		}
+		// Found the most recent record for this mode
+		if rec.ExitCode == 0 {
+			return nil // last run was successful, no recovery needed
+		}
+		// Check if crash is too old (>1h)
+		if t, err := time.Parse(time.RFC3339, rec.Timestamp); err == nil {
+			if time.Since(t) > time.Hour {
+				return nil
+			}
+		}
+		return &rec
+	}
+	return nil
+}
+
+// alertOnRepeatedCrash checks if the last N runs of the given mode all crashed.
+// If 3+ consecutive crashes, sends a Telegram alert. Stateless — only reads metrics.
+func alertOnRepeatedCrash(mode string) {
+	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		return
+	}
+
+	const threshold = 3
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	consecutive := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var rec crashInfo
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		if rec.Mode != mode {
+			continue
+		}
+		if rec.ExitCode == 0 {
+			break // hit a success, streak broken
+		}
+		consecutive++
+		if consecutive >= threshold {
+			msg := fmt.Sprintf("⚠️ %s has crashed %d consecutive times. Last error: %s",
+				mode, consecutive, rec.Error)
+			fmt.Fprintf(os.Stderr, "[%s] %s\n", appName, msg)
+			// Use trySendTelegram (non-fatal) — sendTelegram calls os.Exit on failure
+			if err := trySendTelegram(msg); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] telegram alert failed: %v\n", appName, err)
+			}
+			return
+		}
+	}
+}
+
+// buildEventDigest returns a compact summary of recent events for injection into evolve task.
+// Focuses on failures, especially unclassified ones (event_type=crash) that may need new patterns.
+func buildEventDigest(since time.Duration) string {
+	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		return ""
+	}
+
+	cutoff := time.Now().Add(-since)
+	typeCounts := make(map[string]int)
+	totalRuns := 0
+
+	// Collect unique unclassified crash errors for pattern discovery
+	unclassifiedErrors := make(map[string]int) // error → count
+
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec struct {
+			Timestamp string `json:"ts"`
+			Mode      string `json:"mode"`
+			ExitCode  int    `json:"exit_code"`
+			EventType string `json:"event_type"`
+			Error     string `json:"error"`
+		}
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, rec.Timestamp)
+		if err != nil || t.Before(cutoff) {
+			continue
+		}
+		et := rec.EventType
+		if et == "" {
+			if rec.ExitCode == 0 {
+				et = "success"
+			} else {
+				et = "crash"
+			}
+		}
+		typeCounts[et]++
+		totalRuns++
+
+		// Track unclassified crashes for evolve to investigate
+		if et == "crash" && rec.Error != "" {
+			// Normalize: take first 80 chars as key
+			key := rec.Error
+			if len(key) > 80 {
+				key = key[:80]
+			}
+			unclassifiedErrors[key]++
+		}
+	}
+
+	if totalRuns == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Total: %d runs", totalRuns)
+	failures := totalRuns - typeCounts["success"]
+	if failures > 0 {
+		fmt.Fprintf(&sb, ", %d failures", failures)
+	}
+	sb.WriteString("\n")
+
+	// Only show non-success types
+	for _, et := range []string{"timeout", "login_expired", "rate_limit", "network_error", "api_error", "context_overflow", "oom_killed", "segfault", "crash"} {
+		if c, ok := typeCounts[et]; ok {
+			fmt.Fprintf(&sb, "  %s: %d\n", et, c)
+		}
+	}
+
+	// Highlight unclassified crashes — these are evolve's job to classify
+	if len(unclassifiedErrors) > 0 {
+		sb.WriteString("\n⚠️ Unclassified crashes (need new patterns in classifyExitEvent):\n")
+		for errKey, count := range unclassifiedErrors {
+			fmt.Fprintf(&sb, "  [%dx] %s\n", count, errKey)
+		}
+	}
+
+	return sb.String()
+}
+
+// handleEventLog implements `weiran db events` — aggregates metrics.jsonl into a readable summary.
+// Flags: --since=24h (default), --mode=cron, --type=timeout, --notify (send to Telegram)
+func handleEventLog(args []string) {
+	since := 24 * time.Hour
+	filterMode := ""
+	filterType := ""
+	notify := false
+
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--since="):
+			if d, err := time.ParseDuration(strings.TrimPrefix(a, "--since=")); err == nil {
+				since = d
+			}
+		case strings.HasPrefix(a, "--mode="):
+			filterMode = strings.TrimPrefix(a, "--mode=")
+		case strings.HasPrefix(a, "--type="):
+			filterType = strings.TrimPrefix(a, "--type=")
+		case a == "--notify":
+			notify = true
+		}
+	}
+
+	metricsPath := filepath.Join(filepath.Dir(dbPath), "metrics.jsonl")
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "no metrics file: %v\n", err)
+		return
+	}
+
+	cutoff := time.Now().Add(-since)
+
+	type eventRec struct {
+		Timestamp string  `json:"ts"`
+		Mode      string  `json:"mode"`
+		ExitCode  int     `json:"exit_code"`
+		EventType string  `json:"event_type"`
+		Duration  float64 `json:"duration_s"`
+		Error     string  `json:"error"`
+		SessionID string  `json:"session_id"`
+	}
+
+	var events []eventRec
+	typeCounts := make(map[string]int)
+	modeCounts := make(map[string]int)
+	totalRuns := 0
+	totalFails := 0
+
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec eventRec
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, rec.Timestamp)
+		if err != nil || t.Before(cutoff) {
+			continue
+		}
+		if filterMode != "" && rec.Mode != filterMode {
+			continue
+		}
+		if filterType != "" && rec.EventType != filterType {
+			continue
+		}
+		// backfill event_type for old records without it
+		if rec.EventType == "" {
+			if rec.ExitCode == 0 {
+				rec.EventType = "success"
+			} else {
+				rec.EventType = "crash"
+			}
+		}
+		events = append(events, rec)
+		typeCounts[rec.EventType]++
+		modeCounts[rec.Mode]++
+		totalRuns++
+		if rec.ExitCode != 0 {
+			totalFails++
+		}
+	}
+
+	if totalRuns == 0 {
+		fmt.Println("no events in the last", since)
+		return
+	}
+
+	// Build summary
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "📊 Event Log (%s)\n", since)
+	fmt.Fprintf(&sb, "Total: %d runs, %d failures (%.0f%% success)\n\n",
+		totalRuns, totalFails, float64(totalRuns-totalFails)/float64(totalRuns)*100)
+
+	// By event type
+	sb.WriteString("By type:\n")
+	for _, et := range []string{"success", "timeout", "login_expired", "rate_limit", "network_error", "api_error", "context_overflow", "oom_killed", "segfault", "crash"} {
+		if c, ok := typeCounts[et]; ok {
+			fmt.Fprintf(&sb, "  %-18s %d\n", et, c)
+		}
+	}
+
+	// By mode
+	sb.WriteString("\nBy mode:\n")
+	for _, m := range []string{"heartbeat", "cron", "evolve", "interactive"} {
+		if c, ok := modeCounts[m]; ok {
+			fmt.Fprintf(&sb, "  %-18s %d\n", m, c)
+		}
+	}
+
+	// Recent failures (last 5)
+	failCount := 0
+	sb.WriteString("\nRecent failures:\n")
+	for i := len(events) - 1; i >= 0 && failCount < 5; i-- {
+		e := events[i]
+		if e.ExitCode == 0 {
+			continue
+		}
+		errSnippet := e.Error
+		if len(errSnippet) > 60 {
+			errSnippet = errSnippet[:60] + "…"
+		}
+		fmt.Fprintf(&sb, "  %s  %-12s %-16s %s\n", e.Timestamp[:16], e.Mode, e.EventType, errSnippet)
+		failCount++
+	}
+	if failCount == 0 {
+		sb.WriteString("  (none)\n")
+	}
+
+	summary := sb.String()
+	fmt.Print(summary)
+
+	if notify {
+		if err := trySendTelegram(summary); err != nil {
+			fmt.Fprintf(os.Stderr, "telegram send failed: %v\n", err)
+		} else {
+			fmt.Fprintln(os.Stderr, "→ sent to Telegram")
+		}
+	}
 }

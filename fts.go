@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// FTS5 full-text search over daily notes and session summaries.
+// FTS5 full-text search over daily notes, session summaries, and session content.
 //
-// Two external-content FTS5 virtual tables are maintained:
+// Three external-content FTS5 virtual tables are maintained:
 //
 //   1. daily_notes_fts — indexes markdown files in workspace/memory/*.md
 //      (daily diary entries, heartbeat logs, day-by-day history).
@@ -24,14 +24,19 @@ import (
 //      column via external-content mode. No data duplication; triggers on
 //      the sessions table keep the index fresh.
 //
-// Both use the default unicode61 tokenizer, which handles CJK gracefully
+//   3. session_content_fts — indexes extracted user/assistant text from
+//      session JSONL files (both Claude Code and OpenClaw sessions).
+//      Enables keyword search over actual conversation content.
+//
+// All use the default unicode61 tokenizer, which handles CJK gracefully
 // via Unicode code-point splitting — verified in TestFTS5Available with
 // the Chinese phrase "心跳".
 //
 // Entry points:
-//   - ensureFTSSchemas(db)  — idempotent schema creation + triggers
-//   - indexDailyNotes()     — incremental reindex (mtime+hash skip)
-//   - searchFTS(query, ...) — unified search, BM25-ranked
+//   - ensureFTSSchemas(db)     — idempotent schema creation + triggers
+//   - indexDailyNotes()        — incremental reindex (mtime+hash skip)
+//   - indexSessionContent()    — parse JSONL, extract text, upsert
+//   - searchFTS(query, ...)    — unified search, BM25-ranked
 //   - fts-index / search-fts / fts-rebuild db subcommands
 
 // ─── schemas ────────────────────────────────────────────────────────────────
@@ -87,6 +92,36 @@ CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN
         VALUES('delete', old.rowid, old.path, old.summary);
 END;`
 
+const sessionContentSchema = `
+CREATE TABLE IF NOT EXISTS session_content (
+    path  TEXT PRIMARY KEY,
+    sid   TEXT NOT NULL,
+    text  TEXT NOT NULL,
+    mtime INTEGER NOT NULL,
+    hash  TEXT NOT NULL
+);`
+
+const sessionContentVirtual = `
+CREATE VIRTUAL TABLE IF NOT EXISTS session_content_fts
+    USING fts5(sid UNINDEXED, text, content=session_content, content_rowid=rowid);`
+
+const sessionContentTriggers = `
+CREATE TRIGGER IF NOT EXISTS session_content_ai AFTER INSERT ON session_content BEGIN
+    INSERT INTO session_content_fts(rowid, sid, text) VALUES (new.rowid, new.sid, new.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS session_content_au AFTER UPDATE ON session_content BEGIN
+    INSERT INTO session_content_fts(session_content_fts, rowid, sid, text)
+        VALUES('delete', old.rowid, old.sid, old.text);
+    INSERT INTO session_content_fts(rowid, sid, text)
+        VALUES (new.rowid, new.sid, new.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS session_content_ad AFTER DELETE ON session_content BEGIN
+    INSERT INTO session_content_fts(session_content_fts, rowid, sid, text)
+        VALUES('delete', old.rowid, old.sid, old.text);
+END;`
+
 // ensureFTSSchemas is called from openDB alongside ensureSoulSessionTable.
 // Idempotent: safe to call on every openDB.
 func ensureFTSSchemas(db *sql.DB) error {
@@ -120,6 +155,18 @@ func ensureFTSSchemas(db *sql.DB) error {
 	db.QueryRow(`SELECT CASE WHEN (SELECT COUNT(*) FROM sessions) > (SELECT COUNT(*) FROM session_summaries_fts) THEN 1 ELSE 0 END`).Scan(&needRebuild)
 	if needRebuild == 1 {
 		db.Exec(`INSERT INTO session_summaries_fts(session_summaries_fts) VALUES('rebuild')`)
+	}
+	// session_content base table + FTS + triggers
+	if _, err := db.Exec(sessionContentSchema); err != nil {
+		return fmt.Errorf("session_content table: %w", err)
+	}
+	if _, err := db.Exec(sessionContentVirtual); err != nil {
+		return fmt.Errorf("session_content_fts virtual: %w", err)
+	}
+	for _, stmt := range splitSQL(sessionContentTriggers) {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("session_content trigger: %w", err)
+		}
 	}
 	return nil
 }
@@ -227,16 +274,13 @@ func stripFrontmatter(s string) string {
 	}
 	// Find the closing ---
 	rest := s[4:]
-	idx := strings.Index(rest, "\n---\n")
-	if idx < 0 {
-		idx = strings.Index(rest, "\n---\r\n")
+	if i := strings.Index(rest, "\n---\n"); i >= 0 {
+		return strings.TrimLeft(rest[i+5:], "\r\n") // skip "\n---\n"
 	}
-	if idx < 0 {
-		return s // malformed, return as-is
+	if i := strings.Index(rest, "\n---\r\n"); i >= 0 {
+		return strings.TrimLeft(rest[i+6:], "\r\n") // skip "\n---\r\n"
 	}
-	// skip past the closing delimiter
-	body := rest[idx+5:]
-	return strings.TrimLeft(body, "\r\n")
+	return s // malformed, return as-is
 }
 
 // rebuildFTS drops and recreates the FTS indexes from their underlying tables.
@@ -256,21 +300,221 @@ func rebuildFTS() error {
 	if _, err := db.Exec(`INSERT INTO session_summaries_fts(session_summaries_fts) VALUES('rebuild')`); err != nil {
 		return fmt.Errorf("rebuild session_summaries_fts: %w", err)
 	}
+	// session_content_fts rebuild
+	if _, err := db.Exec(`INSERT INTO session_content_fts(session_content_fts) VALUES('rebuild')`); err != nil {
+		return fmt.Errorf("rebuild session_content_fts: %w", err)
+	}
 	return nil
+}
+
+// ─── session content indexing ──────────────────────────────────────────────
+
+// jsonlEvent is a minimal struct for parsing session JSONL lines.
+// Handles both OpenClaw format (type:"message", message.role:"user") and
+// Claude Code format (type:"user"/"assistant", message.role:"user"/"assistant").
+type jsonlEvent struct {
+	Type    string `json:"type"`
+	Message struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	} `json:"message"`
+}
+
+// isTextEvent returns true and the effective role for events containing searchable text.
+func (e *jsonlEvent) isTextEvent() (bool, string) {
+	switch e.Type {
+	case "message":
+		// OpenClaw format: type="message", role in message.role
+		if e.Message.Role == "user" || e.Message.Role == "assistant" {
+			return true, e.Message.Role
+		}
+	case "user":
+		// Claude Code format: type="user", message.role="user"
+		return true, "user"
+	case "assistant":
+		// Claude Code format: type="assistant", message.role="assistant"
+		return true, "assistant"
+	}
+	return false, ""
+}
+
+// jsonlTextBlock represents a single text block in a message content array.
+type jsonlTextBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// extractSessionText reads a JSONL file and extracts user/assistant text content.
+// Returns a concatenated string with role prefixes for searchable context.
+// Returns empty string if no text content found.
+func extractSessionText(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var buf strings.Builder
+	decoder := json.NewDecoder(f)
+	for decoder.More() {
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			continue
+		}
+		var ev jsonlEvent
+		if json.Unmarshal(raw, &ev) != nil {
+			continue
+		}
+		ok, role := ev.isTextEvent()
+		if !ok {
+			continue
+		}
+
+		// Content can be a string or an array of blocks
+		var texts []string
+		// Try as array first
+		var blocks []jsonlTextBlock
+		if json.Unmarshal(ev.Message.Content, &blocks) == nil {
+			for _, b := range blocks {
+				if b.Type == "text" && b.Text != "" {
+					texts = append(texts, b.Text)
+				}
+			}
+		} else {
+			// Try as plain string
+			var s string
+			if json.Unmarshal(ev.Message.Content, &s) == nil && s != "" {
+				texts = append(texts, s)
+			}
+		}
+
+		for _, t := range texts {
+			// Truncate individual text blocks to 2KB to keep index manageable
+			if len(t) > 2048 {
+				t = t[:2048]
+			}
+			buf.WriteString(role)
+			buf.WriteString(": ")
+			buf.WriteString(t)
+			buf.WriteString("\n")
+		}
+	}
+	return buf.String()
+}
+
+// indexSessionContent walks both Claude Code and OpenClaw session directories,
+// parses JSONL files, extracts text content, and indexes into session_content.
+// Unchanged files (matching hash) are skipped. Returns (added, skipped, err).
+func indexSessionContent() (int, int, error) {
+	var jsonlFiles []string
+
+	// Claude Code sessions
+	ccDir := filepath.Join(claudeConfigDir, "projects")
+	if entries, err := os.ReadDir(ccDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				// Could be a .jsonl file directly
+				if strings.HasSuffix(e.Name(), ".jsonl") {
+					jsonlFiles = append(jsonlFiles, filepath.Join(ccDir, e.Name()))
+				}
+				continue
+			}
+			dir := filepath.Join(ccDir, e.Name())
+			if subentries, err := os.ReadDir(dir); err == nil {
+				for _, se := range subentries {
+					if !se.IsDir() && strings.HasSuffix(se.Name(), ".jsonl") {
+						jsonlFiles = append(jsonlFiles, filepath.Join(dir, se.Name()))
+					}
+				}
+			}
+		}
+	}
+
+	// OpenClaw sessions — scan all agents
+	agentsDir := filepath.Join(appHome, "agents")
+	if entries, err := os.ReadDir(agentsDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			sessDir := filepath.Join(agentsDir, e.Name(), "sessions")
+			if subentries, err := os.ReadDir(sessDir); err == nil {
+				for _, se := range subentries {
+					if !se.IsDir() && strings.HasSuffix(se.Name(), ".jsonl") {
+						jsonlFiles = append(jsonlFiles, filepath.Join(sessDir, se.Name()))
+					}
+				}
+			}
+		}
+	}
+
+	if len(jsonlFiles) == 0 {
+		return 0, 0, nil
+	}
+
+	db, err := openDB()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer db.Close()
+
+	added, skipped := 0, 0
+	for _, path := range jsonlFiles {
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		mtime := info.ModTime().Unix()
+		hash, _ := fileHash(path)
+		if hash == "" {
+			continue
+		}
+
+		// Skip unchanged files
+		var existingHash string
+		var existingMtime int64
+		err = db.QueryRow(`SELECT hash, mtime FROM session_content WHERE path = ?`, path).Scan(&existingHash, &existingMtime)
+		if err == nil && existingHash == hash && existingMtime == mtime {
+			skipped++
+			continue
+		}
+
+		text := extractSessionText(path)
+		if text == "" {
+			skipped++
+			continue
+		}
+
+		// Extract session ID from filename (UUID without extension)
+		sid := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+
+		_, err = db.Exec(
+			`INSERT INTO session_content(path, sid, text, mtime, hash) VALUES(?,?,?,?,?)
+			 ON CONFLICT(path) DO UPDATE SET sid=excluded.sid, text=excluded.text, mtime=excluded.mtime, hash=excluded.hash`,
+			path, sid, text, mtime, hash,
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] fts session %s: %v\n", appName, filepath.Base(path), err)
+			continue
+		}
+		added++
+	}
+	return added, skipped, nil
 }
 
 // ─── search ────────────────────────────────────────────────────────────────
 
 type ftsHit struct {
-	Source  string  `json:"source"`            // "daily" | "session"
+	Source  string  `json:"source"`            // "daily" | "session" | "content"
 	Date    string  `json:"date,omitempty"`    // daily: "2026-04-09"
 	Path    string  `json:"path,omitempty"`    // session: session file path
+	Sid     string  `json:"sid,omitempty"`     // content: session ID
 	Snippet string  `json:"snippet"`           // FTS5 snippet() with [..] highlight
 	Rank    float64 `json:"rank"`              // BM25 score (lower = better match)
 }
 
-// searchFTS runs MATCH against one or both FTS5 virtual tables.
-// scope: "daily" | "session" | "both" (default).
+// searchFTS runs MATCH against one or more FTS5 virtual tables.
+// scope: "daily" | "session" | "content" | "both" (default = all three).
 // query: raw FTS5 MATCH expression. Users can pass a simple keyword or a
 //        full FTS5 query syntax (phrases, NEAR, column filters).
 // limit: max rows per source.
@@ -299,8 +543,8 @@ func searchFTS(query, scope string, limit int) ([]ftsHit, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	if scope == "" {
-		scope = "both"
+	if scope == "" || scope == "both" {
+		scope = "all" // "both" is legacy alias for searching all sources
 	}
 	match := sanitizeFTSQuery(query)
 	if match == "" {
@@ -314,7 +558,7 @@ func searchFTS(query, scope string, limit int) ([]ftsHit, error) {
 
 	var hits []ftsHit
 
-	if scope == "daily" || scope == "both" {
+	if scope == "daily" || scope == "all" {
 		rows, err := db.Query(`
 			SELECT date, snippet(daily_notes_fts, 1, '[', ']', ' … ', 24), rank
 			FROM daily_notes_fts
@@ -324,16 +568,21 @@ func searchFTS(query, scope string, limit int) ([]ftsHit, error) {
 		if err != nil {
 			return nil, fmt.Errorf("daily search: %w", err)
 		}
+		defer rows.Close()
 		for rows.Next() {
 			var h ftsHit
 			h.Source = "daily"
-			rows.Scan(&h.Date, &h.Snippet, &h.Rank)
+			if err := rows.Scan(&h.Date, &h.Snippet, &h.Rank); err != nil {
+				continue
+			}
 			hits = append(hits, h)
 		}
-		rows.Close()
+		if err := rows.Err(); err != nil {
+			return hits, fmt.Errorf("daily search iteration: %w", err)
+		}
 	}
 
-	if scope == "session" || scope == "both" {
+	if scope == "session" || scope == "all" {
 		rows, err := db.Query(`
 			SELECT path, snippet(session_summaries_fts, 1, '[', ']', ' … ', 24), rank
 			FROM session_summaries_fts
@@ -343,13 +592,42 @@ func searchFTS(query, scope string, limit int) ([]ftsHit, error) {
 		if err != nil {
 			return nil, fmt.Errorf("session search: %w", err)
 		}
+		defer rows.Close()
 		for rows.Next() {
 			var h ftsHit
 			h.Source = "session"
-			rows.Scan(&h.Path, &h.Snippet, &h.Rank)
+			if err := rows.Scan(&h.Path, &h.Snippet, &h.Rank); err != nil {
+				continue
+			}
 			hits = append(hits, h)
 		}
-		rows.Close()
+		if err := rows.Err(); err != nil {
+			return hits, fmt.Errorf("session search iteration: %w", err)
+		}
+	}
+
+	if scope == "content" || scope == "all" {
+		rows, err := db.Query(`
+			SELECT sid, snippet(session_content_fts, 1, '[', ']', ' … ', 24), rank
+			FROM session_content_fts
+			WHERE session_content_fts MATCH ?
+			ORDER BY rank
+			LIMIT ?`, match, limit)
+		if err != nil {
+			return nil, fmt.Errorf("content search: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var h ftsHit
+			h.Source = "content"
+			if err := rows.Scan(&h.Sid, &h.Snippet, &h.Rank); err != nil {
+				continue
+			}
+			hits = append(hits, h)
+		}
+		if err := rows.Err(); err != nil {
+			return hits, fmt.Errorf("content search iteration: %w", err)
+		}
 	}
 
 	return hits, nil
@@ -360,12 +638,23 @@ func searchFTS(query, scope string, limit int) ([]ftsHit, error) {
 // handleFTSIndex implements `weiran db fts-index`
 func handleFTSIndex() {
 	start := time.Now()
-	added, skipped, err := indexDailyNotes()
+
+	// Index daily notes
+	dAdded, dSkipped, err := indexDailyNotes()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] fts-index: %v\n", appName, err)
+		fmt.Fprintf(os.Stderr, "[%s] fts-index notes: %v\n", appName, err)
 		os.Exit(1)
 	}
-	fmt.Printf("fts-index: %d added/updated, %d skipped (%.2fs)\n", added, skipped, time.Since(start).Seconds())
+
+	// Index session content
+	sAdded, sSkipped, err := indexSessionContent()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] fts-index sessions: %v\n", appName, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("fts-index: notes %d/%d, sessions %d/%d (%.2fs)\n",
+		dAdded, dSkipped, sAdded, sSkipped, time.Since(start).Seconds())
 }
 
 // handleFTSRebuild implements `weiran db fts-rebuild`
@@ -377,10 +666,10 @@ func handleFTSRebuild() {
 	fmt.Println("fts-rebuild: ok")
 }
 
-// handleFTSSearch implements `weiran db search-fts <query> [--scope=both|daily|session] [--limit=N] [--json]`
+// handleFTSSearch implements `weiran db search-fts <query> [--scope=daily|session|content|both] [--limit=N] [--json]`
 func handleFTSSearch(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: "+appName+" db search-fts <query> [--scope=daily|session|both] [--limit=N] [--json]")
+		fmt.Fprintln(os.Stderr, "usage: "+appName+" db search-fts <query> [--scope=daily|session|content|both] [--limit=N] [--json]")
 		os.Exit(1)
 	}
 	scope := "both"
@@ -422,9 +711,16 @@ func handleFTSSearch(args []string) {
 		return
 	}
 	for _, h := range hits {
-		if h.Source == "daily" {
+		switch h.Source {
+		case "daily":
 			fmt.Printf("\n📅 [%s] rank=%.2f\n   %s\n", h.Date, h.Rank, h.Snippet)
-		} else {
+		case "content":
+			sidDisplay := h.Sid
+			if len(sidDisplay) > 12 {
+				sidDisplay = sidDisplay[:12]
+			}
+			fmt.Printf("\n💬 sid=%s rank=%.2f\n   %s\n", sidDisplay, h.Rank, h.Snippet)
+		default:
 			fmt.Printf("\n💬 %s rank=%.2f\n   %s\n", filepath.Base(h.Path), h.Rank, h.Snippet)
 		}
 	}
