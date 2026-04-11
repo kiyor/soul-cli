@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -225,6 +227,11 @@ func handleSpawn(args []string) {
 			appName, agent.ID, running.id, truncate(running.task, 60), running.started)
 		fmt.Fprintf(os.Stderr, "[%s] use '%s spawn list' to check status\n", appName, appName)
 		os.Exit(1)
+	}
+
+	// Try to delegate to server if running
+	if delegateSpawnToServer(agent, task, wait) {
+		return
 	}
 
 	fmt.Fprintf(os.Stderr, "[%s] spawning %s (%s)...\n", appName, agent.Name, agent.ID)
@@ -602,6 +609,87 @@ func readTail(path string, n int) string {
 		return string(data)
 	}
 	return string(data[len(data)-n:])
+}
+
+// delegateSpawnToServer tries to proxy the spawn to weiran server's session API.
+// Returns true if delegation succeeded (caller should return), false to fall back to subprocess.
+func delegateSpawnToServer(agent *agentDef, task string, wait bool) bool {
+	cfg := loadServerConfig()
+	addr := fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
+
+	// Probe server liveness
+	client := &http.Client{Timeout: 5 * time.Second}
+	healthResp, err := client.Get(addr + "/health")
+	if err != nil {
+		return false // server not running
+	}
+	healthResp.Body.Close()
+	if healthResp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	// Build session create payload
+	sessionName := fmt.Sprintf("spawn-%s-%s", agent.ID, time.Now().Format("0102-1504"))
+	payload := map[string]interface{}{
+		"name":            sessionName,
+		"project":         agent.Workspace,
+		"model":           agent.Model,
+		"initial_message": task,
+		"category":        "spawn",
+	}
+	body, _ := json.Marshal(payload)
+
+	req, _ := http.NewRequest("POST", addr+"/api/sessions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] server delegation failed, falling back: %v\n", appName, err)
+		return false
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		fmt.Fprintf(os.Stderr, "[%s] server returned %d: %s, falling back\n", appName, resp.StatusCode, string(respBody))
+		return false
+	}
+
+	// Parse response to get session ID
+	var result struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	json.Unmarshal(respBody, &result)
+
+	sid := result.ID
+	if len(sid) > 8 {
+		sid = sid[:8]
+	}
+	fmt.Fprintf(os.Stderr, "[%s] delegated spawn to server: session %s (%s)\n", appName, sid, result.Name)
+
+	// Record in spawns DB for `spawn list` compatibility
+	spawnID := recordSpawnStart(agent, task, result.Name, "")
+
+	if wait {
+		fmt.Fprintf(os.Stderr, "[%s] waiting for session %s to complete...\n", appName, sid)
+		waitClient := &http.Client{Timeout: 15 * time.Minute}
+		waitResp, err := waitClient.Get(fmt.Sprintf("%s/api/sessions/%s/wait?timeout=600", addr, result.ID))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] wait failed: %v\n", appName, err)
+			recordSpawnFinish(spawnID, 1, 0, "")
+			os.Exit(1)
+		}
+		defer waitResp.Body.Close()
+		waitBody, _ := io.ReadAll(waitResp.Body)
+		fmt.Fprintf(os.Stderr, "[%s] session completed: %s\n", appName, string(waitBody))
+		recordSpawnFinish(spawnID, 0, 0, "")
+	} else {
+		fmt.Printf("spawn_ok id=%d agent=%s session=%s server=true\n", spawnID, agent.ID, result.Name)
+	}
+
+	return true
 }
 
 func parseFloat(s string) float64 {
