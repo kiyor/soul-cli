@@ -150,6 +150,7 @@ func buildAgentPrompt(agent *agentDef) string {
 }
 
 // handleSpawn implements `weiran spawn <agent> "task"` [--wait]
+// and `weiran spawn --bare --model <model> --project <path> "task"` [--wait] [--name N]
 func handleSpawn(args []string) {
 	if len(args) >= 1 {
 		switch args[0] {
@@ -165,7 +166,62 @@ func handleSpawn(args []string) {
 		}
 	}
 
-	if len(args) < 2 {
+	// Parse flags from all args
+	wait := false
+	bare := false
+	bareModel := ""
+	bareName := ""
+	bareProject := ""
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--wait", "-w":
+			wait = true
+		case "--bare":
+			bare = true
+		case "--model":
+			if i+1 < len(args) {
+				i++
+				bareModel = args[i]
+			}
+		case "--name":
+			if i+1 < len(args) {
+				i++
+				bareName = args[i]
+			}
+		case "--project":
+			if i+1 < len(args) {
+				i++
+				bareProject = args[i]
+			}
+		default:
+			positional = append(positional, args[i])
+		}
+	}
+
+	// --bare mode: no agent needed, just model + task, no soul files
+	if bare {
+		if bareModel == "" {
+			fmt.Fprintf(os.Stderr, "[%s] --bare requires --model <model>\n", appName)
+			os.Exit(1)
+		}
+		if bareProject == "" {
+			fmt.Fprintf(os.Stderr, "[%s] --bare requires --project <path>\n", appName)
+			os.Exit(1)
+		}
+		if len(positional) < 1 {
+			fmt.Fprintf(os.Stderr, "usage: %s spawn --bare --model <model> --project <path> \"task\" [--wait] [--name <name>]\n", appName)
+			os.Exit(1)
+		}
+		task := positional[0]
+		if bareName == "" {
+			bareName = fmt.Sprintf("bare-%s", time.Now().Format("0102-1504"))
+		}
+		handleBareSpawn(bareName, bareModel, bareProject, task, wait)
+		return
+	}
+
+	if len(positional) < 2 {
 		// List available agents
 		agents, err := loadAgents()
 		if err != nil {
@@ -173,6 +229,7 @@ func handleSpawn(args []string) {
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "usage: %s spawn <agent> \"task\" [--wait]\n", appName)
+		fmt.Fprintf(os.Stderr, "       %s spawn --bare --model <model> --project <path> \"task\" [--wait]\n", appName)
 		fmt.Fprintf(os.Stderr, "       %s spawn list          — show recent spawns\n", appName)
 		fmt.Fprintf(os.Stderr, "       %s spawn log <id>      — view spawn output\n\n", appName)
 		fmt.Fprintln(os.Stderr, "Available agents:")
@@ -189,14 +246,8 @@ func handleSpawn(args []string) {
 		os.Exit(1)
 	}
 
-	agentQuery := args[0]
-	task := args[1]
-	wait := false
-	for _, a := range args[2:] {
-		if a == "--wait" || a == "-w" {
-			wait = true
-		}
-	}
+	agentQuery := positional[0]
+	task := positional[1]
 
 	agents, err := loadAgents()
 	if err != nil {
@@ -611,79 +662,162 @@ func readTail(path string, n int) string {
 	return string(data[len(data)-n:])
 }
 
-// delegateSpawnToServer tries to proxy the spawn to weiran server's session API.
-// Returns true if delegation succeeded (caller should return), false to fall back to subprocess.
-func delegateSpawnToServer(agent *agentDef, task string, wait bool) bool {
+// serverAPI provides common helpers for talking to the weiran server HTTP API.
+type serverAPI struct {
+	addr   string
+	token  string
+	client *http.Client
+}
+
+// newServerAPI creates a serverAPI and probes /api/health.
+// Returns nil if the server is not reachable or unhealthy.
+func newServerAPI() *serverAPI {
 	cfg := loadServerConfig()
 	addr := fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
-
-	// Probe server liveness
 	client := &http.Client{Timeout: 5 * time.Second}
-	healthResp, err := client.Get(addr + "/health")
+	resp, err := client.Get(addr + "/api/health")
 	if err != nil {
-		return false // server not running
+		return nil
 	}
-	healthResp.Body.Close()
-	if healthResp.StatusCode != http.StatusOK {
-		return false
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
 	}
+	return &serverAPI{addr: addr, token: cfg.Token, client: client}
+}
 
-	// Build session create payload
-	sessionName := fmt.Sprintf("spawn-%s-%s", agent.ID, time.Now().Format("0102-1504"))
-	payload := map[string]interface{}{
-		"name":            sessionName,
-		"project":         agent.Workspace,
-		"model":           agent.Model,
-		"initial_message": task,
-		"category":        "spawn",
+// sessionResult is the parsed response from POST /api/sessions.
+type sessionResult struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func (s sessionResult) short() string {
+	if len(s.ID) > 8 {
+		return s.ID[:8]
 	}
+	return s.ID
+}
+
+// createSession posts to /api/sessions and returns the parsed result.
+func (api *serverAPI) createSession(payload map[string]interface{}) (*sessionResult, error) {
 	body, _ := json.Marshal(payload)
-
-	req, _ := http.NewRequest("POST", addr+"/api/sessions", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", api.addr+"/api/sessions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("Authorization", "Bearer "+api.token)
 
-	resp, err := client.Do(req)
+	resp, err := api.client.Do(req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] server delegation failed, falling back: %v\n", appName, err)
-		return false
+		return nil, fmt.Errorf("create session: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		fmt.Fprintf(os.Stderr, "[%s] server returned %d: %s, falling back\n", appName, resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("server %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result sessionResult
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("invalid response: %w", err)
+	}
+	return &result, nil
+}
+
+// waitSession blocks until the session becomes idle or times out.
+// Client timeout (11min) > server timeout (10min) to avoid premature disconnect.
+func (api *serverAPI) waitSession(sessionID string) error {
+	waitClient := &http.Client{Timeout: 11 * time.Minute}
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/sessions/%s/wait?timeout=600", api.addr, sessionID), nil)
+	req.Header.Set("Authorization", "Bearer "+api.token)
+
+	resp, err := waitClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("wait: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("wait returned %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// handleBareSpawn creates a session without soul files via server API.
+// Used for pure-role tasks like code review where persona is noise.
+func handleBareSpawn(name, model, project, task string, wait bool) {
+	api := newServerAPI()
+	if api == nil {
+		fmt.Fprintf(os.Stderr, "[%s] --bare requires server to be running\n", appName)
+		os.Exit(1)
+	}
+
+	payload := map[string]interface{}{
+		"name":            name,
+		"model":           model,
+		"initial_message": task,
+		"soul_files":      false,
+		"category":        "spawn",
+	}
+	if project != "" {
+		payload["project"] = project
+	}
+
+	result, err := api.createSession(payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] bare spawn failed: %v\n", appName, err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "[%s] bare session created: %s (%s) model=%s\n", appName, result.short(), result.Name, model)
+
+	if wait {
+		fmt.Fprintf(os.Stderr, "[%s] waiting for session %s...\n", appName, result.short())
+		if err := api.waitSession(result.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] %v\n", appName, err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "[%s] session %s completed\n", appName, result.short())
+	}
+
+	// Output session ID for caller to use with `weiran session read`
+	fmt.Printf("%s\n", result.ID)
+}
+
+// delegateSpawnToServer tries to proxy the spawn to weiran server's session API.
+// Returns true if delegation succeeded (caller should return), false to fall back to subprocess.
+func delegateSpawnToServer(agent *agentDef, task string, wait bool) bool {
+	api := newServerAPI()
+	if api == nil {
 		return false
 	}
 
-	// Parse response to get session ID
-	var result struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+	sessionName := fmt.Sprintf("spawn-%s-%s", agent.ID, time.Now().Format("0102-1504"))
+	result, err := api.createSession(map[string]interface{}{
+		"name":            sessionName,
+		"project":         agent.Workspace,
+		"model":           agent.Model,
+		"initial_message": task,
+		"category":        "spawn",
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] server delegation failed, falling back: %v\n", appName, err)
+		return false
 	}
-	json.Unmarshal(respBody, &result)
 
-	sid := result.ID
-	if len(sid) > 8 {
-		sid = sid[:8]
-	}
-	fmt.Fprintf(os.Stderr, "[%s] delegated spawn to server: session %s (%s)\n", appName, sid, result.Name)
+	fmt.Fprintf(os.Stderr, "[%s] delegated spawn to server: session %s (%s)\n", appName, result.short(), result.Name)
 
 	// Record in spawns DB for `spawn list` compatibility
 	spawnID := recordSpawnStart(agent, task, result.Name, "")
 
 	if wait {
-		fmt.Fprintf(os.Stderr, "[%s] waiting for session %s to complete...\n", appName, sid)
-		waitClient := &http.Client{Timeout: 15 * time.Minute}
-		waitResp, err := waitClient.Get(fmt.Sprintf("%s/api/sessions/%s/wait?timeout=600", addr, result.ID))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] wait failed: %v\n", appName, err)
+		fmt.Fprintf(os.Stderr, "[%s] waiting for session %s to complete...\n", appName, result.short())
+		if err := api.waitSession(result.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] %v\n", appName, err)
 			recordSpawnFinish(spawnID, 1, 0, "")
 			os.Exit(1)
 		}
-		defer waitResp.Body.Close()
-		waitBody, _ := io.ReadAll(waitResp.Body)
-		fmt.Fprintf(os.Stderr, "[%s] session completed: %s\n", appName, string(waitBody))
+		fmt.Fprintf(os.Stderr, "[%s] session %s completed\n", appName, result.short())
 		recordSpawnFinish(spawnID, 0, 0, "")
 	} else {
 		fmt.Printf("spawn_ok id=%d agent=%s session=%s server=true\n", spawnID, agent.ID, result.Name)
