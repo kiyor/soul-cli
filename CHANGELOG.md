@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+### Session Rehydration (Server Restart Resilience)
+
+- **Graceful shutdown persistence**: `shutdownAll()` now saves `claude_session_id` and model for all active sessions before killing processes, marks them as `suspended` in DB
+- **Auto-rehydrate on startup**: `rehydrateSessions()` runs 3s after server start — finds `suspended`/`active` sessions (within 2h), resumes them via `--resume` with context-aware messages
+- **Restart initiator flow**: `POST /api/server/prepare-restart` + `{cli} session prepare-restart` lets a session mark itself as the restart trigger, receives a custom wake message after rehydration
+- **Bystander sessions**: Non-initiator sessions receive a server-restart warning ("in-flight tool calls were killed, do NOT assume they succeeded")
+- **DB migrations**: `status`, `rehydrate_message`, `model` columns added to `server_sessions`
+- **`destroySessionForShutdown()`**: Separate shutdown path that preserves `suspended` DB status (vs `destroySession` which marks `ended`)
+- **Stale session expiry**: `expireStaleRehydratables()` cleans up sessions older than `rehydrateMaxAge` (2h)
+
+### Image Upload + S3
+
+- **Image content blocks**: `sendMessage()` now detects `![alt](url)` in messages, reads images (local file or HTTP URL), converts to base64, and sends as Claude SDK image content blocks — LLM can actually "see" uploaded images
+- **S3 upload**: Upload handler uploads to Wasabi S3 (best-effort, fallback to local `/uploads/`). Config via `server.s3` in config.json
+- **S3 config**: `endpoint`, `bucket`, `region`, `prefix`, `profile` fields using AWS SDK v2
+
+### Session Wait
+
+- **`{cli} session wait <id>`**: Block until target session reaches idle/exited state (10min default timeout, customizable via `?timeout=` query param)
+- **Server-side waiters**: `GET /api/sessions/{id}/wait` uses channel-based notification — no polling, instant response on state change
+- **Session waiter notifications**: `setStatus()` fires waiter channels when session reaches `idle`/`stopped`/`error`
+
+### Spawn Delegation
+
+- **Server-aware spawn**: `weiran spawn` detects running server and delegates via `POST /api/sessions` instead of direct `exec` — sessions appear in WebUI with proper lifecycle tracking
+
+### Avatar & Welcome Image
+
+- **Config fields**: `avatarUrl`, `userAvatarUrl`, `welcomeImage` in config.json — served via `/api/health` for WebUI
+- **User avatar in chat**: User message bubbles display image avatar instead of letter initial
+- **Full-body welcome image**: Welcome page shows agent's full-body illustration when no session is selected (responsive, portrait-optimized)
+
+### Theme System (Web UI)
+
+- **6 themes**: Midnight (default dark), Light, Sakura (粉色), Terminal (modern IDE dark), ACNH (Animal Crossing 粉蓝), Morandi (粉绿莫兰迪)
+- **CSS variable architecture**: All colors use theme variables — `--badge-bg`, `--cost-color`, `--active-ov`, `--toggle-off`, `--hljs-theme`, etc.
+- **Dynamic highlight.js theme**: Code blocks switch between `github-dark` and `github` based on `--hljs-theme` variable
+- **Todo drawer**: Right-side slide-out panel for todo list (progress bar, themed styling)
+- **Touch-safe interactions**: Swipe gesture exclusion zones for hamburger button and interactive elements on mobile
+
+### Model Handling
+
+- **`mergeInitModel()`**: Preserves user-specified context window suffix (e.g. `[1m]`) when Claude Code init message reports the base model without it
+- **Model persistence**: `setSessionModel()` saves model to DB for rehydration, called on create/resume/setModel
+- **`resumeSession` model parameter**: Resume now accepts and applies model override
+
+### IPC Improvements
+
+- **IPC env injection in resume**: Resumed sessions now get `{CLI}_SESSION_ID`, `{CLI}_SERVER_URL`, `{CLI}_AUTH_TOKEN` env vars (previously only new sessions got them)
+- **Deduplicated IPC prefix**: Frontend extracts session name from `[From session xxx (name)]` prefix, displays in header, removes from body
+- **JSON detection**: IPC messages that are valid JSON rendered as formatted code blocks
+
+### Fixes
+
+- **Resume session model override**: `resumeSession` accepts optional `model` parameter for provider-specific routing on rehydration
+- **`message` alias in create API**: `POST /api/sessions` now accepts `message` as alias for `initial_message`
+- **Hardcoded dark colors → theme vars**: Model badges, cost badges, CWD badge, todo items, avatars all use CSS variables instead of hardcoded `rgba()`
+
 ## v1.11.0
 
 ### Session IPC (Inter-Process Communication)
