@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -132,6 +134,10 @@ type claudeProcess struct {
 	exitCode int
 	mu       sync.Mutex // protects stdin writes
 
+	// initReady is closed when the process emits its first "init" message,
+	// signaling it's ready to accept user messages on stdin.
+	initReady chan struct{}
+
 	// suppressClose, when true, makes bridgeStdout skip the trailing "close"
 	// SSE event on process exit. Used during intentional reload (e.g. chrome
 	// toggle) so the UI doesn't see "Session ended."
@@ -187,7 +193,7 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-cli")
 	// Use model-aware env injection: provider models route directly, Anthropic models use proxy
-	env = injectProxyEnvWithModel(env, "", opts.Model)
+	env = injectProxyEnvWithModel(env, opts.ServerSessionID, opts.Model)
 
 	// IPC env vars: inject session ID, server URL, and auth token so child
 	// processes can use `{cli} session send/read/search` CLI commands.
@@ -228,12 +234,13 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 	}
 
 	proc := &claudeProcess{
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  stdout,
-		stderr:  stderr,
-		done:    make(chan struct{}),
-		waiters: make(map[string]chan json.RawMessage),
+		cmd:       cmd,
+		stdin:     stdin,
+		stdout:    stdout,
+		stderr:    stderr,
+		done:      make(chan struct{}),
+		initReady: make(chan struct{}),
+		waiters:   make(map[string]chan json.RawMessage),
 	}
 
 	// Monitor process exit in background
@@ -250,6 +257,30 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 	}()
 
 	return proc, nil
+}
+
+// signalInit marks the process as initialized and ready to accept user messages.
+// Called by bridgeStdout when the init message is received. Safe to call multiple times.
+func (p *claudeProcess) signalInit() {
+	select {
+	case <-p.initReady:
+		// already signaled
+	default:
+		close(p.initReady)
+	}
+}
+
+// waitInit blocks until the process emits its init message or the timeout expires.
+// Returns true if init was received, false on timeout or process exit.
+func (p *claudeProcess) waitInit(timeout time.Duration) bool {
+	select {
+	case <-p.initReady:
+		return true
+	case <-p.done:
+		return false
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // sendMessage writes a user message to Claude Code's stdin.
@@ -522,7 +553,11 @@ func (p *claudeProcess) shutdown() {
 }
 
 // alive returns true if the process hasn't exited yet.
+// Safe to call on nil receiver (returns false).
 func (p *claudeProcess) alive() bool {
+	if p == nil {
+		return false
+	}
 	select {
 	case <-p.done:
 		return false
@@ -578,17 +613,11 @@ func filterEnv(env []string, prefix string) []string {
 	return out
 }
 
-// randHex returns n random hex bytes as a string.
+// randHex returns n random hex characters as a string.
 func randHex(n int) string {
-	b := make([]byte, n)
-	// Use PID + time as poor-man's random (no crypto needed for request IDs)
-	v := uint64(time.Now().UnixNano()) ^ uint64(os.Getpid())
-	for i := range b {
-		b[i] = "0123456789abcdef"[v&0xf]
-		v >>= 4
-		if v == 0 {
-			v = uint64(time.Now().UnixNano())
-		}
+	b := make([]byte, (n+1)/2)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
 	}
-	return string(b)
+	return hex.EncodeToString(b)[:n]
 }

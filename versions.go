@@ -226,7 +226,11 @@ func handleVersions() {
 		if info != nil {
 			sizeStr = fmt.Sprintf("%.1f MB", float64(info.Size())/1024/1024)
 		}
-		fmt.Printf("  .%d  %s  %s  %s\n", i, meta.Timestamp.Format("2006-01-02 15:04:05"), sizeStr, meta.Hash[:12])
+		hashStr := meta.Hash
+		if len(hashStr) > 12 {
+			hashStr = hashStr[:12]
+		}
+		fmt.Printf("  .%d  %s  %s  %s\n", i, meta.Timestamp.Format("2006-01-02 15:04:05"), sizeStr, hashStr)
 	}
 	if _, err := loadMeta(1); err != nil {
 		fmt.Println("  (no saved versions)")

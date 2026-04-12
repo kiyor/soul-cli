@@ -350,7 +350,9 @@ func (c *wsClient) handleMessage(raw []byte) {
 				"message": map[string]any{"role": "user", "content": msg.InitMsg},
 			})
 			sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
-			sess.process.sendMessage(msg.InitMsg)
+			if err := sess.process.sendMessage(msg.InitMsg); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] ws: create: failed to send initial message: %v\n", appName, err)
+			}
 		}
 		// Auto-subscribe client to the new session
 		c.mu.Lock()

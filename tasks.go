@@ -139,9 +139,9 @@ Do NOT push — the user decides when to push.
 - README.md: only if a user-visible feature was added/removed
 `))
 
-// hasSourceCode checks if the appDir contains buildable Go source (go.mod exists)
+// hasSourceCode checks if the srcDir contains buildable Go source (go.mod exists)
 func hasSourceCode() bool {
-	_, err := os.Stat(filepath.Join(appDir, "go.mod"))
+	_, err := os.Stat(filepath.Join(srcDir, "go.mod"))
 	return err == nil
 }
 
@@ -178,7 +178,7 @@ func evolveTask() string {
 	soulStep := "4"  // soul step after probing
 	wrapStep := "5"
 	if isDev {
-		cData := map[string]string{"SrcDir": appDir, "CLI": appName}
+		cData := map[string]string{"SrcDir": srcDir, "CLI": appName}
 		var cBuf bytes.Buffer
 		codeEvolutionBlock.Execute(&cBuf, cData)
 		codeBlock = cBuf.String()

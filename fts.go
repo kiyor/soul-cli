@@ -201,6 +201,10 @@ func migrateFTSSegColumns(db *sql.DB) {
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] migrateFTSSegColumns: iteration error: %v\n", appName, err)
+		return
+	}
 	if colCount == 0 || !needsMigration {
 		return // table doesn't exist or already migrated
 	}
@@ -251,24 +255,33 @@ func backfillSegColumns(db *sql.DB) {
 			fmt.Fprintf(os.Stderr, "[%s] backfill %s: query failed: %v\n", appName, table, err)
 			return
 		}
-		defer rows.Close()
-		var updated, failed int
+		// Read all rows into memory first to avoid SQLite busy errors
+		// from concurrent read cursor + write on the same connection.
+		type rowData struct {
+			rowid   int64
+			content string
+		}
+		var pending []rowData
 		for rows.Next() {
-			var rowid int64
-			var content string
-			if err := rows.Scan(&rowid, &content); err != nil {
-				failed++
+			var rd rowData
+			if err := rows.Scan(&rd.rowid, &rd.content); err != nil {
 				continue
 			}
-			seg := segmentText(content)
-			if _, err := db.Exec(fmt.Sprintf(`UPDATE %s SET %s = ? WHERE rowid = ?`, table, segCol), seg, rowid); err != nil {
+			pending = append(pending, rd)
+		}
+		if err := rows.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] backfill %s: iteration error: %v\n", appName, table, err)
+		}
+		rows.Close()
+
+		var updated, failed int
+		for _, rd := range pending {
+			seg := segmentText(rd.content)
+			if _, err := db.Exec(fmt.Sprintf(`UPDATE %s SET %s = ? WHERE rowid = ?`, table, segCol), seg, rd.rowid); err != nil {
 				failed++
 			} else {
 				updated++
 			}
-		}
-		if err := rows.Err(); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] backfill %s: iteration error: %v\n", appName, table, err)
 		}
 		if failed > 0 {
 			fmt.Fprintf(os.Stderr, "[%s] backfill %s: %d updated, %d failed\n", appName, table, updated, failed)
@@ -781,8 +794,8 @@ func handleFTSRebuild() {
 		fmt.Fprintf(os.Stderr, "[%s] fts-rebuild open: %v\n", appName, err)
 		os.Exit(1)
 	}
+	defer db.Close()
 	backfillSegColumns(db)
-	db.Close()
 
 	if err := rebuildFTS(); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] fts-rebuild: %v\n", appName, err)

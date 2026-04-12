@@ -483,6 +483,9 @@ func mergeInitModel(current, fromInit string) string {
 	if fromInit == "" {
 		return current
 	}
+	if current == "" {
+		return fromInit
+	}
 	// If current model has a bracketed suffix (e.g. "[1m]") and init model is
 	// the same base without the suffix, keep the current (more specific) value.
 	if idx := strings.Index(current, "["); idx > 0 {
@@ -490,6 +493,15 @@ func mergeInitModel(current, fromInit string) string {
 		if strings.EqualFold(base, fromInit) || strings.EqualFold(current, fromInit) {
 			return current
 		}
+	}
+	// If current has a provider prefix (e.g. "openai/gpt-5") and fromInit
+	// doesn't match the model portion, preserve current — it was explicitly set.
+	if strings.Contains(current, "/") {
+		return current
+	}
+	// If current equals fromInit (case-insensitive), no change needed.
+	if strings.EqualFold(current, fromInit) {
+		return current
 	}
 	return fromInit
 }
@@ -712,9 +724,15 @@ func trackClaudeExit(exitCode int, duration time.Duration, errMsg, stderr string
 	if err != nil {
 		return
 	}
-	f.Write(data)
-	fi, _ := f.Stat()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return
+	}
+	fi, err := f.Stat()
 	f.Close()
+	if err != nil {
+		return
+	}
 
 	// rotate only if file is large enough to possibly exceed 1000 lines
 	// (average metric line ~150 bytes, so 1000 lines ~150KB)
@@ -734,7 +752,9 @@ func rotateMetrics(path string, maxLines, keepLines int) {
 		return
 	}
 	kept := lines[len(lines)-keepLines:]
-	os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0644)
+	if err := os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] metrics rotate write failed: %v\n", appName, err)
+	}
 }
 
 // crashInfo describes a recent crash for crash recovery.

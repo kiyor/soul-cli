@@ -291,7 +291,10 @@ func migrateAppData(legacyDir, newDir string) {
 			if err != nil {
 				continue
 			}
-			info, _ := os.Stat(src)
+			info, err := os.Stat(src)
+			if err != nil {
+				continue
+			}
 			if os.WriteFile(dst, data, info.Mode()) == nil {
 				os.Remove(src)
 				migrated++

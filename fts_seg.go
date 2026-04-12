@@ -87,6 +87,12 @@ func segmentLine(line string) string {
 				}
 				if k > 0 {
 					result.WriteByte(' ')
+				} else if result.Len() > 0 {
+					// Ensure space between preceding non-CJK text and first CJK word
+					s := result.String()
+					if s[len(s)-1] != ' ' {
+						result.WriteByte(' ')
+					}
 				}
 				result.WriteString(w)
 			}

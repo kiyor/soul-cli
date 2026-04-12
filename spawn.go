@@ -205,6 +205,13 @@ func handleSpawn(args []string) {
 			fmt.Fprintf(os.Stderr, "[%s] --bare requires --model <model>\n", appName)
 			os.Exit(1)
 		}
+		// Fuzzy resolve model name (e.g. "glm" → "zai/glm-5.1")
+		if resolved, err := resolveFuzzyModel(bareModel); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] %v\n", appName, err)
+			os.Exit(1)
+		} else if resolved != "" {
+			bareModel = resolved
+		}
 		if bareProject == "" {
 			fmt.Fprintf(os.Stderr, "[%s] --bare requires --project <path>\n", appName)
 			os.Exit(1)
@@ -393,7 +400,10 @@ fi
 	)
 
 	wrapperPath := filepath.Join(tmpDir, "run.sh")
-	os.WriteFile(wrapperPath, []byte(wrapperScript), 0700)
+	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] failed to write wrapper script: %v\n", appName, err)
+		os.Exit(1)
+	}
 
 	// Launch wrapper with setsid so it survives parent exit
 	bgCmd := exec.Command("/bin/sh", wrapperPath)
@@ -728,7 +738,7 @@ func (api *serverAPI) createSession(payload map[string]interface{}) (*sessionRes
 // Client timeout (11min) > server timeout (10min) to avoid premature disconnect.
 func (api *serverAPI) waitSession(sessionID string) error {
 	waitClient := &http.Client{Timeout: 11 * time.Minute}
-	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/sessions/%s/wait?timeout=600", api.addr, sessionID), nil)
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/sessions/%s/wait?timeout=600s", api.addr, sessionID), nil)
 	req.Header.Set("Authorization", "Bearer "+api.token)
 
 	resp, err := waitClient.Do(req)

@@ -59,12 +59,10 @@ type s3Config struct {
 var (
 	s3ClientOnce   sync.Once
 	s3ClientCached *s3.Client
-	s3ConfigCached s3Config
 )
 
 func getS3Client(cfg s3Config) *s3.Client {
 	s3ClientOnce.Do(func() {
-		s3ConfigCached = cfg
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -294,7 +292,7 @@ func handleServer(args []string) {
 			"app":           appName,
 			"agent_name":    agentName,
 			"version":       buildVersion,
-			"sessions":      len(sm.sessions),
+			"sessions":      len(sm.listSessions()),
 			"uptime":        time.Since(serverStartTime).String(),
 			"sniff_enabled": activeProxyPort > 0,
 			"sniff_port":    activeProxyPort,
@@ -527,18 +525,23 @@ func handleServer(args []string) {
 
 		fmt.Fprintf(os.Stderr, "[%s] server: session created: %s (%s)\n", appName, shortID(sess.ID), sess.Name)
 
-		// Send initial message if provided
+		// Send initial message if provided — wait for Claude Code to emit init
+		// before writing to stdin (500ms hardcoded sleep was unreliable for slow
+		// providers like GPT/MiniMax that need proxy startup time).
 		if req.InitialMessage != "" {
-			// Wait briefly for Claude Code to initialize
-			time.Sleep(500 * time.Millisecond)
-			userEvent, _ := json.Marshal(map[string]any{
-				"type":    "user",
-				"message": map[string]any{"role": "user", "content": req.InitialMessage},
-			})
-			sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
-			if err := sess.process.sendMessage(req.InitialMessage); err != nil {
-				fmt.Fprintf(os.Stderr, "[%s] server: failed to send initial message: %v\n", appName, err)
-			}
+			go func() {
+				if !sess.process.waitInit(30 * time.Second) {
+					fmt.Fprintf(os.Stderr, "[%s] server: init timeout for %s, sending initial message anyway\n", appName, shortID(sess.ID))
+				}
+				userEvent, _ := json.Marshal(map[string]any{
+					"type":    "user",
+					"message": map[string]any{"role": "user", "content": req.InitialMessage},
+				})
+				sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
+				if err := sess.process.sendMessage(req.InitialMessage); err != nil {
+					fmt.Fprintf(os.Stderr, "[%s] server: failed to send initial message to %s: %v\n", appName, shortID(sess.ID), err)
+				}
+			}()
 		}
 
 		writeJSON(w, http.StatusCreated, sess.snapshot())
@@ -615,7 +618,7 @@ func handleServer(args []string) {
 		sess.broadcaster.mu.RUnlock()
 
 		if len(snippets) == 0 {
-			writeJSON(w, http.StatusOK, map[string]string{"error": "no conversation context for auto-rename"})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no conversation context for auto-rename"})
 			return
 		}
 		context := strings.Join(snippets, "\n---\n")
@@ -624,7 +627,7 @@ func handleServer(args []string) {
 		}
 		title := callHaikuForTitle(context)
 		if title == "" {
-			writeJSON(w, http.StatusOK, map[string]string{"error": "no title generated"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "no title generated"})
 			return
 		}
 		sess.mu.Lock()
@@ -1651,7 +1654,11 @@ func uploadToS3(cfg s3Config, localPath string, s3Key string, contentType string
 		prefix += "/"
 	}
 
-	stat, _ := file.Stat()
+	stat, err := file.Stat()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] s3: stat failed: %v\n", appName, err)
+		return ""
+	}
 	fullKey := prefix + strings.TrimLeft(s3Key, "/")
 	_, err = client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(cfg.Bucket),

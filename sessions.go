@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -402,7 +401,7 @@ func sessionMatchesQuery(s sessionInfo, q string) bool {
 
 func loadSummaryMap() map[string]string {
 	m := make(map[string]string)
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := openDB()
 	if err != nil {
 		return m
 	}

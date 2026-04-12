@@ -278,15 +278,15 @@ func (tb *telegramBridge) processMessage(chat *tgChat, text string) {
 	tb.bridgeMu.Unlock()
 
 	busyCh := make(chan struct{})
+	busyOnce := &sync.Once{}
+	closeBusy := func() {
+		busyOnce.Do(func() { close(busyCh) })
+	}
 	chat.busy = busyCh
 	if bridge != nil {
-		bridge.onTurnDone = func() {
-			select {
-			case <-busyCh:
-			default:
-				close(busyCh)
-			}
-		}
+		bridge.mu.Lock()
+		bridge.onTurnDone = closeBusy
+		bridge.mu.Unlock()
 	}
 
 	// Send typing indicator
@@ -311,12 +311,7 @@ func (tb *telegramBridge) processMessage(chat *tgChat, text string) {
 
 	if err := sess.process.sendMessage(msgToSend); err != nil {
 		im.SendMessage(tb.token, chatID, "Send failed: "+err.Error())
-		// Unblock queue
-		select {
-		case <-busyCh:
-		default:
-			close(busyCh)
-		}
+		closeBusy() // unblock queue consumer safely
 		return
 	}
 
@@ -731,8 +726,11 @@ func (b *tgOutputBridge) handleEvent(ev sseEvent) {
 		b.turnCount++
 
 		// Signal that Claude is done with this turn (unblocks queue consumer)
-		if b.onTurnDone != nil {
-			b.onTurnDone()
+		b.mu.Lock()
+		cb := b.onTurnDone
+		b.mu.Unlock()
+		if cb != nil {
+			cb()
 		}
 
 		// Periodic summary
@@ -742,8 +740,11 @@ func (b *tgOutputBridge) handleEvent(ev sseEvent) {
 
 	case "close":
 		b.flush()
-		if b.onTurnDone != nil {
-			b.onTurnDone()
+		b.mu.Lock()
+		cb := b.onTurnDone
+		b.mu.Unlock()
+		if cb != nil {
+			cb()
 		}
 	}
 }

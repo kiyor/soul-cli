@@ -918,6 +918,31 @@ func writePrompt(result buildPromptResult) {
 	}
 }
 
+// writePromptForSession writes the prompt to a per-session file and returns the path.
+// Unlike writePrompt (which writes to the global promptOut), this is safe for concurrent
+// server sessions — each session gets its own file under sessionDir.
+func writePromptForSession(sessionID string, result buildPromptResult) string {
+	initSessionDir()
+	path := filepath.Join(sessionDir, shortID(sessionID)+"-prompt.md")
+	content := result.content
+
+	// Log token stats (same as writePrompt but without os.Exit on error)
+	tokens := estimateTokens(content)
+	if tokens > promptTokenLimit {
+		fmt.Fprintf(os.Stderr, "[%s] ⚠ session %s prompt too large: ~%dk tokens (limit %dk)\n",
+			appName, shortID(sessionID), tokens/1000, promptTokenLimit/1000)
+	} else {
+		fmt.Fprintf(os.Stderr, "[%s] session %s prompt: ~%dk / %dk tokens\n",
+			appName, shortID(sessionID), tokens/1000, promptTokenLimit/1000)
+	}
+
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] failed to write session prompt file: %v\n", appName, err)
+		return ""
+	}
+	return path
+}
+
 // defaultBootProtocol returns the built-in boot protocol used when BOOT.md doesn't exist
 func defaultBootProtocol() string {
 	return fmt.Sprintf(`# Boot Protocol

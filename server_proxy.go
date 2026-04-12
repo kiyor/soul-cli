@@ -590,9 +590,14 @@ func startProxyServer(cfg proxyConfig) {
 					if isStream {
 						req.Header.Set("X-Proxy-Stream", "1")
 					}
-					req.Body = io.NopCloser(bytes.NewReader(body))
-					req.ContentLength = int64(len(body))
+				} else {
+					body = nil // ensure we restore an empty body below
 				}
+				if body == nil {
+					body = []byte{}
+				}
+				req.Body = io.NopCloser(bytes.NewReader(body))
+				req.ContentLength = int64(len(body))
 			}
 
 			req.URL.Scheme = upstream.Scheme

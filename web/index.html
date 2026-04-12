@@ -703,6 +703,12 @@ body{
 }
 .todo-tab:hover{opacity:1}
 .todo-tab.visible{display:block}
+.todo-session-group{padding:8px;margin:4px 0;border-radius:8px;background:var(--bg2);cursor:pointer;transition:background .2s}
+.todo-session-group:hover{background:var(--bg3,var(--bg2))}
+.todo-session-group.active{border-left:3px solid var(--accent2);padding-left:5px}
+.todo-session-header{display:flex;justify-content:space-between;align-items:center;padding-bottom:4px;margin-bottom:4px;border-bottom:1px solid rgba(128,128,128,.15)}
+.todo-session-name{font-size:11px;font-weight:600;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px}
+.todo-session-pct{font-size:10px;color:var(--muted2);font-family:var(--mono)}
 @media(max-width:768px){
   .todo-drawer{width:min(280px,80vw)}
 }
@@ -2175,6 +2181,8 @@ function handleSessionsUpdate(list){
     el.innerHTML=`<div class="si-top"><span class="si-name">${esc(s.name||shortId(s.id))}</span><span class="si-dot ${s.status}"></span></div><div class="si-meta"><span class="${modelClass(s.model)}">${modelDisplay}</span><span>${s.status}</span><span>${s.num_turns||0}t</span>${cost?'<span>'+cost+'</span>':''}</div><div class="si-actions"><button class="si-rename" onclick="event.stopPropagation();promptRename('${s.id}','${esc(s.name||'')}')">&#9998;</button><button class="si-del" onclick="openDestroySheet('${s.id}')">&times;</button></div>`;
   });
   existing.forEach((el,id)=>{if(!newIds.has(id))el.remove()});
+  // Sync todo drawer from all sessions' server-side todos
+  syncAllSessionTodos(list);
   // Refresh history tab so new/renamed sessions appear there too
   scheduleHistoryRefresh();
 }
@@ -3159,37 +3167,100 @@ function closeSidebar(){
   setTimeout(()=>{if(!sb.classList.contains('open')&&isMobile)sb.style.display='none'},300);
 }
 
-// ── Todo Drawer ──
+// ── Todo Drawer (cross-session aggregated) ──
 let currentTodos=[];
+const allSessionTodos=new Map(); // sessionId → {name, todos[]}
 
 function toggleTodoDrawer(){
   const d=document.getElementById('todo-drawer');
   d.classList.toggle('open');
 }
 
+// Called from addToolUseMsg for the active session (real-time)
 function updateTodoDrawer(todos){
   currentTodos=todos||[];
+  if(activeSessionId){
+    if(currentTodos.length){
+      const s=sessions[activeSessionId];
+      allSessionTodos.set(activeSessionId,{name:s&&s.name||shortId(activeSessionId),todos:currentTodos});
+    }else{
+      allSessionTodos.delete(activeSessionId);
+    }
+  }
+  renderTodoDrawerAggregated();
+}
+
+// Called from handleSessionsUpdate — sync todos from all sessions via server metadata
+function syncAllSessionTodos(list){
+  const activeIds=new Set();
+  (list||[]).forEach(s=>{
+    activeIds.add(s.id);
+    if(s.todos&&Array.isArray(s.todos)&&s.todos.length){
+      allSessionTodos.set(s.id,{name:s.name||shortId(s.id),todos:s.todos});
+    }else if(!allSessionTodos.has(s.id)){
+      // don't overwrite client-side state with empty server state
+    }else if(s.todos===null||s.todos===undefined){
+      // server cleared todos
+    }
+  });
+  // Remove todos for sessions that no longer exist
+  for(const id of allSessionTodos.keys()){
+    if(!activeIds.has(id))allSessionTodos.delete(id);
+  }
+  renderTodoDrawerAggregated();
+}
+
+function renderTodoDrawerAggregated(){
   const tab=document.getElementById('todo-tab');
   const body=document.getElementById('todo-drawer-body');
-  if(!currentTodos.length){
+
+  // Collect all sessions with todos
+  const entries=[];
+  for(const [sid,data] of allSessionTodos){
+    if(data.todos&&data.todos.length)entries.push({sid,...data});
+  }
+
+  if(!entries.length){
     tab.classList.remove('visible');
     body.innerHTML='<div class="todo-drawer-empty">暂无任务</div>';
     return;
   }
   tab.classList.add('visible');
-  const total=currentTodos.length;
-  const done=currentTodos.filter(t=>t.status==='completed').length;
-  const pct=total?Math.round(done/total*100):0;
-  let html=`<div class="todo-progress"><div class="todo-bar"><div class="todo-bar-fill" style="width:${pct}%"></div></div><span class="todo-pct">${done}/${total}</span></div>`;
-  html+='<div class="todo-list">';
-  currentTodos.forEach(t=>{
+
+  // Calculate global progress
+  let totalAll=0,doneAll=0;
+  entries.forEach(e=>{totalAll+=e.todos.length;doneAll+=e.todos.filter(t=>t.status==='completed').length});
+  const pctAll=totalAll?Math.round(doneAll/totalAll*100):0;
+
+  let html=`<div class="todo-progress"><div class="todo-bar"><div class="todo-bar-fill" style="width:${pctAll}%"></div></div><span class="todo-pct">${doneAll}/${totalAll}</span></div>`;
+
+  // If only one session has todos, render flat (backward compat)
+  if(entries.length===1){
+    html+=renderTodoItems(entries[0].todos);
+  }else{
+    // Multiple sessions — group by session
+    entries.forEach(e=>{
+      const isActive=e.sid===activeSessionId;
+      const done=e.todos.filter(t=>t.status==='completed').length;
+      html+=`<div class="todo-session-group${isActive?' active':''}" onclick="selectSession('${e.sid}')">`;
+      html+=`<div class="todo-session-header"><span class="todo-session-name">${esc(e.name)}</span><span class="todo-session-pct">${done}/${e.todos.length}</span></div>`;
+      html+=renderTodoItems(e.todos);
+      html+=`</div>`;
+    });
+  }
+  body.innerHTML=html;
+}
+
+function renderTodoItems(todos){
+  let html='<div class="todo-list">';
+  todos.forEach(t=>{
     const cls=t.status||'pending';
     const icon=cls==='completed'?'✓':cls==='in_progress'?'◉':'○';
     const activeForm=t.activeForm&&cls==='in_progress'?`<div class="todo-active">${esc(t.activeForm)}</div>`:'';
     html+=`<div class="todo-item ${cls}"><div class="todo-icon">${icon}</div><div class="todo-text"><div class="todo-content">${esc(t.content||'')}</div>${activeForm}</div></div>`;
   });
   html+='</div>';
-  body.innerHTML=html;
+  return html;
 }
 
 // ── Toast ──

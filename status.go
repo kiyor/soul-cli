@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -106,7 +105,7 @@ func handleStatus() {
 
 	// 3. Session DB
 	fmt.Println("\n── Session DB ──")
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := openDB()
 	if err == nil {
 		defer db.Close()
 		var total, withSummary int
@@ -259,7 +258,7 @@ func handleDoctor() {
 
 	// 6. DB integrity
 	fmt.Println("\n── Session DB ──")
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := openDB()
 	if err != nil {
 		warn("failed to open DB: %v", err)
 	} else {

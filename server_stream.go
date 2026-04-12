@@ -179,7 +179,7 @@ func serveSSE(w http.ResponseWriter, r *http.Request, broadcaster *sseBroadcaste
 // bridgeStdout reads Claude Code stdout and broadcasts as SSE events.
 // Also updates session status based on message types.
 // Blocks until the process stdout is closed.
-func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage)) {
+func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage)) {
 	proc.readLines(func(msgType string, raw json.RawMessage) {
 		// Route control_response to sync waiters
 		if msgType == "control_response" {
@@ -189,16 +189,24 @@ func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(
 		event := mapEventType(msgType, raw)
 		broadcaster.broadcast(sseEvent{Event: event, Data: raw})
 
-		if msgType == "system" && onInit != nil {
+		if msgType == "system" {
 			var peek struct {
 				Subtype string `json:"subtype"`
 			}
 			if json.Unmarshal(raw, &peek) == nil && peek.Subtype == "init" {
-				onInit(raw)
+				proc.signalInit()
+				if onInit != nil {
+					onInit(raw)
+				}
 			}
 		}
 		if msgType == "result" && onResult != nil {
 			onResult(raw)
+		}
+
+		// Detect TodoWrite tool_use and extract todos for cross-session broadcast
+		if event == "tool_use" && onTodos != nil {
+			extractTodoWrite(raw, onTodos)
 		}
 	})
 
@@ -209,6 +217,33 @@ func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(
 			Event: "close",
 			Data:  []byte(`{"reason":"process_exited"}`),
 		})
+	}
+}
+
+// extractTodoWrite parses a tool_use event for TodoWrite and calls onTodos with the todos array.
+func extractTodoWrite(raw json.RawMessage, onTodos func(json.RawMessage)) {
+	var peek struct {
+		Message struct {
+			Content []struct {
+				Type  string          `json:"type"`
+				Name  string          `json:"name"`
+				Input json.RawMessage `json:"input"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(raw, &peek) != nil {
+		return
+	}
+	for _, c := range peek.Message.Content {
+		if c.Type == "tool_use" && c.Name == "TodoWrite" {
+			var inp struct {
+				Todos json.RawMessage `json:"todos"`
+			}
+			if json.Unmarshal(c.Input, &inp) == nil && len(inp.Todos) > 0 {
+				onTodos(inp.Todos)
+			}
+			return
+		}
 	}
 }
 

@@ -15,19 +15,19 @@ import (
 
 var serverDB *sql.DB
 var serverDBOnce sync.Once
-var serverDBMu sync.Mutex // serialize writes to SQLite
+var serverDBMu sync.Mutex  // serialize writes to SQLite
+var serverDBErr error       // persisted across calls so sync.Once + error works correctly
 
 func openServerDB() (*sql.DB, error) {
-	var err error
 	serverDBOnce.Do(func() {
 		dbFile := appDir + "/server_sessions.db"
-		serverDB, err = sql.Open("sqlite", dbFile)
-		if err != nil {
+		serverDB, serverDBErr = sql.Open("sqlite", dbFile)
+		if serverDBErr != nil {
 			return
 		}
 		serverDB.Exec(`PRAGMA journal_mode=WAL`)
 		serverDB.Exec(`PRAGMA busy_timeout=5000`)
-		_, err = serverDB.Exec(`CREATE TABLE IF NOT EXISTS server_sessions (
+		_, serverDBErr = serverDB.Exec(`CREATE TABLE IF NOT EXISTS server_sessions (
 			session_id   TEXT PRIMARY KEY,
 			name         TEXT NOT NULL DEFAULT '',
 			renamed      INTEGER NOT NULL DEFAULT 0,
@@ -36,7 +36,7 @@ func openServerDB() (*sql.DB, error) {
 			created_at   TEXT NOT NULL,
 			updated_at   TEXT NOT NULL
 		)`)
-		if err != nil {
+		if serverDBErr != nil {
 			return
 		}
 		// Migration: add chrome_enabled column (idempotent — ignore "duplicate column" error)
@@ -76,8 +76,8 @@ func openServerDB() (*sql.DB, error) {
 		)`)
 		serverDB.Exec(`CREATE INDEX IF NOT EXISTS idx_si_pair ON session_interactions(from_id, to_id)`)
 	})
-	if err != nil {
-		return nil, err
+	if serverDBErr != nil {
+		return nil, serverDBErr
 	}
 	return serverDB, nil
 }

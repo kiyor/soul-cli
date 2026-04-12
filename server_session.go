@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -48,7 +47,8 @@ type serverSession struct {
 	SoulEnabled   bool      `json:"soul_enabled"`
 	ChromeEnabled bool      `json:"chrome_enabled"`
 	ReplaceSoul   bool      `json:"replace_soul"`     // 本我模式 — use --system-prompt-file (replace) instead of --append-system-prompt-file
-	GalID         string    `json:"gal_id,omitempty"` // GAL save id this session was resumed from
+	GalID         string          `json:"gal_id,omitempty"` // GAL save id this session was resumed from
+	Todos         json.RawMessage `json:"todos,omitempty"`  // latest TodoWrite state (broadcast to all clients)
 
 	process     *claudeProcess
 	broadcaster *sseBroadcaster
@@ -64,6 +64,17 @@ func (s *serverSession) touch() {
 	s.mu.Lock()
 	s.LastActive = time.Now()
 	s.mu.Unlock()
+}
+
+// setTodos stores the latest TodoWrite state and broadcasts session list update.
+func (s *serverSession) setTodos(todos json.RawMessage) {
+	s.mu.Lock()
+	s.Todos = todos
+	hub := s.hub
+	s.mu.Unlock()
+	if hub != nil {
+		hub.notifySessions()
+	}
 }
 
 // setStatus atomically updates session status and notifies WS clients.
@@ -135,6 +146,134 @@ func (s *serverSession) snapshot() map[string]any {
 	}
 }
 
+// ── Session Lifecycle Helpers ──
+
+// makeOnInit returns the onInit callback for bridgeStdout.
+// source: "server-create", "server-resume" → full init (record agent, sync CC name).
+// source: "" → reload init (only sync ClaudeSID/Model, notify hub).
+func makeOnInit(sess *serverSession, source string) func(json.RawMessage) {
+	return func(raw json.RawMessage) {
+		var init InitMessage
+		if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
+			sess.mu.Lock()
+			sess.ClaudeSID = init.SessionID
+			if init.Model != "" {
+				sess.Model = mergeInitModel(sess.Model, init.Model)
+			}
+			sess.mu.Unlock()
+
+			if source != "" {
+				// Full init: record mappings and sync CC name
+				setClaudeSessionID(sess.ID, init.SessionID)
+				recordSessionAgent(init.SessionID, "main", appName, source)
+				if ccName := readClaudeSessionName(init.SessionID); ccName != "" {
+					sess.mu.Lock()
+					if sess.Name == "" || strings.HasPrefix(sess.Name, "session-") || strings.HasPrefix(sess.Name, "resume-") {
+						sess.Name = ccName
+					}
+					sess.mu.Unlock()
+					ensureServerSession(sess.ID, ccName)
+				}
+			}
+			if sess.hub != nil {
+				sess.hub.notifySessions()
+			}
+		}
+	}
+}
+
+// makeOnResult returns the onResult callback for bridgeStdout.
+// fullSync: true for create/resume (CC name sync + auto-rename tracking).
+// fullSync: false for reload (cost/turns only).
+func makeOnResult(sess *serverSession, fullSync bool) func(json.RawMessage) {
+	return func(raw json.RawMessage) {
+		var result ResultMessage
+		if json.Unmarshal(raw, &result) == nil {
+			sess.mu.Lock()
+			sess.TotalCost += result.TotalCostUSD
+			sess.NumTurns += result.NumTurns
+			if result.SessionID != "" {
+				sess.ClaudeSID = result.SessionID
+			}
+			newStatus := "idle"
+			if result.Subtype == "error" {
+				newStatus = "error"
+			}
+			sess.mu.Unlock()
+			sess.setStatus(newStatus)
+
+			if fullSync {
+				// Sync session name from Claude Code metadata
+				sess.mu.Lock()
+				claudeSID := sess.ClaudeSID
+				currentName := sess.Name
+				sess.mu.Unlock()
+				if claudeSID != "" && !isManuallyRenamed(sess.ID) {
+					if ccName := readClaudeSessionName(claudeSID); ccName != "" && ccName != currentName {
+						sess.mu.Lock()
+						sess.Name = ccName
+						sess.mu.Unlock()
+						markAutoNamed(sess.ID, ccName)
+						if sess.hub != nil {
+							sess.hub.notifySessions()
+						}
+					}
+				}
+
+				// Track user turns for auto-rename
+				if result.NumTurns > 0 {
+					turns, renamed := incrementUserTurns(sess.ID)
+					if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
+						go tryAutoRename(sess)
+					}
+				}
+			}
+		}
+		sess.touch()
+	}
+}
+
+// watchExit monitors process exit and updates session status.
+func watchExit(proc *claudeProcess, sess *serverSession) {
+	go func() {
+		<-proc.done
+		sess.mu.Lock()
+		alreadyStopped := sess.Status == "stopped"
+		sess.mu.Unlock()
+		if alreadyStopped {
+			return
+		}
+		if proc.exitCode != 0 {
+			sess.setStatus("error")
+		} else {
+			sess.setStatus("stopped")
+		}
+	}()
+}
+
+// drainStderr reads and discards stderr to prevent pipe deadlock.
+func drainStderr(proc *claudeProcess) {
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := proc.stderr.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+}
+
+// attachProcessBridge sets up stdout→SSE bridge, exit watcher, and stderr drain.
+// source: "server-create"/"server-resume" for full init, "" for reload.
+// fullSync: true for create/resume (CC name sync + auto-rename), false for reload.
+func attachProcessBridge(proc *claudeProcess, sess *serverSession, source string, fullSync bool) {
+	go bridgeStdout(proc, sess.broadcaster, makeOnInit(sess, source), makeOnResult(sess, fullSync), func(todos json.RawMessage) {
+		sess.setTodos(todos)
+	})
+	watchExit(proc, sess)
+	drainStderr(proc)
+}
+
 // ── Session Manager ──
 
 // sessionManager manages concurrent sessions with TTL.
@@ -196,23 +335,16 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		category = CategoryInteractive
 	}
 
-	// Only count interactive sessions toward maxSessions limit
-	// Telegram, heartbeat, cron, evolve sessions bypass this limit.
-	sm.mu.Lock()
-	if category == CategoryInteractive {
-		interactiveCount := 0
-		for _, s := range sm.sessions {
-			if s.Category == CategoryInteractive {
-				interactiveCount++
-			}
-		}
-		if interactiveCount >= sm.maxSessions {
-			sm.mu.Unlock()
-			return nil, fmt.Errorf("max interactive sessions reached (%d)", sm.maxSessions)
+	// Fuzzy resolve model name (e.g. "glm" → "zai/glm-5.1") — defensive,
+	// callers should already resolve but bare spawn via API may not.
+	if opts.Model != "" {
+		if resolved, err := resolveFuzzyModel(opts.Model); err == nil && resolved != "" {
+			opts.Model = resolved
 		}
 	}
-	sm.mu.Unlock()
 
+	// Reserve a slot atomically: check limit + register placeholder in one lock scope.
+	// This prevents TOCTOU where two concurrent creates both pass the check.
 	id := uuid.New().String()
 	now := time.Now()
 
@@ -244,6 +376,30 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		GalID:       opts.GalID,
 	}
 
+	sm.mu.Lock()
+	if category == CategoryInteractive {
+		interactiveCount := 0
+		for _, s := range sm.sessions {
+			if s.Category == CategoryInteractive {
+				interactiveCount++
+			}
+		}
+		if interactiveCount >= sm.maxSessions {
+			sm.mu.Unlock()
+			return nil, fmt.Errorf("max interactive sessions reached (%d)", sm.maxSessions)
+		}
+	}
+	// Register immediately to hold the slot (status="starting")
+	sm.sessions[id] = sess
+	sm.mu.Unlock()
+
+	// On failure, remove the placeholder
+	cleanup := func() {
+		sm.mu.Lock()
+		delete(sm.sessions, id)
+		sm.mu.Unlock()
+	}
+
 	// Build soul prompt if enabled
 	var promptFile string
 	if opts.Soul {
@@ -267,8 +423,7 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		}
 
 		result := buildPromptWithOverrides(ovr)
-		writePrompt(result)
-		promptFile = promptOut
+		promptFile = writePromptForSession(id, result)
 		sess.promptFile = promptFile
 	}
 
@@ -284,9 +439,12 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 	}
 	proc, err := spawnClaude(spawnOpts)
 	if err != nil {
+		cleanup()
 		return nil, fmt.Errorf("spawn claude: %w", err)
 	}
+	sess.mu.Lock()
 	sess.process = proc
+	sess.mu.Unlock()
 	sess.setStatus("running")
 
 	// Register in server DB with category and tags
@@ -301,113 +459,8 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		setReplaceSoulEnabled(id, true)
 	}
 
-	// Start stdout → SSE/WS bridge
-	go bridgeStdout(proc, sess.broadcaster,
-		// onInit: sync session name + model from Claude Code metadata
-		func(raw json.RawMessage) {
-			var init InitMessage
-			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
-				sess.mu.Lock()
-				sess.ClaudeSID = init.SessionID
-				if init.Model != "" {
-					sess.Model = mergeInitModel(sess.Model, init.Model)
-				}
-				sess.mu.Unlock()
-				// Record Claude session ID → weiran session mapping for history lookup
-				setClaudeSessionID(sess.ID, init.SessionID)
-				// Record agent identity for this Claude session
-				recordSessionAgent(init.SessionID, "main", appName, "server-create")
-				// Read Claude Code's session name (slug like "distributed-munching-kitten")
-				if ccName := readClaudeSessionName(init.SessionID); ccName != "" {
-					sess.mu.Lock()
-					if sess.Name == "" || strings.HasPrefix(sess.Name, "session-") || strings.HasPrefix(sess.Name, "resume-") {
-						sess.Name = ccName
-					}
-					sess.mu.Unlock()
-					ensureServerSession(sess.ID, ccName)
-					if sess.hub != nil {
-						sess.hub.notifySessions()
-					}
-				}
-			}
-		},
-		// onResult
-		func(raw json.RawMessage) {
-			var result ResultMessage
-			if json.Unmarshal(raw, &result) == nil {
-				sess.mu.Lock()
-				sess.TotalCost += result.TotalCostUSD
-				sess.NumTurns += result.NumTurns
-				if result.SessionID != "" {
-					sess.ClaudeSID = result.SessionID
-				}
-				newStatus := "idle"
-				if result.Subtype == "error" {
-					newStatus = "error"
-				}
-				sess.mu.Unlock()
-				sess.setStatus(newStatus)
-
-				// Sync session name from Claude Code metadata.
-				// CC may rename sessions multiple times as conversation evolves,
-				// so keep syncing as long as the user hasn't manually renamed.
-				sess.mu.Lock()
-				claudeSID := sess.ClaudeSID
-				currentName := sess.Name
-				sess.mu.Unlock()
-				if claudeSID != "" && !isManuallyRenamed(sess.ID) {
-					if ccName := readClaudeSessionName(claudeSID); ccName != "" && ccName != currentName {
-						sess.mu.Lock()
-						sess.Name = ccName
-						sess.mu.Unlock()
-						markAutoNamed(sess.ID, ccName)
-						if sess.hub != nil {
-							sess.hub.notifySessions()
-						}
-					}
-				}
-
-				// Track user turns for auto-rename (fallback if CC doesn't name it)
-				if result.NumTurns > 0 {
-					turns, renamed := incrementUserTurns(sess.ID)
-					if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
-						go tryAutoRename(sess)
-					}
-				}
-			}
-			sess.touch()
-		})
-
-	// Watch for process exit
-	go func() {
-		<-proc.done
-		sess.mu.Lock()
-		alreadyStopped := sess.Status == "stopped"
-		sess.mu.Unlock()
-		if alreadyStopped {
-			return
-		}
-		if proc.exitCode != 0 {
-			sess.setStatus("error")
-		} else {
-			sess.setStatus("stopped")
-		}
-	}()
-
-	// Drain stderr in background (prevent pipe deadlock)
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			_, err := proc.stderr.Read(buf)
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	sm.mu.Lock()
-	sm.sessions[id] = sess
-	sm.mu.Unlock()
+	// Attach stdout→SSE bridge, exit watcher, and stderr drain
+	attachProcessBridge(proc, sess, "server-create", true)
 
 	return sess, nil
 }
@@ -484,66 +537,8 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 	setChromeEnabled(id, enabled)
 	sess.setStatus("running")
 
-	// Re-attach stdout bridge with the same callbacks as createSession.
-	go bridgeStdout(newProc, sess.broadcaster,
-		func(raw json.RawMessage) {
-			var init InitMessage
-			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
-				sess.mu.Lock()
-				sess.ClaudeSID = init.SessionID
-				if init.Model != "" {
-					sess.Model = mergeInitModel(sess.Model, init.Model)
-				}
-				sess.mu.Unlock()
-				if sess.hub != nil {
-					sess.hub.notifySessions()
-				}
-			}
-		},
-		func(raw json.RawMessage) {
-			var result ResultMessage
-			if json.Unmarshal(raw, &result) == nil {
-				sess.mu.Lock()
-				sess.TotalCost += result.TotalCostUSD
-				sess.NumTurns += result.NumTurns
-				if result.SessionID != "" {
-					sess.ClaudeSID = result.SessionID
-				}
-				newStatus := "idle"
-				if result.Subtype == "error" {
-					newStatus = "error"
-				}
-				sess.mu.Unlock()
-				sess.setStatus(newStatus)
-			}
-			sess.touch()
-		})
-
-	// Watch for process exit
-	go func() {
-		<-newProc.done
-		sess.mu.Lock()
-		alreadyStopped := sess.Status == "stopped"
-		sess.mu.Unlock()
-		if alreadyStopped {
-			return
-		}
-		if newProc.exitCode != 0 {
-			sess.setStatus("error")
-		} else {
-			sess.setStatus("stopped")
-		}
-	}()
-
-	// Drain stderr
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			if _, err := newProc.stderr.Read(buf); err != nil {
-				return
-			}
-		}
-	}()
+	// Re-attach stdout bridge (reload — no agent recording, no rename sync)
+	attachProcessBridge(newProc, sess, "", false)
 
 	if sm.hub != nil {
 		sm.hub.notifySessions()
@@ -607,63 +602,7 @@ func (sm *sessionManager) setReplaceSoul(id string, enabled bool) error {
 	setReplaceSoulEnabled(id, enabled)
 	sess.setStatus("running")
 
-	go bridgeStdout(newProc, sess.broadcaster,
-		func(raw json.RawMessage) {
-			var init InitMessage
-			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
-				sess.mu.Lock()
-				sess.ClaudeSID = init.SessionID
-				if init.Model != "" {
-					sess.Model = mergeInitModel(sess.Model, init.Model)
-				}
-				sess.mu.Unlock()
-				if sess.hub != nil {
-					sess.hub.notifySessions()
-				}
-			}
-		},
-		func(raw json.RawMessage) {
-			var result ResultMessage
-			if json.Unmarshal(raw, &result) == nil {
-				sess.mu.Lock()
-				sess.TotalCost += result.TotalCostUSD
-				sess.NumTurns += result.NumTurns
-				if result.SessionID != "" {
-					sess.ClaudeSID = result.SessionID
-				}
-				newStatus := "idle"
-				if result.Subtype == "error" {
-					newStatus = "error"
-				}
-				sess.mu.Unlock()
-				sess.setStatus(newStatus)
-			}
-			sess.touch()
-		})
-
-	go func() {
-		<-newProc.done
-		sess.mu.Lock()
-		alreadyStopped := sess.Status == "stopped"
-		sess.mu.Unlock()
-		if alreadyStopped {
-			return
-		}
-		if newProc.exitCode != 0 {
-			sess.setStatus("error")
-		} else {
-			sess.setStatus("stopped")
-		}
-	}()
-
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			if _, err := newProc.stderr.Read(buf); err != nil {
-				return
-			}
-		}
-	}()
+	attachProcessBridge(newProc, sess, "", false)
 
 	if sm.hub != nil {
 		sm.hub.notifySessions()
@@ -726,63 +665,7 @@ func (sm *sessionManager) setModel(id string, model string) error {
 
 	sess.setStatus("running")
 
-	go bridgeStdout(newProc, sess.broadcaster,
-		func(raw json.RawMessage) {
-			var init InitMessage
-			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
-				sess.mu.Lock()
-				sess.ClaudeSID = init.SessionID
-				if init.Model != "" {
-					sess.Model = mergeInitModel(sess.Model, init.Model)
-				}
-				sess.mu.Unlock()
-				if sess.hub != nil {
-					sess.hub.notifySessions()
-				}
-			}
-		},
-		func(raw json.RawMessage) {
-			var result ResultMessage
-			if json.Unmarshal(raw, &result) == nil {
-				sess.mu.Lock()
-				sess.TotalCost += result.TotalCostUSD
-				sess.NumTurns += result.NumTurns
-				if result.SessionID != "" {
-					sess.ClaudeSID = result.SessionID
-				}
-				newStatus := "idle"
-				if result.Subtype == "error" {
-					newStatus = "error"
-				}
-				sess.mu.Unlock()
-				sess.setStatus(newStatus)
-			}
-			sess.touch()
-		})
-
-	go func() {
-		<-newProc.done
-		sess.mu.Lock()
-		alreadyStopped := sess.Status == "stopped"
-		sess.mu.Unlock()
-		if alreadyStopped {
-			return
-		}
-		if newProc.exitCode != 0 {
-			sess.setStatus("error")
-		} else {
-			sess.setStatus("stopped")
-		}
-	}()
-
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			if _, err := newProc.stderr.Read(buf); err != nil {
-				return
-			}
-		}
-	}()
+	attachProcessBridge(newProc, sess, "", false)
 
 	if sm.hub != nil {
 		sm.hub.notifySessions()
@@ -956,32 +839,6 @@ func (sm *sessionManager) reap() {
 // replaceSoul: pointer — nil means "inherit from original session's persisted flag",
 // non-nil means "explicitly use this value".
 func (sm *sessionManager) resumeSession(sessionID, message, displayName, categoryOverride, model string, replaceSoul *bool) (*serverSession, error) {
-	sm.mu.Lock()
-	// Dedup: check if already resumed (by ClaudeSID or ResumedFrom), only if alive
-	for _, s := range sm.sessions {
-		s.mu.Lock()
-		cid := s.ClaudeSID
-		rfrom := s.ResumedFrom
-		alive := s.process != nil && s.process.alive()
-		s.mu.Unlock()
-		if alive && (cid == sessionID || rfrom == sessionID) {
-			sm.mu.Unlock()
-			return s, nil
-		}
-	}
-	// Only count interactive sessions toward maxSessions
-	interactiveCount := 0
-	for _, s := range sm.sessions {
-		if s.Category == CategoryInteractive {
-			interactiveCount++
-		}
-	}
-	if interactiveCount >= sm.maxSessions {
-		sm.mu.Unlock()
-		return nil, fmt.Errorf("max interactive sessions reached (%d)", sm.maxSessions)
-	}
-	sm.mu.Unlock()
-
 	id := uuid.New().String()
 	now := time.Now()
 
@@ -1011,7 +868,6 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 	}
 
 	// Resolve replace_soul: explicit arg wins, else inherit from persisted DB flag
-	// (looked up by either weiran session_id or claude_session_id — see getReplaceSoulEnabled).
 	resolvedReplaceSoul := false
 	if replaceSoul != nil {
 		resolvedReplaceSoul = *replaceSoul
@@ -1036,85 +892,61 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 		hub:         sm.hub,
 	}
 
-	// Build soul prompt (concurrency-safe via overrides)
-	initSessionDir()
-	result := buildPromptWithOverrides(promptOverrides{})
-	writePrompt(result)
-	sess.promptFile = promptOut
+	// Reserve slot atomically: dedup check + maxSessions check + register in one lock scope.
+	sm.mu.Lock()
+	// Dedup: check if already resumed (by ClaudeSID or ResumedFrom), only if alive
+	for _, s := range sm.sessions {
+		s.mu.Lock()
+		cid := s.ClaudeSID
+		rfrom := s.ResumedFrom
+		alive := s.process != nil && s.process.alive()
+		s.mu.Unlock()
+		if alive && (cid == sessionID || rfrom == sessionID) {
+			sm.mu.Unlock()
+			return s, nil
+		}
+	}
+	// Only count interactive sessions toward maxSessions
+	interactiveCount := 0
+	for _, s := range sm.sessions {
+		if s.Category == CategoryInteractive {
+			interactiveCount++
+		}
+	}
+	if interactiveCount >= sm.maxSessions {
+		sm.mu.Unlock()
+		return nil, fmt.Errorf("max interactive sessions reached (%d)", sm.maxSessions)
+	}
+	// Register placeholder to hold the slot
+	sm.sessions[id] = sess
+	sm.mu.Unlock()
+
+	cleanup := func() {
+		sm.mu.Lock()
+		delete(sm.sessions, id)
+		sm.mu.Unlock()
+	}
+
+	// Build soul prompt — per-session file to avoid concurrent overwrites
+	promptFile := writePromptForSession(id, buildPromptWithOverrides(promptOverrides{}))
+	sess.promptFile = promptFile
 
 	// Spawn Claude Code with --resume
-	promptFlag := "--append-system-prompt-file"
-	if resolvedReplaceSoul {
-		promptFlag = "--system-prompt-file"
-	}
-	args := []string{
-		"-p",
-		"--input-format", "stream-json",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--permission-mode", "bypassPermissions",
-		promptFlag, promptOut,
-		"--resume", sessionID,
-	}
-	if model != "" {
-		args = append(args, "--model", providerModelName(model))
-	}
-
-	cmd := exec.Command(claudeBin, args...)
-	cmd.Dir = workspace
-	env := filterEnv(os.Environ(), "CLAUDECODE")
-	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-cli")
-	// Use model-aware env injection for provider models
-	env = injectProxyEnvWithModel(env, id, model)
-	// IPC env vars (same as spawnClaude — needed for session send/read/search)
-	prefix := ipcEnvPrefix()
-	env = append(env, prefix+"_SESSION_ID="+id)
-	if serverURL := os.Getenv(prefix + "_SERVER_URL"); serverURL != "" {
-		env = append(env, prefix+"_SERVER_URL="+serverURL)
-	} else if isServerMode {
-		env = append(env, fmt.Sprintf(prefix+"_SERVER_URL=http://127.0.0.1:%d", serverPort))
-	}
-	if authToken := os.Getenv(prefix + "_AUTH_TOKEN"); authToken != "" {
-		env = append(env, prefix+"_AUTH_TOKEN="+authToken)
-	} else if serverAuthToken != "" {
-		env = append(env, prefix+"_AUTH_TOKEN="+serverAuthToken)
-	}
-	cmd.Env = env
-
-	stdin, err := cmd.StdinPipe()
+	proc, err := spawnClaude(sessionOpts{
+		SystemPromptFile: promptFile,
+		Model:            model,
+		ResumeID:         sessionID,
+		ReplaceSoul:      resolvedReplaceSoul,
+		ServerSessionID:  id,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("stdin pipe: %w", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stderr pipe: %w", err)
+		cleanup()
+		return nil, fmt.Errorf("spawn resume: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("spawn: %w", err)
-	}
-
-	proc := &claudeProcess{
-		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
-		done: make(chan struct{}),
-	}
-	go func() {
-		err := cmd.Wait()
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				proc.exitCode = exitErr.ExitCode()
-			} else {
-				proc.exitCode = 1
-			}
-		}
-		close(proc.done)
-	}()
-
+	sess.mu.Lock()
 	sess.process = proc
+	sess.mu.Unlock()
 	sess.setStatus("running")
 
 	// Register in server DB
@@ -1126,105 +958,8 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 		setReplaceSoulEnabled(id, true)
 	}
 
-	go bridgeStdout(proc, sess.broadcaster,
-		// onInit: sync session name + model
-		func(raw json.RawMessage) {
-			var init InitMessage
-			if json.Unmarshal(raw, &init) == nil && init.SessionID != "" {
-				sess.mu.Lock()
-				sess.ClaudeSID = init.SessionID
-				if init.Model != "" {
-					sess.Model = mergeInitModel(sess.Model, init.Model)
-				}
-				sess.mu.Unlock()
-				// Record agent identity (resume inherits from original)
-				recordSessionAgent(init.SessionID, "main", appName, "server-resume")
-				if ccName := readClaudeSessionName(init.SessionID); ccName != "" {
-					sess.mu.Lock()
-					if sess.Name == "" || strings.HasPrefix(sess.Name, "session-") || strings.HasPrefix(sess.Name, "resume-") {
-						sess.Name = ccName
-					}
-					sess.mu.Unlock()
-					ensureServerSession(sess.ID, ccName)
-					if sess.hub != nil {
-						sess.hub.notifySessions()
-					}
-				}
-			}
-		},
-		// onResult
-		func(raw json.RawMessage) {
-			var res ResultMessage
-			if json.Unmarshal(raw, &res) == nil {
-				sess.mu.Lock()
-				sess.TotalCost += res.TotalCostUSD
-				sess.NumTurns += res.NumTurns
-				if res.SessionID != "" {
-					sess.ClaudeSID = res.SessionID
-				}
-				newStatus := "idle"
-				if res.Subtype == "error" {
-					newStatus = "error"
-				}
-				sess.mu.Unlock()
-				sess.setStatus(newStatus)
-
-				// Sync session name from Claude Code metadata as long as the
-				// user hasn't manually renamed the session.
-				sess.mu.Lock()
-				claudeSID := sess.ClaudeSID
-				currentName := sess.Name
-				sess.mu.Unlock()
-				if claudeSID != "" && !isManuallyRenamed(sess.ID) {
-					if ccName := readClaudeSessionName(claudeSID); ccName != "" && ccName != currentName {
-						sess.mu.Lock()
-						sess.Name = ccName
-						sess.mu.Unlock()
-						markAutoNamed(sess.ID, ccName)
-						if sess.hub != nil {
-							sess.hub.notifySessions()
-						}
-					}
-				}
-
-				if res.NumTurns > 0 {
-					turns, renamed := incrementUserTurns(sess.ID)
-					if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
-						go tryAutoRename(sess)
-					}
-				}
-			}
-			sess.touch()
-		})
-
-	go func() {
-		<-proc.done
-		sess.mu.Lock()
-		alreadyStopped := sess.Status == "stopped"
-		sess.mu.Unlock()
-		if alreadyStopped {
-			return
-		}
-		if proc.exitCode != 0 {
-			sess.setStatus("error")
-		} else {
-			sess.setStatus("stopped")
-		}
-	}()
-
-	// Drain stderr
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			if _, err := proc.stderr.Read(buf); err != nil {
-				return
-			}
-		}
-	}()
-
-	sm.mu.Lock()
-	sm.sessions[id] = sess
-	sm.mu.Unlock()
+	// Attach stdout bridge with full sync (agent recording + CC name sync + auto-rename)
+	attachProcessBridge(proc, sess, "server-resume", true)
 
 	// Send initial message if provided
 	if message != "" {
@@ -1324,19 +1059,16 @@ func (sm *sessionManager) rehydrateSessions() {
 			s.Model,            // model
 			&replaceSoul,       // replace soul flag
 		)
+		// Always mark old record as ended (whether resume succeeded or not)
+		updateSessionStatus(s.SessionID, "ended")
+		if s.RehydrateMsg != "" {
+			setRehydrateMessage(s.SessionID, "")
+		}
+
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: failed %s: %v\n",
 				appName, shortID(s.SessionID), err)
-			updateSessionStatus(s.SessionID, "ended")
 			continue
-		}
-
-		// Mark old record as ended (resumeSession creates a new wrapper session)
-		updateSessionStatus(s.SessionID, "ended")
-
-		// Clear rehydrate message (now consumed)
-		if s.RehydrateMsg != "" {
-			setRehydrateMessage(s.SessionID, "")
 		}
 
 		// Carry over chrome/gal state to new session
