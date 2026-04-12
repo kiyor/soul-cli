@@ -248,19 +248,29 @@ func TestRebuildFTS(t *testing.T) {
 
 func TestSanitizeFTSQuery(t *testing.T) {
 	cases := []struct {
-		in, want string
+		in    string
+		check func(string) bool
+		desc  string
 	}{
-		{"", ""},
-		{"   ", ""},
-		{"GLM", `"GLM"`},
-		{"GLM 5.1", `"GLM" "5.1"`},
-		{"#207 心跳", `"#207" "心跳"`},
-		{`say "hello"`, `"say" """hello"""`},
-		{"  spaces  everywhere  ", `"spaces" "everywhere"`},
+		{"", func(s string) bool { return s == "" }, "empty → empty"},
+		{"   ", func(s string) bool { return s == "" }, "whitespace → empty"},
+		{"GLM", func(s string) bool { return s == `"GLM"` }, "single english word"},
+		{"GLM 5.1", func(s string) bool { return s == `"GLM" "5.1"` }, "english with dot"},
+		{`say "hello"`, func(s string) bool { return strings.Contains(s, `"say"`) && strings.Contains(s, "hello") }, "embedded quotes"},
+		{"  spaces  everywhere  ", func(s string) bool { return s == `"spaces" "everywhere"` }, "extra spaces trimmed"},
+		// Chinese queries get segmented before quoting
+		{"心跳", func(s string) bool { return strings.Contains(s, `"心跳"`) }, "chinese word preserved"},
+		{"心跳巡检", func(s string) bool {
+			return strings.Contains(s, `"心跳"`) && strings.Contains(s, `"巡检"`)
+		}, "chinese compound segmented into words"},
+		{"#207 巡检", func(s string) bool {
+			return strings.Contains(s, `"#207"`) && strings.Contains(s, `"巡检"`)
+		}, "mixed punctuation + chinese"},
 	}
 	for _, c := range cases {
-		if got := sanitizeFTSQuery(c.in); got != c.want {
-			t.Errorf("sanitizeFTSQuery(%q) = %q, want %q", c.in, got, c.want)
+		got := sanitizeFTSQuery(c.in)
+		if !c.check(got) {
+			t.Errorf("sanitizeFTSQuery(%q) = %q — failed: %s", c.in, got, c.desc)
 		}
 	}
 }

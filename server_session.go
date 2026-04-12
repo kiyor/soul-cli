@@ -55,6 +55,7 @@ type serverSession struct {
 	promptFile  string // temp file for soul prompt
 	mcpConfig   string // remembered for reload
 	hub         *wsHub // for WS notifications on status change
+	waiters     []chan string // notified when status becomes idle/stopped/error
 	mu          sync.Mutex
 }
 
@@ -72,7 +73,17 @@ func (s *serverSession) setStatus(status string) {
 	s.Status = status
 	id := s.ID
 	hub := s.hub
+	// Notify waiters when session reaches a terminal/current state
+	var waitersToNotify []chan string
+	if changed && (status == "idle" || status == "stopped" || status == "error") {
+		waitersToNotify = s.waiters
+		s.waiters = nil
+	}
 	s.mu.Unlock()
+	// Fire waiter notifications outside the lock
+	for _, ch := range waitersToNotify {
+		ch <- status
+	}
 	if changed {
 		// Persist proxy-aggregated cost when session ends
 		if status == "stopped" || status == "error" {
@@ -280,6 +291,9 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 
 	// Register in server DB with category and tags
 	ensureServerSessionFull(id, opts.Name, category, opts.Tags)
+	if opts.Model != "" {
+		setSessionModel(id, opts.Model)
+	}
 	if opts.GalID != "" {
 		setGalID(id, opts.GalID)
 	}
@@ -296,7 +310,7 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 				sess.mu.Lock()
 				sess.ClaudeSID = init.SessionID
 				if init.Model != "" {
-					sess.Model = init.Model
+					sess.Model = mergeInitModel(sess.Model, init.Model)
 				}
 				sess.mu.Unlock()
 				// Record Claude session ID → weiran session mapping for history lookup
@@ -478,7 +492,7 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 				sess.mu.Lock()
 				sess.ClaudeSID = init.SessionID
 				if init.Model != "" {
-					sess.Model = init.Model
+					sess.Model = mergeInitModel(sess.Model, init.Model)
 				}
 				sess.mu.Unlock()
 				if sess.hub != nil {
@@ -600,7 +614,7 @@ func (sm *sessionManager) setReplaceSoul(id string, enabled bool) error {
 				sess.mu.Lock()
 				sess.ClaudeSID = init.SessionID
 				if init.Model != "" {
-					sess.Model = init.Model
+					sess.Model = mergeInitModel(sess.Model, init.Model)
 				}
 				sess.mu.Unlock()
 				if sess.hub != nil {
@@ -707,6 +721,9 @@ func (sm *sessionManager) setModel(id string, model string) error {
 	sess.ClaudeSID = ""
 	sess.mu.Unlock()
 
+	// Persist model for rehydration
+	setSessionModel(sess.ID, model)
+
 	sess.setStatus("running")
 
 	go bridgeStdout(newProc, sess.broadcaster,
@@ -716,7 +733,7 @@ func (sm *sessionManager) setModel(id string, model string) error {
 				sess.mu.Lock()
 				sess.ClaudeSID = init.SessionID
 				if init.Model != "" {
-					sess.Model = init.Model
+					sess.Model = mergeInitModel(sess.Model, init.Model)
 				}
 				sess.mu.Unlock()
 				if sess.hub != nil {
@@ -790,6 +807,9 @@ func (sm *sessionManager) destroySession(id string) error {
 		sess.process.shutdown()
 	}
 
+	// Mark as ended in persistent DB
+	updateSessionStatus(id, "ended")
+
 	// Clean up temp prompt file
 	if sess.promptFile != "" {
 		os.Remove(sess.promptFile)
@@ -810,8 +830,33 @@ func (sm *sessionManager) destroySession(id string) error {
 }
 
 // shutdownAll gracefully stops all sessions. Used on server shutdown.
+// Marks rehydratable sessions as "suspended" in DB before destroying processes,
+// so they can be resumed on next server startup.
 func (sm *sessionManager) shutdownAll() {
 	close(sm.stopReaper)
+
+	// Persist claude_session_id and model for all active sessions before they die,
+	// so they can be properly rehydrated after restart.
+	sm.mu.RLock()
+	for _, sess := range sm.sessions {
+		sess.mu.Lock()
+		sid := sess.ClaudeSID
+		id := sess.ID
+		model := sess.Model
+		sess.mu.Unlock()
+		if sid != "" {
+			setClaudeSessionID(id, sid)
+		}
+		if model != "" {
+			setSessionModel(id, model)
+		}
+	}
+	sm.mu.RUnlock()
+
+	n := batchSuspendActiveSessions()
+	if n > 0 {
+		fmt.Fprintf(os.Stderr, "[%s] server: suspended %d session(s) for rehydration\n", appName, n)
+	}
 
 	sm.mu.Lock()
 	ids := make([]string, 0, len(sm.sessions))
@@ -821,8 +866,32 @@ func (sm *sessionManager) shutdownAll() {
 	sm.mu.Unlock()
 
 	for _, id := range ids {
-		sm.destroySession(id)
+		// destroySession calls updateSessionStatus("ended"), but we want suspended
+		// sessions to stay suspended. So we skip the status update for suspended sessions.
+		sm.destroySessionForShutdown(id)
 	}
+}
+
+// destroySessionForShutdown is like destroySession but does NOT update DB status,
+// preserving the "suspended" state for rehydration.
+func (sm *sessionManager) destroySessionForShutdown(id string) {
+	sm.mu.Lock()
+	sess, ok := sm.sessions[id]
+	if !ok {
+		sm.mu.Unlock()
+		return
+	}
+	delete(sm.sessions, id)
+	sm.mu.Unlock()
+
+	sess.setStatus("stopped")
+	if sess.process != nil && sess.process.alive() {
+		sess.process.shutdown()
+	}
+	if sess.promptFile != "" {
+		os.Remove(sess.promptFile)
+	}
+	// Do NOT call updateSessionStatus — keep "suspended" in DB
 }
 
 // reaper runs every minute and destroys idle/expired sessions.
@@ -933,6 +1002,14 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 		resolvedCategory = CategoryInteractive
 	}
 
+	// Model priority: explicit arg > DB record > JSONL init message
+	if model == "" {
+		model = getSessionModel(sessionID)
+	}
+	if model == "" {
+		model = getModelFromJSONL(sessionID)
+	}
+
 	// Resolve replace_soul: explicit arg wins, else inherit from persisted DB flag
 	// (looked up by either weiran session_id or claude_session_id — see getReplaceSoulEnabled).
 	resolvedReplaceSoul := false
@@ -989,6 +1066,19 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-cli")
 	// Use model-aware env injection for provider models
 	env = injectProxyEnvWithModel(env, id, model)
+	// IPC env vars (same as spawnClaude — needed for session send/read/search)
+	prefix := ipcEnvPrefix()
+	env = append(env, prefix+"_SESSION_ID="+id)
+	if serverURL := os.Getenv(prefix + "_SERVER_URL"); serverURL != "" {
+		env = append(env, prefix+"_SERVER_URL="+serverURL)
+	} else if isServerMode {
+		env = append(env, fmt.Sprintf(prefix+"_SERVER_URL=http://127.0.0.1:%d", serverPort))
+	}
+	if authToken := os.Getenv(prefix + "_AUTH_TOKEN"); authToken != "" {
+		env = append(env, prefix+"_AUTH_TOKEN="+authToken)
+	} else if serverAuthToken != "" {
+		env = append(env, prefix+"_AUTH_TOKEN="+serverAuthToken)
+	}
 	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
@@ -1029,6 +1119,9 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 
 	// Register in server DB
 	ensureServerSession(id, sess.Name)
+	if model != "" {
+		setSessionModel(id, model)
+	}
 	if resolvedReplaceSoul {
 		setReplaceSoulEnabled(id, true)
 	}
@@ -1041,7 +1134,7 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 				sess.mu.Lock()
 				sess.ClaudeSID = init.SessionID
 				if init.Model != "" {
-					sess.Model = init.Model
+					sess.Model = mergeInitModel(sess.Model, init.Model)
 				}
 				sess.mu.Unlock()
 				// Record agent identity (resume inherits from original)
@@ -1179,25 +1272,138 @@ func readClaudeSessionName(sessionID string) string {
 	return ""
 }
 
+// ── Session Rehydration ──
+
+const rehydrateMaxAge = 2 * time.Hour
+
+// rehydrateSessions restores interactive/telegram sessions that were alive
+// before the last server restart. Called once during server startup.
+func (sm *sessionManager) rehydrateSessions() {
+	sessions, err := getRehydratableSessions(rehydrateMaxAge)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: query error: %v\n", appName, err)
+		return
+	}
+	if len(sessions) == 0 {
+		fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: no sessions to restore\n", appName)
+		// Clean up any stale active/suspended records
+		expireStaleRehydratables(rehydrateMaxAge)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: found %d session(s) to restore\n", appName, len(sessions))
+
+	restored := 0
+	for _, s := range sessions {
+		// Verify the JSONL file exists (claude session is resumable)
+		jsonlPath := findSessionJSONL(s.ClaudeSID)
+		if jsonlPath == "" {
+			fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: skip %s (no JSONL for %s)\n",
+				appName, shortID(s.SessionID), shortID(s.ClaudeSID))
+			updateSessionStatus(s.SessionID, "ended")
+			continue
+		}
+
+		// Determine the resume message:
+		// - Restart initiator: use their custom rehydrate_message
+		// - Bystander sessions: inject a server-restart context notice so the
+		//   model knows it was interrupted and won't hallucinate completed tool calls
+		resumeMsg := s.RehydrateMsg
+		if resumeMsg == "" {
+			resumeMsg = "⚠️ Server was restarted. Your previous session was interrupted — " +
+				"any in-flight tool calls (Bash, etc.) were killed and did NOT complete. " +
+				"Do NOT assume they succeeded. Report your current status and wait for instructions."
+		}
+
+		replaceSoul := s.ReplaceSoul
+		sess, err := sm.resumeSession(
+			s.ClaudeSID,        // sessionID to resume
+			resumeMsg,          // always send a message (context notice or wake command)
+			s.Name,             // display name
+			s.Category,         // category override
+			s.Model,            // model
+			&replaceSoul,       // replace soul flag
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: failed %s: %v\n",
+				appName, shortID(s.SessionID), err)
+			updateSessionStatus(s.SessionID, "ended")
+			continue
+		}
+
+		// Mark old record as ended (resumeSession creates a new wrapper session)
+		updateSessionStatus(s.SessionID, "ended")
+
+		// Clear rehydrate message (now consumed)
+		if s.RehydrateMsg != "" {
+			setRehydrateMessage(s.SessionID, "")
+		}
+
+		// Carry over chrome/gal state to new session
+		if s.ChromeEnabled {
+			setChromeEnabled(sess.ID, true)
+		}
+		if s.GalID != "" {
+			setGalID(sess.ID, s.GalID)
+		}
+
+		wakeNote := "idle"
+		if s.RehydrateMsg != "" {
+			wakeNote = "wake"
+		}
+		fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: restored %s → %s (%s, %s)\n",
+			appName, shortID(s.SessionID), shortID(sess.ID), s.Category, wakeNote)
+		restored++
+	}
+
+	// Expire any remaining stale sessions
+	expireStaleRehydratables(rehydrateMaxAge)
+
+	fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: restored %d/%d session(s)\n",
+		appName, restored, len(sessions))
+
+	// Notify WS clients about restored sessions
+	if sm.hub != nil {
+		sm.hub.notifySessions()
+	}
+}
+
 // ── JSONL History Parsing ──
 
 // findSessionJSONL locates the JSONL file for a given session ID.
+// Searches both Claude Code projects and OpenClaw agent session directories.
 func findSessionJSONL(sessionID string) string {
-	claudeProjects := filepath.Join(claudeConfigDir, "projects")
-	entries, err := os.ReadDir(claudeProjects)
-	if err != nil {
-		return ""
-	}
 	fname := sessionID + ".jsonl"
-	for _, projEntry := range entries {
-		if !projEntry.IsDir() {
-			continue
-		}
-		path := filepath.Join(claudeProjects, projEntry.Name(), fname)
-		if _, err := os.Stat(path); err == nil {
-			return path
+
+	// Claude Code sessions: ~/.claude/projects/*/
+	claudeProjects := filepath.Join(claudeConfigDir, "projects")
+	if entries, err := os.ReadDir(claudeProjects); err == nil {
+		for _, projEntry := range entries {
+			if !projEntry.IsDir() {
+				continue
+			}
+			path := filepath.Join(claudeProjects, projEntry.Name(), fname)
+			if _, err := os.Stat(path); err == nil {
+				return path
+			}
 		}
 	}
+
+	// OpenClaw sessions: ~/.openclaw/agents/*/sessions/
+	home, _ := os.UserHomeDir()
+	ocAgents := filepath.Join(home, ".openclaw", "agents")
+	if entries, err := os.ReadDir(ocAgents); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			path := filepath.Join(ocAgents, e.Name(), "sessions", fname)
+			if _, err := os.Stat(path); err == nil {
+				return path
+			}
+		}
+	}
+
 	return ""
 }
 
@@ -1332,6 +1538,9 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 				})
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] history scanner error for %s: %v\n", appName, filepath.Base(path), err)
 	}
 
 	// Return only last N messages

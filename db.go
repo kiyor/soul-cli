@@ -26,11 +26,12 @@ func openDB() (*sql.DB, error) {
 	db.Exec("PRAGMA busy_timeout=5000")
 	schemas := []string{
 		`CREATE TABLE IF NOT EXISTS sessions (
-			path       TEXT PRIMARY KEY,
-			size       INTEGER NOT NULL,
-			hash       TEXT NOT NULL,
-			summary    TEXT NOT NULL DEFAULT '',
-			updated_at TEXT NOT NULL
+			path        TEXT PRIMARY KEY,
+			size        INTEGER NOT NULL,
+			hash        TEXT NOT NULL,
+			summary     TEXT NOT NULL DEFAULT '',
+			summary_seg TEXT NOT NULL DEFAULT '',
+			updated_at  TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS patterns (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,12 +206,14 @@ func checkSessions(db *sql.DB, files []sessionFile) []sessionState {
 	return states
 }
 
-// saveSummary saves a single file's summary to DB
+// saveSummary saves a single file's summary to DB.
+// Also populates summary_seg with Chinese-segmented text for FTS5 indexing.
 func saveSummary(db *sql.DB, path, hash string, size int64, summary string) error {
 	now := time.Now().Format(time.RFC3339)
-	_, err := db.Exec(`INSERT INTO sessions (path, size, hash, summary, updated_at) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET size=excluded.size, hash=excluded.hash, summary=excluded.summary, updated_at=excluded.updated_at`,
-		path, size, hash, summary, now)
+	summarySeg := segmentText(summary)
+	_, err := db.Exec(`INSERT INTO sessions (path, size, hash, summary, summary_seg, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET size=excluded.size, hash=excluded.hash, summary=excluded.summary, summary_seg=excluded.summary_seg, updated_at=excluded.updated_at`,
+		path, size, hash, summary, summarySeg, now)
 	return err
 }
 

@@ -38,8 +38,9 @@ type sseBroadcaster struct {
 
 func newBroadcaster() *sseBroadcaster {
 	return &sseBroadcaster{
-		subscribers: make(map[*subscriber]struct{}),
-		historyMax:  100,
+		subscribers:   make(map[*subscriber]struct{}),
+		historyMax:    100,
+		lastEventTime: time.Now(), // initialize so empty sessions are detected as idle
 	}
 }
 

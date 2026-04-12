@@ -33,7 +33,10 @@ var (
 	appName string // derived from os.Args[0] basename, e.g. "weiran", "soul"
 
 	workspace string // dynamically read from openclaw.json, fallback ~/.openclaw/workspace
-	agentName string // read from openclaw.json agents.list main agent name, defaults to appName
+	agentName      string // read from openclaw.json agents.list main agent name, defaults to appName
+	agentAvatarURL    string // optional avatar image URL (from config.json "avatarUrl")
+	agentWelcomeImage string // optional full-body welcome image URL (from config.json "welcomeImage")
+	userAvatarURL     string // optional user avatar image URL (from config.json "userAvatarUrl")
 	claudeBin = filepath.Join(home, ".local", "bin", "claude")
 	lockfile  string // /tmp/<appName>.lock
 	dbPath    string // <appDir>/sessions.db
@@ -344,6 +347,9 @@ func loadConfig() {
 		TelegramChatID       string   `json:"telegramChatID"`
 		ProjectRoots         []string `json:"projectRoots"`
 		AgentName            string   `json:"agentName"`
+		AvatarURL            string   `json:"avatarUrl"`            // optional avatar image URL for WebUI
+		UserAvatarURL        string   `json:"userAvatarUrl"`        // optional user avatar image URL for WebUI
+		WelcomeImage         string   `json:"welcomeImage"`         // optional full-body welcome page image URL
 		DefaultModel         string   `json:"defaultModel"`         // default model for cron/heartbeat (e.g. "zai/glm-5.1")
 		SoulSessionMaxRounds int      `json:"soulSessionMaxRounds"` // 0 = disabled, default 30
 	}
@@ -378,6 +384,19 @@ func loadConfig() {
 	// agentName: config.json override (if openclaw.json didn't set it)
 	if cfg.AgentName != "" && agentName == appName {
 		agentName = cfg.AgentName
+	}
+
+	// avatarUrl: config.json
+	if cfg.AvatarURL != "" {
+		agentAvatarURL = cfg.AvatarURL
+	}
+	if cfg.UserAvatarURL != "" {
+		userAvatarURL = cfg.UserAvatarURL
+	}
+
+	// welcomeImage: config.json
+	if cfg.WelcomeImage != "" {
+		agentWelcomeImage = cfg.WelcomeImage
 	}
 
 	// projectRoots: expand ~ to $HOME

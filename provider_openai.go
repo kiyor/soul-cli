@@ -173,8 +173,11 @@ type codexAnthropicMessage struct {
 }
 
 type codexAnthropicBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`
+	ID    string          `json:"id,omitempty"`    // for tool_use blocks
+	Name  string          `json:"name,omitempty"`  // for tool_use blocks
+	Input json.RawMessage `json:"input,omitempty"` // for tool_use blocks
 }
 
 type codexAnthropicResponse struct {
@@ -206,12 +209,9 @@ type codexBlockStart struct {
 }
 
 type codexBlockDelta struct {
-	Type  string `json:"type"`
-	Index int    `json:"index"`
-	Delta struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"delta"`
+	Type  string         `json:"type"`
+	Index int            `json:"index"`
+	Delta map[string]any `json:"delta"`
 }
 
 type codexBlockStop struct {
@@ -235,14 +235,52 @@ type codexMsgStop struct {
 // ── Codex request ─────────────────────────────────────────────────────────────
 
 type codexAPIRequest struct {
-	Model             string         `json:"model"`
-	Store             bool           `json:"store"`
-	Stream            bool           `json:"stream"`
-	Instructions      string         `json:"instructions"`
-	Input             []codexMessage `json:"input"`
-	Text              map[string]any `json:"text"`
-	ToolChoice        string         `json:"tool_choice"`
-	ParallelToolCalls bool           `json:"parallel_tool_calls"`
+	Model             string            `json:"model"`
+	Store             bool              `json:"store"`
+	Stream            bool              `json:"stream"`
+	Instructions      string            `json:"instructions"`
+	Input             []any             `json:"input"`
+	Text              map[string]any    `json:"text"`
+	Tools             []codexToolSpec   `json:"tools,omitempty"`
+	ToolChoice        string            `json:"tool_choice"`
+	ParallelToolCalls bool              `json:"parallel_tool_calls"`
+}
+
+// codexToolSpec is a Codex function tool definition (OpenAI Responses API format).
+type codexToolSpec struct {
+	Type        string         `json:"type"` // "function"
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
+	Strict      bool           `json:"strict"`
+}
+
+// codexInputMessage is a Codex input message item.
+type codexInputMessage struct {
+	Type    string           `json:"type"` // "message"
+	Role    string           `json:"role"`
+	Content []codexInputItem `json:"content"`
+}
+
+// codexInputItem is a content item inside a Codex input message.
+type codexInputItem struct {
+	Type string `json:"type"` // "input_text" or "output_text"
+	Text string `json:"text"`
+}
+
+// codexFunctionCall is a Codex function_call input item (tool invocation in history).
+type codexFunctionCall struct {
+	Type      string `json:"type"` // "function_call"
+	CallID    string `json:"call_id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// codexFunctionCallOutput is a Codex function_call_output input item (tool result in history).
+type codexFunctionCallOutput struct {
+	Type   string `json:"type"` // "function_call_output"
+	CallID string `json:"call_id"`
+	Output string `json:"output"`
 }
 
 type codexMessage struct {
@@ -293,6 +331,126 @@ func codexExtractContentText(content any) string {
 		return strings.Join(parts, "\n")
 	}
 	return ""
+}
+
+// codexTranslateTools converts Anthropic tool definitions to Codex function tool specs.
+func codexTranslateTools(tools []any) []codexToolSpec {
+	var out []codexToolSpec
+	for _, t := range tools {
+		obj, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := obj["name"].(string)
+		desc, _ := obj["description"].(string)
+		params, _ := obj["input_schema"].(map[string]any)
+		if name == "" {
+			continue
+		}
+		out = append(out, codexToolSpec{
+			Type:        "function",
+			Name:        name,
+			Description: desc,
+			Parameters:  params,
+			Strict:      false,
+		})
+	}
+	return out
+}
+
+// codexTranslateMessages converts Anthropic messages (with tool_use/tool_result blocks)
+// to Codex input items for the Responses API.
+func codexTranslateMessages(messages []codexAnthropicMessage) []any {
+	var out []any
+	for _, m := range messages {
+		role := m.Role
+		switch content := m.Content.(type) {
+		case string:
+			itemType := "input_text"
+			if role == "assistant" {
+				itemType = "output_text"
+			}
+			out = append(out, codexInputMessage{
+				Type: "message",
+				Role: role,
+				Content: []codexInputItem{{Type: itemType, Text: content}},
+			})
+		case []any:
+			// Collect text blocks into a message, emit tool blocks as separate items
+			var textParts []codexInputItem
+			itemType := "input_text"
+			if role == "assistant" {
+				itemType = "output_text"
+			}
+			for _, item := range content {
+				block, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				typ, _ := block["type"].(string)
+				switch typ {
+				case "text":
+					if t, _ := block["text"].(string); t != "" {
+						textParts = append(textParts, codexInputItem{Type: itemType, Text: t})
+					}
+				case "tool_use":
+					// Flush pending text first
+					if len(textParts) > 0 {
+						out = append(out, codexInputMessage{
+							Type: "message", Role: role, Content: textParts,
+						})
+						textParts = nil
+					}
+					id, _ := block["id"].(string)
+					name, _ := block["name"].(string)
+					inputVal := block["input"]
+					argBytes, _ := json.Marshal(inputVal)
+					out = append(out, codexFunctionCall{
+						Type:      "function_call",
+						CallID:    id,
+						Name:      name,
+						Arguments: string(argBytes),
+					})
+				case "tool_result":
+					// Flush pending text first
+					if len(textParts) > 0 {
+						out = append(out, codexInputMessage{
+							Type: "message", Role: role, Content: textParts,
+						})
+						textParts = nil
+					}
+					callID, _ := block["tool_use_id"].(string)
+					// Strip the "toolu_" prefix we added during Codex→Anthropic translation
+					callID = strings.TrimPrefix(callID, "toolu_")
+					outputText := ""
+					switch c := block["content"].(type) {
+					case string:
+						outputText = c
+					case []any:
+						for _, ci := range c {
+							if co, ok := ci.(map[string]any); ok {
+								if t, _ := co["text"].(string); t != "" {
+									outputText += t
+								}
+							}
+						}
+					}
+					out = append(out, codexFunctionCallOutput{
+						Type:   "function_call_output",
+						CallID: callID,
+						Output: outputText,
+					})
+				}
+			}
+			// Flush remaining text
+			if len(textParts) > 0 {
+				out = append(out, codexInputMessage{
+					Type: "message", Role: role, Content: textParts,
+				})
+			}
+		}
+	}
+	return out
 }
 
 func codexWriteSSE(w http.ResponseWriter, event string, data any) {
@@ -412,12 +570,21 @@ func startOpenAIProxy(provider providerConfig) (int, error) {
 }
 
 // handleCodexMessages translates Anthropic /v1/messages → Codex /codex/responses
+// with full tool use support (function_call ↔ tool_use).
 func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSession, chatURL string) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Parse as generic map first to extract tools (not in typed struct)
+	var rawReq map[string]any
+	if err := json.Unmarshal(body, &rawReq); err != nil {
+		http.Error(w, "decode request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	var areq codexAnthropicRequest
 	if err := json.Unmarshal(body, &areq); err != nil {
 		http.Error(w, "decode request: "+err.Error(), http.StatusBadRequest)
@@ -434,13 +601,14 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		instructions = "You are a helpful assistant."
 	}
 
-	var inputMsgs []codexMessage
-	for _, m := range areq.Messages {
-		inputMsgs = append(inputMsgs, codexMessage{
-			Role:    m.Role,
-			Content: codexExtractContentText(m.Content),
-		})
+	// Translate Anthropic tools → Codex function tools
+	var codexTools []codexToolSpec
+	if toolsRaw, ok := rawReq["tools"].([]any); ok && len(toolsRaw) > 0 {
+		codexTools = codexTranslateTools(toolsRaw)
 	}
+
+	// Translate messages with tool_use/tool_result support
+	inputItems := codexTranslateMessages(areq.Messages)
 
 	// use model from request if gpt-prefixed, else fall back to endpoint default
 	targetModel := areq.Model
@@ -453,8 +621,9 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		Store:             false,
 		Stream:            true,
 		Instructions:      instructions,
-		Input:             inputMsgs,
+		Input:             inputItems,
 		Text:              map[string]any{"verbosity": "medium"},
+		Tools:             codexTools,
 		ToolChoice:        "auto",
 		ParallelToolCalls: true,
 	}
@@ -492,7 +661,7 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		return
 	}
 
-	// Stream Codex SSE → Anthropic SSE
+	// Stream Codex SSE → Anthropic SSE with tool support
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -511,11 +680,6 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 			Usage:   codexAnthropicUsage{},
 		},
 	})
-	codexWriteSSE(w, "content_block_start", codexBlockStart{
-		Type:         "content_block_start",
-		Index:        0,
-		ContentBlock: codexAnthropicBlock{Type: "text", Text: ""},
-	})
 	codexWriteSSE(w, "ping", map[string]string{"type": "ping"})
 	if flusher != nil {
 		flusher.Flush()
@@ -525,6 +689,9 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	stopReason := "end_turn"
 	var outputTokens int
+	blockIndex := 0
+	textBlockStarted := false
+	hasToolUse := false
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -546,14 +713,88 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		case "response.output_text.delta":
 			delta, _ := event["delta"].(string)
 			if delta != "" {
-				bd := codexBlockDelta{Type: "content_block_delta", Index: 0}
-				bd.Delta.Type = "text_delta"
-				bd.Delta.Text = delta
-				codexWriteSSE(w, "content_block_delta", bd)
+				// Lazy-start a text block
+				if !textBlockStarted {
+					codexWriteSSE(w, "content_block_start", codexBlockStart{
+						Type:         "content_block_start",
+						Index:        blockIndex,
+						ContentBlock: codexAnthropicBlock{Type: "text", Text: ""},
+					})
+					textBlockStarted = true
+				}
+				codexWriteSSE(w, "content_block_delta", codexBlockDelta{
+					Type:  "content_block_delta",
+					Index: blockIndex,
+					Delta: map[string]any{"type": "text_delta", "text": delta},
+				})
 				if flusher != nil {
 					flusher.Flush()
 				}
 			}
+
+		case "response.output_item.done":
+			item, _ := event["item"].(map[string]any)
+			if item == nil {
+				continue
+			}
+			itemType, _ := item["type"].(string)
+
+			if itemType == "function_call" {
+				// Close any open text block first
+				if textBlockStarted {
+					codexWriteSSE(w, "content_block_stop", codexBlockStop{
+						Type: "content_block_stop", Index: blockIndex,
+					})
+					blockIndex++
+					textBlockStarted = false
+				}
+
+				hasToolUse = true
+				callID, _ := item["call_id"].(string)
+				name, _ := item["name"].(string)
+				arguments, _ := item["arguments"].(string)
+
+				// Generate Anthropic tool_use_id from call_id
+				toolUseID := "toolu_" + callID
+				if callID == "" {
+					toolUseID = "toolu_" + codexRandomID()
+				}
+
+				// Emit content_block_start for tool_use
+				codexWriteSSE(w, "content_block_start", codexBlockStart{
+					Type:  "content_block_start",
+					Index: blockIndex,
+					ContentBlock: codexAnthropicBlock{
+						Type:  "tool_use",
+						ID:    toolUseID,
+						Name:  name,
+						Input: json.RawMessage("{}"),
+					},
+				})
+
+				// Emit the full arguments as input_json_delta
+				if arguments != "" {
+					codexWriteSSE(w, "content_block_delta", codexBlockDelta{
+						Type:  "content_block_delta",
+						Index: blockIndex,
+						Delta: map[string]any{
+							"type":         "input_json_delta",
+							"partial_json": arguments,
+						},
+					})
+				}
+
+				// Close tool_use block
+				codexWriteSSE(w, "content_block_stop", codexBlockStop{
+					Type: "content_block_stop", Index: blockIndex,
+				})
+				blockIndex++
+
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+
 		case "response.completed":
 			if respObj, ok := event["response"].(map[string]any); ok {
 				if usage, ok := respObj["usage"].(map[string]any); ok {
@@ -565,7 +806,22 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		}
 	}
 
-	codexWriteSSE(w, "content_block_stop", codexBlockStop{Type: "content_block_stop", Index: 0})
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] codex SSE scanner error: %v\n", appName, err)
+	}
+
+	// Close any remaining open text block
+	if textBlockStarted {
+		codexWriteSSE(w, "content_block_stop", codexBlockStop{
+			Type: "content_block_stop", Index: blockIndex,
+		})
+	}
+
+	// Set stop reason based on whether tools were called
+	if hasToolUse {
+		stopReason = "tool_use"
+	}
+
 	msgDelta := codexMsgDelta{Type: "message_delta", Usage: codexAnthropicUsage{OutputTokens: outputTokens}}
 	msgDelta.Delta.StopReason = stopReason
 	codexWriteSSE(w, "message_delta", msgDelta)

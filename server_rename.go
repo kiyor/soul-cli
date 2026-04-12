@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -55,6 +56,15 @@ func openServerDB() (*sql.DB, error) {
 
 		// Migration: add participants for IPC tracking (JSON array of session IDs that sent messages)
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'`)
+
+		// Migration: add status for session rehydration across server restarts
+		// active = running, suspended = graceful shutdown, ended = destroyed/reaped
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`)
+		// Migration: add rehydrate_message — non-empty means this session triggered the restart
+		// and should receive this message after rehydration to continue working
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN rehydrate_message TEXT NOT NULL DEFAULT ''`)
+		// Migration: add model — persisted for rehydration (e.g. "claude-opus-4-6[1m]")
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`)
 
 		// Migration: session_interactions table for IPC anti-loop tracking
 		serverDB.Exec(`CREATE TABLE IF NOT EXISTS session_interactions (
@@ -463,6 +473,158 @@ Conversation:
 		return ""
 	}
 	return title
+}
+
+// ── Session Rehydration DB helpers ──
+
+// updateSessionStatus sets the persistent status for a session.
+func updateSessionStatus(sessionID, status string) {
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	now := time.Now().Format(time.RFC3339)
+	db.Exec(`UPDATE server_sessions SET status=?, updated_at=? WHERE session_id=?`,
+		status, now, sessionID)
+}
+
+// batchSuspendActiveSessions marks all active sessions as suspended (for graceful shutdown).
+func batchSuspendActiveSessions() int {
+	db, err := openServerDB()
+	if err != nil {
+		return 0
+	}
+	now := time.Now().Format(time.RFC3339)
+	res, err := db.Exec(`UPDATE server_sessions SET status='suspended', updated_at=? WHERE status='active'`, now)
+	if err != nil {
+		return 0
+	}
+	n, _ := res.RowsAffected()
+	return int(n)
+}
+
+// setSessionModel persists the model name for a session.
+// getSessionModel returns the persisted model for a session (by weiran session ID or Claude session ID).
+func getSessionModel(id string) string {
+	db, err := openServerDB()
+	if err != nil {
+		return ""
+	}
+	var model string
+	db.QueryRow(`SELECT COALESCE(model,'') FROM server_sessions WHERE session_id=? OR claude_session_id=?`, id, id).Scan(&model)
+	return model
+}
+
+func setSessionModel(sessionID, model string) {
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	now := time.Now().Format(time.RFC3339)
+	db.Exec(`UPDATE server_sessions SET model=?, updated_at=? WHERE session_id=?`,
+		model, now, sessionID)
+}
+
+// getModelFromJSONL extracts the model from a session's JSONL init message.
+// This is a last-resort fallback when the model is not in the DB.
+// The init message is typically within the first 5 lines; we scan up to 50 as safety margin.
+func getModelFromJSONL(sessionID string) string {
+	path := findSessionJSONL(sessionID)
+	if path == "" {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for i := 0; i < 50 && scanner.Scan(); i++ {
+		var ev struct {
+			Type    string `json:"type"`
+			Subtype string `json:"subtype"`
+			Model   string `json:"model"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &ev) == nil && ev.Type == "system" && ev.Subtype == "init" && ev.Model != "" {
+			return ev.Model
+		}
+	}
+	return ""
+}
+
+// setRehydrateMessage marks a session to be woken with a message after server restart.
+func setRehydrateMessage(sessionID, message string) {
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	now := time.Now().Format(time.RFC3339)
+	db.Exec(`UPDATE server_sessions SET rehydrate_message=?, updated_at=? WHERE session_id=?`,
+		message, now, sessionID)
+}
+
+// rehydratableSession holds the info needed to resume a session after restart.
+type rehydratableSession struct {
+	SessionID       string
+	ClaudeSID       string
+	Name            string
+	Category        string
+	Model           string
+	ReplaceSoul     bool
+	RehydrateMsg    string
+	ChromeEnabled   bool
+	GalID           string
+}
+
+// getRehydratableSessions returns sessions eligible for rehydration.
+// Criteria: status active/suspended, has claude_session_id, interactive/telegram category,
+// updated within the last maxAge.
+func getRehydratableSessions(maxAge time.Duration) ([]rehydratableSession, error) {
+	db, err := openServerDB()
+	if err != nil {
+		return nil, err
+	}
+	cutoff := time.Now().Add(-maxAge).Format(time.RFC3339)
+	rows, err := db.Query(`
+		SELECT session_id, claude_session_id, name, category, replace_soul,
+		       rehydrate_message, chrome_enabled, gal_id, model
+		FROM server_sessions
+		WHERE status IN ('active', 'suspended')
+		  AND claude_session_id != ''
+		  AND category IN ('interactive', 'telegram')
+		  AND updated_at > ?
+		ORDER BY updated_at DESC
+	`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []rehydratableSession
+	for rows.Next() {
+		var s rehydratableSession
+		var replaceSoul, chrome int
+		if err := rows.Scan(&s.SessionID, &s.ClaudeSID, &s.Name, &s.Category,
+			&replaceSoul, &s.RehydrateMsg, &chrome, &s.GalID, &s.Model); err != nil {
+			continue
+		}
+		s.ReplaceSoul = replaceSoul == 1
+		s.ChromeEnabled = chrome == 1
+		result = append(result, s)
+	}
+	return result, nil
+}
+
+// expireStaleRehydratables marks old active/suspended sessions as ended.
+func expireStaleRehydratables(maxAge time.Duration) {
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-maxAge).Format(time.RFC3339)
+	db.Exec(`UPDATE server_sessions SET status='ended' WHERE status IN ('active','suspended') AND updated_at <= ?`, cutoff)
 }
 
 // filterNestedClaudeEnv removes env vars that would confuse a nested claude subprocess.

@@ -306,13 +306,14 @@ func getModelEndpoint() string {
 
 // providerConfig holds baseURL and apiKey for a model provider.
 type providerConfig struct {
-	BaseURL  string   `json:"baseUrl"`
-	APIKey   string   `json:"apiKey"`
-	AuthEnv  string   `json:"authEnv"`  // env var name for the key, default "ANTHROPIC_AUTH_TOKEN"; use "ANTHROPIC_API_KEY" for MiniMax etc.
-	Models   []string `json:"models"`   // available model names for this provider
-	Type     string   `json:"type"`     // "" or "anthropic" (default, passthrough) or "openai" (needs embedded translation proxy)
-	ChatURL  string   `json:"chatUrl"`  // OpenAI-compatible chat completions endpoint (used when Type=="openai")
-	AuthFile string   `json:"authFile"` // path to auth JSON (e.g. ~/.codex/auth.json, used when Type=="openai")
+	BaseURL        string   `json:"baseUrl"`
+	APIKey         string   `json:"apiKey"`
+	AuthEnv        string   `json:"authEnv"`        // env var name for the key, default "ANTHROPIC_AUTH_TOKEN"; use "ANTHROPIC_API_KEY" for MiniMax etc.
+	Models         []string `json:"models"`          // available model names for this provider
+	Type           string   `json:"type"`            // "" or "anthropic" (default, passthrough) or "openai" (needs embedded translation proxy)
+	ChatURL        string   `json:"chatUrl"`         // OpenAI-compatible chat completions endpoint (used when Type=="openai")
+	AuthFile       string   `json:"authFile"`        // path to auth JSON (e.g. ~/.codex/auth.json, used when Type=="openai")
+	SmallFastModel string   `json:"smallFastModel"`  // override ANTHROPIC_SMALL_FAST_MODEL for this provider (e.g. "glm-5-turbo")
 }
 
 // resolveProvider looks up a provider's endpoint config from config.json "providers" section.
@@ -460,10 +461,37 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 		}
 	}
 
+	// Inject ANTHROPIC_SMALL_FAST_MODEL if the provider defines one.
+	// This makes Claude Code's internal Haiku calls (session titles, tool summaries,
+	// web fetch, etc.) go through the same provider instead of Anthropic.
+	if provider.SmallFastModel != "" {
+		filtered = append(filtered, "ANTHROPIC_SMALL_FAST_MODEL="+provider.SmallFastModel)
+		fmt.Fprintf(os.Stderr, "[%s] small fast model → %s\n", appName, provider.SmallFastModel)
+	}
+
 	// Extend timeout for third-party providers (they can be slower)
 	filtered = append(filtered, "API_TIMEOUT_MS=3000000")
 
 	return filtered, true
+}
+
+// mergeInitModel merges the model reported by Claude Code's init message with the
+// model originally requested by the user. Claude Code strips context-window suffixes
+// like "[1m]" from the model ID in init messages, so if the user requested e.g.
+// "claude-opus-4-6[1m]" and init reports "claude-opus-4-6", we preserve the original.
+func mergeInitModel(current, fromInit string) string {
+	if fromInit == "" {
+		return current
+	}
+	// If current model has a bracketed suffix (e.g. "[1m]") and init model is
+	// the same base without the suffix, keep the current (more specific) value.
+	if idx := strings.Index(current, "["); idx > 0 {
+		base := current[:idx]
+		if strings.EqualFold(base, fromInit) || strings.EqualFold(current, fromInit) {
+			return current
+		}
+	}
+	return fromInit
 }
 
 // providerModelName extracts the model name from a "provider/model" string.

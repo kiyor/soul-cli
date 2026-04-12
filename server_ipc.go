@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"context"
 )
 
 // ── IPC: Inter-Session Communication ──
@@ -211,5 +213,82 @@ func handleIPCInteractionCount() http.HandlerFunc {
 			"peer_id":    peerID,
 			"rounds":     count,
 		})
+	}
+}
+
+// handleSessionWait handles GET /api/sessions/{id}/wait
+// Blocks until the session reaches idle/stopped/error, or times out (10 min).
+func handleSessionWait(sm *sessionManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.PathValue("id")
+		sess := sm.getSession(sessionID)
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+
+		// Check if already in a terminal state
+		sess.mu.Lock()
+		status := sess.Status
+		numTurns := sess.NumTurns
+		if status == "idle" || status == "stopped" || status == "error" {
+			sess.mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":    status,
+				"num_turns": numTurns,
+				"timeout":   false,
+			})
+			return
+		}
+
+		// Register waiter channel
+		ch := make(chan string, 1)
+		sess.waiters = append(sess.waiters, ch)
+		sess.mu.Unlock()
+
+		// Wait with timeout (10 minutes), respecting client disconnect
+		timeout := 10 * time.Minute
+		if t := r.URL.Query().Get("timeout"); t != "" {
+			if d, err := time.ParseDuration(t); err == nil && d > 0 && d <= 30*time.Minute {
+				timeout = d
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
+		defer cancel()
+
+		select {
+		case finalStatus := <-ch:
+			sess.mu.Lock()
+			turns := sess.NumTurns
+			sess.mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":    finalStatus,
+				"num_turns": turns,
+				"timeout":   false,
+			})
+		case <-ctx.Done():
+			// Timeout or client disconnect — remove our waiter
+			sess.mu.Lock()
+			for i, c := range sess.waiters {
+				if c == ch {
+					sess.waiters = append(sess.waiters[:i], sess.waiters[i+1:]...)
+					break
+				}
+			}
+			sess.mu.Unlock()
+			if r.Context().Err() != nil {
+				return
+			}
+			sess.mu.Lock()
+			currentStatus := sess.Status
+			turns := sess.NumTurns
+			sess.mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":    currentStatus,
+				"num_turns": turns,
+				"timeout":   true,
+			})
+		}
 	}
 }

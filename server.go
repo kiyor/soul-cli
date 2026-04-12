@@ -20,6 +20,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsConfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 //go:embed web/index.html
@@ -39,6 +43,53 @@ type serverConfig struct {
 	Telegram             telegramBotConfig   `json:"telegram"`
 	Proxy                proxyConfig         `json:"proxy"`
 	SessionReset         sessionResetConfig  `json:"sessionReset"`
+	S3                   s3Config            `json:"s3"`
+}
+
+// s3Config holds Wasabi/S3 upload settings for image hosting.
+type s3Config struct {
+	Endpoint string `json:"endpoint"` // e.g. "https://s3.us-west-1.wasabisys.com"
+	Bucket   string `json:"bucket"`   // e.g. "kiyor-agent-images"
+	Region   string `json:"region"`   // e.g. "us-west-1"
+	Prefix   string `json:"prefix"`   // e.g. "webui/"
+	Profile  string `json:"profile"`  // AWS credentials profile, e.g. "wasabi"
+}
+
+// Cached S3 client to avoid re-loading AWS config on every upload.
+var (
+	s3ClientOnce   sync.Once
+	s3ClientCached *s3.Client
+	s3ConfigCached s3Config
+)
+
+func getS3Client(cfg s3Config) *s3.Client {
+	s3ClientOnce.Do(func() {
+		s3ConfigCached = cfg
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		var awsCfg aws.Config
+		var err error
+		if cfg.Profile != "" {
+			awsCfg, err = awsConfig.LoadDefaultConfig(ctx,
+				awsConfig.WithSharedConfigProfile(cfg.Profile),
+				awsConfig.WithRegion(cfg.Region),
+			)
+		} else {
+			awsCfg, err = awsConfig.LoadDefaultConfig(ctx,
+				awsConfig.WithRegion(cfg.Region),
+			)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] s3: load config failed: %v\n", appName, err)
+			return
+		}
+		s3ClientCached = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(cfg.Endpoint)
+			o.UsePathStyle = true // Wasabi requires path-style
+		})
+	})
+	return s3ClientCached
 }
 
 // sessionResetConfig mirrors SessionResetPolicy for JSON config loading.
@@ -113,6 +164,7 @@ func loadServerConfig() serverConfig {
 			cfg.Telegram = wrapper.Server.Telegram
 			// Session reset policy (always copy; defaults are filled in by loadResetPolicyFromConfig)
 			cfg.SessionReset = wrapper.Server.SessionReset
+			cfg.S3 = wrapper.Server.S3
 			if wrapper.Server.Proxy.Port != 0 || wrapper.Server.Proxy.Upstream != "" || wrapper.Server.Proxy.Enabled {
 				if wrapper.Server.Proxy.Enabled {
 					cfg.Proxy.Enabled = true
@@ -237,7 +289,7 @@ func handleServer(args []string) {
 
 	// Health (no auth required)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{
+		resp := map[string]any{
 			"status":        "ok",
 			"app":           appName,
 			"agent_name":    agentName,
@@ -246,7 +298,17 @@ func handleServer(args []string) {
 			"uptime":        time.Since(serverStartTime).String(),
 			"sniff_enabled": activeProxyPort > 0,
 			"sniff_port":    activeProxyPort,
-		})
+		}
+		if agentAvatarURL != "" {
+			resp["avatar_url"] = agentAvatarURL
+		}
+		if userAvatarURL != "" {
+			resp["user_avatar_url"] = userAvatarURL
+		}
+		if agentWelcomeImage != "" {
+			resp["welcome_image"] = agentWelcomeImage
+		}
+		writeJSON(w, http.StatusOK, resp)
 	})
 
 	// Config info (authed)
@@ -423,6 +485,7 @@ func handleServer(args []string) {
 			Project        string   `json:"project"`
 			Model          string   `json:"model"`
 			InitialMessage string   `json:"initial_message"`
+			Message        string   `json:"message"` // alias for initial_message
 			SoulFiles      bool     `json:"soul_files"`
 			MCPConfig      string   `json:"mcp_config"`
 			GalID          string   `json:"gal_id"`
@@ -433,6 +496,10 @@ func handleServer(args []string) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return
+		}
+		// Support "message" as alias for "initial_message"
+		if req.InitialMessage == "" && req.Message != "" {
+			req.InitialMessage = req.Message
 		}
 
 		if req.Name == "" {
@@ -635,6 +702,10 @@ func handleServer(args []string) {
 	mux.HandleFunc("GET /api/sessions/{id}/interaction-count", authMiddleware(cfg.Token,
 		handleIPCInteractionCount()))
 
+	// Wait for session to reach idle/stopped/error state
+	mux.HandleFunc("GET /api/sessions/{id}/wait", authMiddleware(cfg.Token,
+		handleSessionWait(sm)))
+
 	// Upload file to session (multipart)
 	mux.HandleFunc("POST /api/sessions/{id}/upload", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		if !rl.allow() {
@@ -705,6 +776,12 @@ func handleServer(args []string) {
 		// Build URL path for the uploaded file
 		urlPath := "/uploads/" + filename
 
+		// Best-effort S3 upload: if configured, upload to S3 and return public URL
+		s3URL := uploadToS3(cfg.S3, destPath, filename, ct)
+		if s3URL != "" {
+			urlPath = s3URL
+		}
+
 		fmt.Fprintf(os.Stderr, "[%s] server: uploaded %s (%d bytes) for session %s\n",
 			appName, filename, written, sess.ID)
 
@@ -715,6 +792,71 @@ func handleServer(args []string) {
 			"size":          written,
 			"content_type":  ct,
 		})
+	}))
+
+	// Voice transcription (upload audio → whisper-cpp → transcript)
+	mux.HandleFunc("POST /api/sessions/{id}/voice", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		if !rl.allow() {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+			return
+		}
+
+		sess := sm.getSession(r.PathValue("id"))
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+
+		// Parse multipart form — 32 MB max
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to parse form: " + err.Error()})
+			return
+		}
+
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file field is required"})
+			return
+		}
+		defer file.Close()
+
+		// Save to temp file
+		ts := time.Now().UnixMilli()
+		tmpInput := fmt.Sprintf("/tmp/webui-voice-%d.webm", ts)
+		dst, err := os.Create(tmpInput)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create temp file"})
+			return
+		}
+		if _, err := io.Copy(dst, file); err != nil {
+			dst.Close()
+			os.Remove(tmpInput)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save audio"})
+			return
+		}
+		dst.Close()
+		defer os.Remove(tmpInput)
+
+		// Convert to WAV via ffmpeg
+		tmpWAV := fmt.Sprintf("/tmp/webui-voice-%d.wav", ts)
+		ffCtx, ffCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer ffCancel()
+		if out, err := exec.CommandContext(ffCtx, "ffmpeg", "-y", "-i", tmpInput, "-ar", "16000", "-ac", "1", "-f", "wav", tmpWAV).CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] voice: ffmpeg failed: %v\n%s\n", appName, err, out)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "audio conversion failed"})
+			return
+		}
+		defer os.Remove(tmpWAV)
+
+		// Transcribe via whisper-cpp (reuse existing function from server_telegram.go)
+		transcript := transcribeAudio(tmpWAV, 0) // duration 0 = use default timeout
+		if transcript == "" {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "transcription failed or audio was empty"})
+			return
+		}
+
+		fmt.Fprintf(os.Stderr, "[%s] voice: transcribed %d chars for session %s\n", appName, len(transcript), sess.ID)
+		writeJSON(w, http.StatusOK, map[string]string{"transcript": transcript})
 	}))
 
 	// SSE stream
@@ -1280,6 +1422,50 @@ func handleServer(args []string) {
 		})
 	})
 
+	// ── Prepare Restart (rehydration marker) ──
+	// Called by a session before triggering `make server-restart`.
+	// Marks itself as the restart initiator so it gets woken after rehydration.
+	mux.HandleFunc("POST /api/server/prepare-restart", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			SessionID string `json:"session_id"` // weiran session ID of the caller
+			Message   string `json:"message"`    // message to send after rehydration
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id is required"})
+			return
+		}
+		if req.Message == "" {
+			req.Message = "Server restarted successfully. Continue from where you left off."
+		}
+
+		// Verify session exists
+		sess := sm.getSession(req.SessionID)
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+
+		// Ensure claude_session_id is persisted (needed for resume after restart)
+		sess.mu.Lock()
+		claudeSID := sess.ClaudeSID
+		sess.mu.Unlock()
+		if claudeSID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session has no claude_session_id yet"})
+			return
+		}
+		setClaudeSessionID(req.SessionID, claudeSID)
+		setRehydrateMessage(req.SessionID, req.Message)
+
+		fmt.Fprintf(os.Stderr, "[%s] server: prepare-restart: session %s marked for rehydration\n",
+			appName, shortID(req.SessionID))
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":           "prepared",
+			"session_id":       req.SessionID,
+			"claude_session_id": claudeSID,
+		})
+	}))
+
 	// WebSocket endpoint for bidirectional real-time sync
 	mux.HandleFunc("GET /api/ws", hub.serveWS)
 
@@ -1348,6 +1534,13 @@ func handleServer(args []string) {
 	// Runs as a background goroutine inside the server process.
 	resetPolicy := loadResetPolicyFromConfig(cfg)
 	go sessionLifecycleWatcher(bgCtx, resetPolicy, 5*time.Minute)
+
+	// Rehydrate sessions from previous server instance.
+	// Runs after lifecycle watcher is up, with a delay to ensure HTTP server is ready.
+	go func() {
+		time.Sleep(3 * time.Second)
+		sm.rehydrateSessions()
+	}()
 
 	// Graceful shutdown on SIGTERM/SIGINT
 	sigCh := make(chan os.Signal, 1)
@@ -1426,4 +1619,53 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+// ── S3 Upload ──
+
+// uploadToS3 uploads a file to S3 (Wasabi) using a cached client.
+// Returns the public URL on success, or empty string on failure.
+func uploadToS3(cfg s3Config, localPath string, s3Key string, contentType string) string {
+	if cfg.Bucket == "" || cfg.Endpoint == "" {
+		return ""
+	}
+
+	client := getS3Client(cfg)
+	if client == nil {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	file, err := os.Open(localPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] s3: open file failed: %v\n", appName, err)
+		return ""
+	}
+	defer file.Close()
+
+	// Normalize prefix: ensure trailing slash, no double slashes
+	prefix := strings.TrimRight(cfg.Prefix, "/")
+	if prefix != "" {
+		prefix += "/"
+	}
+
+	stat, _ := file.Stat()
+	fullKey := prefix + strings.TrimLeft(s3Key, "/")
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(cfg.Bucket),
+		Key:           aws.String(fullKey),
+		Body:          file,
+		ContentLength: aws.Int64(stat.Size()),
+		ContentType:   aws.String(contentType),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] s3: upload failed: %v\n", appName, err)
+		return ""
+	}
+
+	// Build public URL with normalized path
+	endpoint := strings.TrimRight(cfg.Endpoint, "/")
+	return fmt.Sprintf("%s/%s/%s", endpoint, cfg.Bucket, fullKey)
 }

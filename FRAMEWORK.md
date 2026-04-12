@@ -72,6 +72,7 @@ Sessions running under the same `{cli} server` can communicate with each other. 
 | `{cli} session read <id>` | Read a session's full message history |
 | `{cli} session search <id> "keyword"` | Search a session's history via FTS |
 | `{cli} session send <id> "message"` | Send a message to another session (wakes idle sessions) |
+| `{cli} session wait <id>` | Block until target session becomes idle/exited (10min timeout, `?timeout=5m` to customize) |
 | `{cli} session close <id>` | Destroy a session (cannot close your own) |
 
 Short ID prefixes work everywhere (e.g. `b265` resolves to the full UUID).
@@ -86,7 +87,8 @@ Short ID prefixes work everywhere (e.g. `b265` resolves to the full UUID).
 
 ### When to use IPC
 
-- Delegate a sub-task to a cheaper model session, then read its results
+- Delegate a sub-task to a cheaper model session, wait for completion, then review its results
+- Spawn + wait pattern: create session → `{cli} session wait <id>` → review changes → close
 - Coordinate multi-session workflows (e.g. research → implement → review)
 - Clean up spawned sessions after they finish
 

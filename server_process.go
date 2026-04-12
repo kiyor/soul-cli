@@ -2,11 +2,15 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -249,6 +253,8 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 }
 
 // sendMessage writes a user message to Claude Code's stdin.
+// If the message contains ![alt](url) image patterns, extracts images and
+// sends a content array with text + image blocks (base64 encoded).
 func (p *claudeProcess) sendMessage(content string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -259,14 +265,139 @@ func (p *claudeProcess) sendMessage(content string) error {
 	default:
 	}
 
+	// Build content: detect image markdown and convert to content blocks
+	msgContent := buildMessageContent(content)
+
 	payload, _ := json.Marshal(map[string]any{
 		"type":               "user",
-		"message":            map[string]any{"role": "user", "content": content},
+		"message":            map[string]any{"role": "user", "content": msgContent},
 		"parent_tool_use_id": nil,
 		"session_id":         "default",
 	})
 	_, err := p.stdin.Write(append(payload, '\n'))
 	return err
+}
+
+// buildMessageContent parses the message for image markdown and returns
+// either a plain string (no images) or a content array (text + image blocks).
+func buildMessageContent(content string) any {
+	re := regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+	matches := re.FindAllStringSubmatchIndex(content, -1)
+	if len(matches) == 0 {
+		return content // no images, keep as plain string
+	}
+
+	var blocks []map[string]any
+	lastIdx := 0
+
+	for _, match := range matches {
+		// Text before this image
+		if match[0] > lastIdx {
+			text := strings.TrimSpace(content[lastIdx:match[0]])
+			if text != "" {
+				blocks = append(blocks, map[string]any{
+					"type": "text",
+					"text": text,
+				})
+			}
+		}
+
+		// Image URL
+		imgURL := content[match[4]:match[5]]
+		altText := content[match[2]:match[3]]
+
+		imgBlock := resolveImageBlock(imgURL, altText)
+		if imgBlock != nil {
+			blocks = append(blocks, imgBlock)
+		}
+
+		lastIdx = match[1]
+	}
+
+	// Trailing text
+	if lastIdx < len(content) {
+		text := strings.TrimSpace(content[lastIdx:])
+		if text != "" {
+			blocks = append(blocks, map[string]any{
+				"type": "text",
+				"text": text,
+			})
+		}
+	}
+
+	if len(blocks) == 0 {
+		return content
+	}
+	return blocks
+}
+
+// resolveImageBlock reads an image (local file or HTTP URL) and returns
+// a Claude API image content block with base64 data, or nil on failure.
+func resolveImageBlock(imgURL string, altText string) map[string]any {
+	var data []byte
+	var mediaType string
+	var err error
+
+	if strings.HasPrefix(imgURL, "/uploads/") {
+		// Local file: resolve against workspace uploads dir
+		filename := filepath.Base(imgURL)
+		localPath := filepath.Join(workspace, "uploads", filename)
+		data, err = os.ReadFile(localPath)
+		mediaType = guessMediaType(filename)
+	} else if strings.HasPrefix(imgURL, "http://") || strings.HasPrefix(imgURL, "https://") {
+		// Remote URL: download with timeout
+		client := &http.Client{Timeout: 15 * time.Second}
+		resp, respErr := client.Get(imgURL)
+		if respErr != nil {
+			fmt.Fprintf(os.Stderr, "[%s] image download failed: %v\n", appName, respErr)
+			return nil
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			fmt.Fprintf(os.Stderr, "[%s] image download status: %d\n", appName, resp.StatusCode)
+			return nil
+		}
+		data, err = io.ReadAll(io.LimitReader(resp.Body, 20<<20)) // 20MB max
+		mediaType = resp.Header.Get("Content-Type")
+		if mediaType == "" {
+			mediaType = guessMediaType(imgURL)
+		}
+	} else {
+		return nil // unsupported URL scheme
+	}
+
+	if err != nil || len(data) == 0 {
+		fmt.Fprintf(os.Stderr, "[%s] image read failed: %v\n", appName, err)
+		return nil
+	}
+
+	return map[string]any{
+		"type": "image",
+		"source": map[string]any{
+			"type":       "base64",
+			"media_type": mediaType,
+			"data":       base64.StdEncoding.EncodeToString(data),
+		},
+	}
+}
+
+// guessMediaType returns a MIME type based on file extension.
+func guessMediaType(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".svg":
+		return "image/svg+xml"
+	default:
+		return "image/png"
+	}
 }
 
 // controlRequest sends a control request (interrupt, set_model, context_usage, etc.).
@@ -428,6 +559,9 @@ func (p *claudeProcess) readLines(handler func(msgType string, raw json.RawMessa
 		copy(raw, line)
 
 		handler(peek.Type, raw)
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] readLines scanner error: %v\n", appName, err)
 	}
 }
 

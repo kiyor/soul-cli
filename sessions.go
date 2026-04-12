@@ -297,8 +297,10 @@ func parseSessionHead(s *sessionInfo) {
 
 		var ev struct {
 			Type      string `json:"type"`
+			Subtype   string `json:"subtype"`
 			Title     string `json:"title"`
 			Timestamp string `json:"timestamp"`
+			Model     string `json:"model"` // init message has model at top level
 			Message   struct {
 				Role    string          `json:"role"`
 				Content json.RawMessage `json:"content"`
@@ -310,6 +312,11 @@ func parseSessionHead(s *sessionInfo) {
 		}
 
 		switch ev.Type {
+		case "system":
+			// init message contains the model used to start the session
+			if ev.Subtype == "init" && s.Model == "" && ev.Model != "" {
+				s.Model = ev.Model
+			}
 		case "custom-title":
 			if s.Title == "" {
 				s.Title = ev.Title

@@ -16,7 +16,7 @@ import (
 // handleSessionIPC dispatches `weiran session <subcommand>` CLI commands.
 func handleSessionIPC(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "usage: %s session <list|send|read|search|close>\n", appName)
+		fmt.Fprintf(os.Stderr, "usage: %s session <list|send|read|search|close|wait>\n", appName)
 		os.Exit(1)
 	}
 
@@ -49,9 +49,22 @@ func handleSessionIPC(args []string) {
 			os.Exit(1)
 		}
 		ipcClose(args[1])
+	case "wait":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "usage: %s session wait <target_id>\n", appName)
+			os.Exit(1)
+		}
+		ipcWait(args[1])
+	case "prepare-restart":
+		// Optional: custom message as args[1:]
+		msg := ""
+		if len(args) > 1 {
+			msg = strings.Join(args[1:], " ")
+		}
+		ipcPrepareRestart(msg)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown session subcommand: %s\n", args[0])
-		fmt.Fprintf(os.Stderr, "usage: %s session <list|send|read|search|close>\n", appName)
+		fmt.Fprintf(os.Stderr, "usage: %s session <list|send|read|search|close|wait|prepare-restart>\n", appName)
 		os.Exit(1)
 	}
 }
@@ -309,4 +322,78 @@ func ipcClose(targetID string) {
 	}
 
 	fmt.Printf("session %s closed\n", shortID(targetID))
+}
+
+// ipcPrepareRestart marks the current session for rehydration after server restart.
+// The session will be resumed and receive a wake message after the server comes back.
+func ipcPrepareRestart(message string) {
+	_, _, myID := ipcEnv()
+	if myID == "" {
+		fmt.Fprintf(os.Stderr, "error: %s_SESSION_ID not set\n", ipcEnvPrefix())
+		os.Exit(1)
+	}
+
+	if message == "" {
+		message = "Server restarted successfully. Continue from where you left off."
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"session_id": myID,
+		"message":    message,
+	})
+	resp, err := ipcRequest("POST", "/api/server/prepare-restart", strings.NewReader(string(body)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to decode response (status %d): %v\n", resp.StatusCode, err)
+		os.Exit(1)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "error: %v (status %d)\n", result["error"], resp.StatusCode)
+		os.Exit(1)
+	}
+
+	fmt.Printf("prepared for restart (session %s → claude %s)\n",
+		shortID(myID), shortID(fmt.Sprintf("%v", result["claude_session_id"])))
+}
+
+// ipcWait blocks until the target session reaches idle/stopped/error state.
+func ipcWait(targetID string) {
+	targetID = resolveSessionID(targetID)
+
+	fmt.Fprintf(os.Stderr, "waiting for session %s...\n", shortID(targetID))
+
+	resp, err := ipcRequest("GET", "/api/sessions/"+targetID+"/wait", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to decode response (status %d): %v\n", resp.StatusCode, err)
+		os.Exit(1)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "error: %v (status %d)\n", result["error"], resp.StatusCode)
+		os.Exit(1)
+	}
+
+	status := fmt.Sprintf("%v", result["status"])
+	turns := result["num_turns"]
+	timedOut, _ := result["timeout"].(bool)
+
+	if timedOut {
+		fmt.Printf("timeout (status: %s, turns: %v)\n", status, turns)
+	} else {
+		fmt.Printf("done (status: %s, turns: %v)\n", status, turns)
+	}
 }

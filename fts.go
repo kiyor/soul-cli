@@ -20,7 +20,7 @@ import (
 //      The daily_notes table is the source of truth; triggers keep the
 //      FTS virtual table in sync on insert/update/delete.
 //
-//   2. session_summaries_fts — references the existing sessions.summary
+//   2. session_summaries_fts — references the existing sessions.summary_seg
 //      column via external-content mode. No data duplication; triggers on
 //      the sessions table keep the index fresh.
 //
@@ -28,9 +28,10 @@ import (
 //      session JSONL files (both Claude Code and OpenClaw sessions).
 //      Enables keyword search over actual conversation content.
 //
-// All use the default unicode61 tokenizer, which handles CJK gracefully
-// via Unicode code-point splitting — verified in TestFTS5Available with
-// the Chinese phrase "心跳".
+// Chinese text is pre-segmented with gse (jieba-style) before indexing.
+// The *_seg columns store space-separated Chinese words so FTS5's default
+// unicode61 tokenizer treats each word as a whole token instead of splitting
+// into individual characters.
 //
 // Entry points:
 //   - ensureFTSSchemas(db)     — idempotent schema creation + triggers
@@ -43,88 +44,93 @@ import (
 
 const ftsDailyNotesSchema = `
 CREATE TABLE IF NOT EXISTS daily_notes (
-    date    TEXT PRIMARY KEY,
-    path    TEXT NOT NULL,
-    content TEXT NOT NULL,
-    mtime   INTEGER NOT NULL,
-    hash    TEXT NOT NULL
+    date        TEXT PRIMARY KEY,
+    path        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    content_seg TEXT NOT NULL DEFAULT '',
+    mtime       INTEGER NOT NULL,
+    hash        TEXT NOT NULL
 );`
 
 const ftsDailyNotesVirtual = `
 CREATE VIRTUAL TABLE IF NOT EXISTS daily_notes_fts
-    USING fts5(date UNINDEXED, content, content=daily_notes, content_rowid=rowid);`
+    USING fts5(date UNINDEXED, content_seg, content=daily_notes, content_rowid=rowid);`
 
 const ftsDailyNotesTriggers = `
 CREATE TRIGGER IF NOT EXISTS daily_notes_ai AFTER INSERT ON daily_notes BEGIN
-    INSERT INTO daily_notes_fts(rowid, date, content) VALUES (new.rowid, new.date, new.content);
+    INSERT INTO daily_notes_fts(rowid, date, content_seg) VALUES (new.rowid, new.date, new.content_seg);
 END;
 
 CREATE TRIGGER IF NOT EXISTS daily_notes_au AFTER UPDATE ON daily_notes BEGIN
-    INSERT INTO daily_notes_fts(daily_notes_fts, rowid, date, content)
-        VALUES('delete', old.rowid, old.date, old.content);
-    INSERT INTO daily_notes_fts(rowid, date, content)
-        VALUES (new.rowid, new.date, new.content);
+    INSERT INTO daily_notes_fts(daily_notes_fts, rowid, date, content_seg)
+        VALUES('delete', old.rowid, old.date, old.content_seg);
+    INSERT INTO daily_notes_fts(rowid, date, content_seg)
+        VALUES (new.rowid, new.date, new.content_seg);
 END;
 
 CREATE TRIGGER IF NOT EXISTS daily_notes_ad AFTER DELETE ON daily_notes BEGIN
-    INSERT INTO daily_notes_fts(daily_notes_fts, rowid, date, content)
-        VALUES('delete', old.rowid, old.date, old.content);
+    INSERT INTO daily_notes_fts(daily_notes_fts, rowid, date, content_seg)
+        VALUES('delete', old.rowid, old.date, old.content_seg);
 END;`
 
 const ftsSessionSummariesVirtual = `
 CREATE VIRTUAL TABLE IF NOT EXISTS session_summaries_fts
-    USING fts5(path UNINDEXED, summary, content=sessions, content_rowid=rowid);`
+    USING fts5(path UNINDEXED, summary_seg, content=sessions, content_rowid=rowid);`
 
 const ftsSessionTriggers = `
 CREATE TRIGGER IF NOT EXISTS sessions_ai AFTER INSERT ON sessions BEGIN
-    INSERT INTO session_summaries_fts(rowid, path, summary) VALUES (new.rowid, new.path, new.summary);
+    INSERT INTO session_summaries_fts(rowid, path, summary_seg) VALUES (new.rowid, new.path, new.summary_seg);
 END;
 
 CREATE TRIGGER IF NOT EXISTS sessions_au AFTER UPDATE ON sessions BEGIN
-    INSERT INTO session_summaries_fts(session_summaries_fts, rowid, path, summary)
-        VALUES('delete', old.rowid, old.path, old.summary);
-    INSERT INTO session_summaries_fts(rowid, path, summary)
-        VALUES (new.rowid, new.path, new.summary);
+    INSERT INTO session_summaries_fts(session_summaries_fts, rowid, path, summary_seg)
+        VALUES('delete', old.rowid, old.path, old.summary_seg);
+    INSERT INTO session_summaries_fts(rowid, path, summary_seg)
+        VALUES (new.rowid, new.path, new.summary_seg);
 END;
 
 CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN
-    INSERT INTO session_summaries_fts(session_summaries_fts, rowid, path, summary)
-        VALUES('delete', old.rowid, old.path, old.summary);
+    INSERT INTO session_summaries_fts(session_summaries_fts, rowid, path, summary_seg)
+        VALUES('delete', old.rowid, old.path, old.summary_seg);
 END;`
 
 const sessionContentSchema = `
 CREATE TABLE IF NOT EXISTS session_content (
-    path  TEXT PRIMARY KEY,
-    sid   TEXT NOT NULL,
-    text  TEXT NOT NULL,
-    mtime INTEGER NOT NULL,
-    hash  TEXT NOT NULL
+    path     TEXT PRIMARY KEY,
+    sid      TEXT NOT NULL,
+    text     TEXT NOT NULL,
+    text_seg TEXT NOT NULL DEFAULT '',
+    mtime    INTEGER NOT NULL,
+    hash     TEXT NOT NULL
 );`
 
 const sessionContentVirtual = `
 CREATE VIRTUAL TABLE IF NOT EXISTS session_content_fts
-    USING fts5(sid UNINDEXED, text, content=session_content, content_rowid=rowid);`
+    USING fts5(sid UNINDEXED, text_seg, content=session_content, content_rowid=rowid);`
 
 const sessionContentTriggers = `
 CREATE TRIGGER IF NOT EXISTS session_content_ai AFTER INSERT ON session_content BEGIN
-    INSERT INTO session_content_fts(rowid, sid, text) VALUES (new.rowid, new.sid, new.text);
+    INSERT INTO session_content_fts(rowid, sid, text_seg) VALUES (new.rowid, new.sid, new.text_seg);
 END;
 
 CREATE TRIGGER IF NOT EXISTS session_content_au AFTER UPDATE ON session_content BEGIN
-    INSERT INTO session_content_fts(session_content_fts, rowid, sid, text)
-        VALUES('delete', old.rowid, old.sid, old.text);
-    INSERT INTO session_content_fts(rowid, sid, text)
-        VALUES (new.rowid, new.sid, new.text);
+    INSERT INTO session_content_fts(session_content_fts, rowid, sid, text_seg)
+        VALUES('delete', old.rowid, old.sid, old.text_seg);
+    INSERT INTO session_content_fts(rowid, sid, text_seg)
+        VALUES (new.rowid, new.sid, new.text_seg);
 END;
 
 CREATE TRIGGER IF NOT EXISTS session_content_ad AFTER DELETE ON session_content BEGIN
-    INSERT INTO session_content_fts(session_content_fts, rowid, sid, text)
-        VALUES('delete', old.rowid, old.sid, old.text);
+    INSERT INTO session_content_fts(session_content_fts, rowid, sid, text_seg)
+        VALUES('delete', old.rowid, old.sid, old.text_seg);
 END;`
 
 // ensureFTSSchemas is called from openDB alongside ensureSoulSessionTable.
 // Idempotent: safe to call on every openDB.
 func ensureFTSSchemas(db *sql.DB) error {
+	// ── Migration: add *_seg columns if missing ──
+	migrateFTSSegColumns(db)
+
 	// daily_notes base table
 	if _, err := db.Exec(ftsDailyNotesSchema); err != nil {
 		return fmt.Errorf("daily_notes table: %w", err)
@@ -169,6 +175,109 @@ func ensureFTSSchemas(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// migrateFTSSegColumns adds *_seg columns and recreates FTS virtual tables + triggers
+// for the segmentation upgrade. Safe to call multiple times (checks column existence).
+func migrateFTSSegColumns(db *sql.DB) {
+	// Check if migration is needed using PRAGMA table_info (robust, no string matching)
+	needsMigration := true
+	rows, err := db.Query(`PRAGMA table_info(daily_notes)`)
+	if err != nil {
+		return // table doesn't exist yet, CREATE TABLE will handle it
+	}
+	defer rows.Close()
+	colCount := 0
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dfltValue *string
+		var pk int
+		if rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk) == nil {
+			colCount++
+			if name == "content_seg" {
+				needsMigration = false
+			}
+		}
+	}
+	if colCount == 0 || !needsMigration {
+		return // table doesn't exist or already migrated
+	}
+
+	fmt.Fprintf(os.Stderr, "[%s] migrating FTS5 to segmented columns...\n", appName)
+
+	// Add *_seg columns to existing tables
+	migrations := []struct {
+		desc string
+		sql  string
+	}{
+		{"add daily_notes.content_seg", `ALTER TABLE daily_notes ADD COLUMN content_seg TEXT NOT NULL DEFAULT ''`},
+		{"add sessions.summary_seg", `ALTER TABLE sessions ADD COLUMN summary_seg TEXT NOT NULL DEFAULT ''`},
+		{"add session_content.text_seg", `ALTER TABLE session_content ADD COLUMN text_seg TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, m := range migrations {
+		if _, err := db.Exec(m.sql); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] migration warning (%s): %v\n", appName, m.desc, err)
+		}
+	}
+
+	// Drop old triggers (they reference old column names) — safe to ignore errors
+	for _, name := range []string{
+		"daily_notes_ai", "daily_notes_au", "daily_notes_ad",
+		"sessions_ai", "sessions_au", "sessions_ad",
+		"session_content_ai", "session_content_au", "session_content_ad",
+	} {
+		db.Exec(`DROP TRIGGER IF EXISTS ` + name)
+	}
+
+	// Drop old FTS virtual tables (schema changed)
+	for _, tbl := range []string{"daily_notes_fts", "session_summaries_fts", "session_content_fts"} {
+		db.Exec(`DROP TABLE IF EXISTS ` + tbl)
+	}
+
+	// Backfill *_seg columns from existing content
+	backfillSegColumns(db)
+
+	fmt.Fprintf(os.Stderr, "[%s] FTS5 migration complete. Run `%s db fts-rebuild` to rebuild indexes.\n", appName, appName)
+}
+
+// backfillSegColumns populates *_seg columns by segmenting existing content.
+func backfillSegColumns(db *sql.DB) {
+	backfillOne := func(table, srcCol, segCol string) {
+		query := fmt.Sprintf(`SELECT rowid, %s FROM %s WHERE %s = ''`, srcCol, table, segCol)
+		rows, err := db.Query(query)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] backfill %s: query failed: %v\n", appName, table, err)
+			return
+		}
+		defer rows.Close()
+		var updated, failed int
+		for rows.Next() {
+			var rowid int64
+			var content string
+			if err := rows.Scan(&rowid, &content); err != nil {
+				failed++
+				continue
+			}
+			seg := segmentText(content)
+			if _, err := db.Exec(fmt.Sprintf(`UPDATE %s SET %s = ? WHERE rowid = ?`, table, segCol), seg, rowid); err != nil {
+				failed++
+			} else {
+				updated++
+			}
+		}
+		if err := rows.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] backfill %s: iteration error: %v\n", appName, table, err)
+		}
+		if failed > 0 {
+			fmt.Fprintf(os.Stderr, "[%s] backfill %s: %d updated, %d failed\n", appName, table, updated, failed)
+		}
+	}
+
+	backfillOne("daily_notes", "content", "content_seg")
+	backfillOne("sessions", "summary", "summary_seg")
+	backfillOne("session_content", "text", "text_seg")
 }
 
 // splitSQL breaks a multi-statement SQL string on semicolons (ignoring empty
@@ -252,10 +361,13 @@ func indexDailyNotes() (int, int, error) {
 		// Strip YAML frontmatter for cleaner search (keeps body only)
 		body := stripFrontmatter(string(content))
 
+		// Segment Chinese text for FTS5
+		bodySeg := segmentText(body)
+
 		_, err = db.Exec(
-			`INSERT INTO daily_notes(date, path, content, mtime, hash) VALUES(?,?,?,?,?)
-			 ON CONFLICT(date) DO UPDATE SET path=excluded.path, content=excluded.content, mtime=excluded.mtime, hash=excluded.hash`,
-			date, path, body, mtime, hash,
+			`INSERT INTO daily_notes(date, path, content, content_seg, mtime, hash) VALUES(?,?,?,?,?,?)
+			 ON CONFLICT(date) DO UPDATE SET path=excluded.path, content=excluded.content, content_seg=excluded.content_seg, mtime=excluded.mtime, hash=excluded.hash`,
+			date, path, body, bodySeg, mtime, hash,
 		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[%s] fts index %s: %v\n", appName, date, err)
@@ -485,13 +597,16 @@ func indexSessionContent() (int, int, error) {
 			continue
 		}
 
+		// Segment Chinese text for FTS5
+		textSeg := segmentText(text)
+
 		// Extract session ID from filename (UUID without extension)
 		sid := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 
 		_, err = db.Exec(
-			`INSERT INTO session_content(path, sid, text, mtime, hash) VALUES(?,?,?,?,?)
-			 ON CONFLICT(path) DO UPDATE SET sid=excluded.sid, text=excluded.text, mtime=excluded.mtime, hash=excluded.hash`,
-			path, sid, text, mtime, hash,
+			`INSERT INTO session_content(path, sid, text, text_seg, mtime, hash) VALUES(?,?,?,?,?,?)
+			 ON CONFLICT(path) DO UPDATE SET sid=excluded.sid, text=excluded.text, text_seg=excluded.text_seg, mtime=excluded.mtime, hash=excluded.hash`,
+			path, sid, text, textSeg, mtime, hash,
 		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[%s] fts session %s: %v\n", appName, filepath.Base(path), err)
@@ -515,20 +630,21 @@ type ftsHit struct {
 
 // searchFTS runs MATCH against one or more FTS5 virtual tables.
 // scope: "daily" | "session" | "content" | "both" (default = all three).
-// query: raw FTS5 MATCH expression. Users can pass a simple keyword or a
-//        full FTS5 query syntax (phrases, NEAR, column filters).
+// query: raw user input, will be segmented and sanitized.
 // limit: max rows per source.
-// sanitizeFTSQuery makes a user query safe for FTS5 MATCH by quoting each
-// whitespace-separated token as a phrase. This handles punctuation like
-// `GLM 5.1` or `#207` that would otherwise trip the FTS5 parser.
+// sanitizeFTSQuery makes a user query safe for FTS5 MATCH by:
+//  1. Segmenting Chinese text with gse (jieba-style)
+//  2. Quoting each token as a phrase
 //
-// Tokens are quoted with double-quotes; any embedded double-quote is escaped
-// per FTS5 convention by doubling it. Empty input returns empty string.
+// This ensures Chinese multi-character words like "巡检" are matched as
+// whole words rather than individual characters.
 func sanitizeFTSQuery(q string) string {
 	q = strings.TrimSpace(q)
 	if q == "" {
 		return ""
 	}
+	// Segment Chinese text in the query
+	q = segmentText(q)
 	fields := strings.Fields(q)
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
@@ -659,6 +775,15 @@ func handleFTSIndex() {
 
 // handleFTSRebuild implements `weiran db fts-rebuild`
 func handleFTSRebuild() {
+	fmt.Println("backfilling segmented columns...")
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] fts-rebuild open: %v\n", appName, err)
+		os.Exit(1)
+	}
+	backfillSegColumns(db)
+	db.Close()
+
 	if err := rebuildFTS(); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] fts-rebuild: %v\n", appName, err)
 		os.Exit(1)
