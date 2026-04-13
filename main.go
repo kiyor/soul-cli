@@ -492,6 +492,7 @@ Subcommands:
   {{NAME}} ss [keyword]          same as above (shorthand)
   {{NAME}} spawn <agent> "task"   dispatch task to another agent (async by default)
   {{NAME}} spawn <agent> "task" --wait  dispatch and wait for completion
+  {{NAME}} spawn --self main "task" [--model opus]  spawn with own soul
   {{NAME}} spawn list            show running/recent spawn processes
   {{NAME}} evolve-probe -f <feedback> -s <scenario> [--mode with|without|both]
                                   run a thought-experiment probe against a feedback rule

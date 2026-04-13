@@ -47,15 +47,17 @@ type serverSession struct {
 	SoulEnabled   bool      `json:"soul_enabled"`
 	ChromeEnabled bool      `json:"chrome_enabled"`
 	ReplaceSoul   bool      `json:"replace_soul"`     // 本我模式 — use --system-prompt-file (replace) instead of --append-system-prompt-file
-	GalID         string          `json:"gal_id,omitempty"` // GAL save id this session was resumed from
-	Todos         json.RawMessage `json:"todos,omitempty"`  // latest TodoWrite state (broadcast to all clients)
+	FirstMsg      string          `json:"first_msg,omitempty"` // First user message (for hint display)
+	GalID         string          `json:"gal_id,omitempty"`    // GAL save id this session was resumed from
+	Todos         json.RawMessage `json:"todos,omitempty"`     // latest TodoWrite state (broadcast to all clients)
 
 	process     *claudeProcess
 	broadcaster *sseBroadcaster
-	promptFile  string // temp file for soul prompt
-	mcpConfig   string // remembered for reload
-	hub         *wsHub // for WS notifications on status change
-	waiters     []chan string // notified when status becomes idle/stopped/error
+	bridgeDone  chan struct{} // closed when the current bridgeStdout goroutine exits
+	promptFile  string        // temp file for soul prompt
+	mcpConfig   string        // remembered for reload
+	hub         *wsHub        // for WS notifications on status change
+	waiters     []chan string  // notified when status becomes idle/stopped/error
 	mu          sync.Mutex
 }
 
@@ -107,19 +109,25 @@ func (s *serverSession) setStatus(status string) {
 }
 
 // snapshot returns a JSON-safe copy of session state.
+// NOTE: To avoid deadlocks, DB queries and broadcaster calls are done OUTSIDE
+// sess.mu. Lock ordering: sess.mu must never be held when acquiring broadcaster.mu
+// (broadcast() holds broadcaster.mu → calls hub → calls listSessions → snapshot).
 func (s *serverSession) snapshot() map[string]any {
+	// 1. Read broadcaster metrics BEFORE acquiring sess.mu (avoids sess.mu → broadcaster.mu inversion)
+	subCount := s.broadcaster.count()
+	lastEvent := s.broadcaster.lastEventAt()
+	idleSecs := s.broadcaster.idleSeconds()
+
+	// 2. Copy session fields under lock
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	id := s.ID
 	galID := s.GalID
-	if galID == "" {
-		galID = getGalID(s.ID)
-	}
 	tags := s.Tags
 	if tags == nil {
 		tags = []string{}
 	}
-	return map[string]any{
-		"id":                s.ID,
+	snap := map[string]any{
+		"id":                id,
 		"name":              s.Name,
 		"project":           s.Project,
 		"model":             s.Model,
@@ -129,7 +137,6 @@ func (s *serverSession) snapshot() map[string]any {
 		"created_at":        s.CreatedAt.Format(time.RFC3339),
 		"last_active":       s.LastActive.Format(time.RFC3339),
 		"total_cost_usd":    s.TotalCost,
-		"proxy_cost_usd":   getSessionProxyCost(s.ID),
 		"num_turns":         s.NumTurns,
 		"claude_session_id": s.ClaudeSID,
 		"resumed_from":      s.ResumedFrom,
@@ -138,12 +145,25 @@ func (s *serverSession) snapshot() map[string]any {
 		"soul_enabled":      s.SoulEnabled,
 		"chrome_enabled":    s.ChromeEnabled,
 		"replace_soul":      s.ReplaceSoul,
-		"gal_id":            galID,
-		"subscribers":       s.broadcaster.count(),
-		"last_event":        s.broadcaster.lastEventAt(),
-		"idle_seconds":      s.broadcaster.idleSeconds(),
-		"participants":      getParticipants(s.ID),
+		"first_msg":         s.FirstMsg,
 	}
+	if galID == "" {
+		galID = s.GalID // already read above, but keep for clarity
+	}
+	s.mu.Unlock()
+
+	// 3. DB queries and broadcaster values OUTSIDE lock (no deadlock risk)
+	if galID == "" {
+		galID = getGalID(id)
+	}
+	snap["gal_id"] = galID
+	snap["proxy_cost_usd"] = getSessionProxyCost(id)
+	snap["subscribers"] = subCount
+	snap["last_event"] = lastEvent
+	snap["idle_seconds"] = idleSecs
+	snap["participants"] = getParticipants(id)
+
+	return snap
 }
 
 // ── Session Lifecycle Helpers ──
@@ -160,6 +180,7 @@ func makeOnInit(sess *serverSession, source string) func(json.RawMessage) {
 			if init.Model != "" {
 				sess.Model = mergeInitModel(sess.Model, init.Model)
 			}
+			hub := sess.hub // read under lock to avoid race
 			sess.mu.Unlock()
 
 			if source != "" {
@@ -175,8 +196,8 @@ func makeOnInit(sess *serverSession, source string) func(json.RawMessage) {
 					ensureServerSession(sess.ID, ccName)
 				}
 			}
-			if sess.hub != nil {
-				sess.hub.notifySessions()
+			if hub != nil {
+				hub.notifySessions()
 			}
 		}
 	}
@@ -207,6 +228,7 @@ func makeOnResult(sess *serverSession, fullSync bool) func(json.RawMessage) {
 				sess.mu.Lock()
 				claudeSID := sess.ClaudeSID
 				currentName := sess.Name
+				hub := sess.hub // read under lock
 				sess.mu.Unlock()
 				if claudeSID != "" && !isManuallyRenamed(sess.ID) {
 					if ccName := readClaudeSessionName(claudeSID); ccName != "" && ccName != currentName {
@@ -214,8 +236,8 @@ func makeOnResult(sess *serverSession, fullSync bool) func(json.RawMessage) {
 						sess.Name = ccName
 						sess.mu.Unlock()
 						markAutoNamed(sess.ID, ccName)
-						if sess.hub != nil {
-							sess.hub.notifySessions()
+						if hub != nil {
+							hub.notifySessions()
 						}
 					}
 				}
@@ -251,6 +273,22 @@ func watchExit(proc *claudeProcess, sess *serverSession) {
 	}()
 }
 
+// waitBridgeDone waits for the current bridgeStdout goroutine to exit (max 10s).
+// Must be called AFTER shutting down the old process but BEFORE starting a new bridge.
+func (s *serverSession) waitBridgeDone() {
+	s.mu.Lock()
+	done := s.bridgeDone
+	s.mu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		fmt.Fprintf(os.Stderr, "[%s] server: bridge drain timeout for %s\n", appName, shortID(s.ID))
+	}
+}
+
 // drainStderr reads and discards stderr to prevent pipe deadlock.
 func drainStderr(proc *claudeProcess) {
 	go func() {
@@ -267,11 +305,30 @@ func drainStderr(proc *claudeProcess) {
 // source: "server-create"/"server-resume" for full init, "" for reload.
 // fullSync: true for create/resume (CC name sync + auto-rename), false for reload.
 func attachProcessBridge(proc *claudeProcess, sess *serverSession, source string, fullSync bool) {
-	go bridgeStdout(proc, sess.broadcaster, makeOnInit(sess, source), makeOnResult(sess, fullSync), func(todos json.RawMessage) {
-		sess.setTodos(todos)
-	})
+	doneCh := make(chan struct{})
+	go func() {
+		bridgeStdout(proc, sess.broadcaster, makeOnInit(sess, source), makeOnResult(sess, fullSync), func(todos json.RawMessage) {
+			sess.setTodos(todos)
+		}, makeOnMemoryAudit(sess))
+		close(doneCh)
+	}()
+	sess.mu.Lock()
+	sess.bridgeDone = doneCh
+	sess.mu.Unlock()
 	watchExit(proc, sess)
 	drainStderr(proc)
+}
+
+// makeOnMemoryAudit returns a callback that logs memory operations to the audit DB.
+func makeOnMemoryAudit(sess *serverSession) func(*memoryAuditEntry) {
+	db := openAuditDB()
+	return func(entry *memoryAuditEntry) {
+		sess.mu.Lock()
+		entry.SessionID = sess.ID
+		entry.SessionName = sess.Name
+		sess.mu.Unlock()
+		go logMemoryAudit(db, *entry)
+	}
 }
 
 // ── Session Manager ──
@@ -284,7 +341,8 @@ type sessionManager struct {
 	maxLifetime time.Duration
 	mu          sync.RWMutex
 	stopReaper  chan struct{}
-	hub         *wsHub // WebSocket hub for real-time notifications
+	reaperDone  sync.WaitGroup // waited by shutdownAll to ensure reaper has exited
+	hub         *wsHub         // WebSocket hub for real-time notifications
 }
 
 // newSessionManager creates a session manager and starts the TTL reaper.
@@ -296,6 +354,7 @@ func newSessionManager(maxSessions int, idleTimeout, maxLifetime time.Duration) 
 		maxLifetime: maxLifetime,
 		stopReaper:  make(chan struct{}),
 	}
+	sm.reaperDone.Add(1)
 	go sm.reaper()
 	return sm
 }
@@ -518,6 +577,10 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 		}
 	}
 
+	// Wait for old bridge goroutine to exit before starting a new one,
+	// preventing two bridges writing to the same broadcaster concurrently.
+	sess.waitBridgeDone()
+
 	sess.setStatus("starting")
 
 	// Spawn replacement
@@ -585,6 +648,9 @@ func (sm *sessionManager) setReplaceSoul(id string, enabled bool) error {
 		}
 	}
 
+	// Wait for old bridge goroutine to exit before starting a new one
+	sess.waitBridgeDone()
+
 	sess.setStatus("starting")
 
 	newProc, err := spawnClaude(opts)
@@ -645,6 +711,9 @@ func (sm *sessionManager) setModel(id string, model string) error {
 			oldProc.shutdown()
 		}
 	}
+
+	// Wait for old bridge goroutine to exit before starting a new one
+	sess.waitBridgeDone()
 
 	sess.setStatus("starting")
 
@@ -717,6 +786,9 @@ func (sm *sessionManager) destroySession(id string) error {
 // so they can be resumed on next server startup.
 func (sm *sessionManager) shutdownAll() {
 	close(sm.stopReaper)
+	// Wait for reaper to fully exit before suspending sessions.
+	// Prevents race where reaper's destroySession overwrites "suspended" → "ended".
+	sm.reaperDone.Wait()
 
 	// Persist claude_session_id and model for all active sessions before they die,
 	// so they can be properly rehydrated after restart.
@@ -779,6 +851,7 @@ func (sm *sessionManager) destroySessionForShutdown(id string) {
 
 // reaper runs every minute and destroys idle/expired sessions.
 func (sm *sessionManager) reaper() {
+	defer sm.reaperDone.Done()
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
@@ -875,9 +948,13 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 		resolvedReplaceSoul = getReplaceSoulEnabled(sessionID)
 	}
 
+	// Inherit first_msg from original session
+	inheritedFirstMsg := getFirstMsgFromJSONL(sessionID)
+
 	sess := &serverSession{
 		ID:          id,
 		Name:        displayName,
+		FirstMsg:    inheritedFirstMsg,
 		ResumedFrom: sessionID,
 		Project:     workspace,
 		Model:       model,
@@ -961,9 +1038,17 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 	// Attach stdout bridge with full sync (agent recording + CC name sync + auto-rename)
 	attachProcessBridge(proc, sess, "server-resume", true)
 
-	// Send initial message if provided
+	// Send initial message if provided — wait for Claude Code to emit init
+	// before writing to stdin (consistent with createSession's waitInit pattern).
 	if message != "" {
-		time.Sleep(500 * time.Millisecond)
+		sess.mu.Lock()
+		if sess.FirstMsg == "" {
+			sess.FirstMsg = message
+		}
+		sess.mu.Unlock()
+		if !proc.waitInit(30 * time.Second) {
+			fmt.Fprintf(os.Stderr, "[%s] server: init timeout for resume %s, sending message anyway\n", appName, shortID(sess.ID))
+		}
 		userEvent, _ := json.Marshal(map[string]any{
 			"type":    "user",
 			"message": map[string]any{"role": "user", "content": message},

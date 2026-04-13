@@ -7,7 +7,10 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0b0f17">
-<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22Weiran%22%2C%22short_name%22%3A%22Weiran%22%2C%22start_url%22%3A%22%2F%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%230b0f17%22%2C%22theme_color%22%3A%22%230b0f17%22%7D">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<meta name="apple-mobile-web-app-title" content="未然">
 <title>Weiran</title>
 <link rel="stylesheet" id="hljs-theme" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
 <style>
@@ -236,13 +239,14 @@ body{
 }
 .si:active{background:var(--active-ov)}
 .si.active{background:rgba(var(--accent-r),.08);border-color:rgba(var(--accent-r),.20)}
-.si .si-top{display:flex;align-items:center;gap:8px;margin-bottom:3px}
-.si .si-name{font-size:13px;font-weight:650;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.si .si-top{display:flex;align-items:center;gap:8px;margin-bottom:2px}
+.si .si-title{font-size:12px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .si .si-dot{width:8px;height:8px;border-radius:99px;flex-shrink:0}
 .si .si-dot.running{background:var(--good);box-shadow:0 0 6px rgba(33,192,122,.35)}
 .si .si-dot.idle{background:var(--warn)}
 .si .si-dot.stopped,.si .si-dot.error{background:var(--bad)}
 .si .si-dot.starting{background:var(--accent);animation:pulse .8s ease-in-out infinite}
+.si .si-sub{font-size:10px;color:var(--muted2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px;font-family:var(--mono)}
 .si .si-meta{font-size:10px;color:var(--muted2);font-family:var(--mono);display:flex;gap:6px}
 .si-actions{
   position:absolute;right:8px;top:50%;transform:translateY(-50%);
@@ -632,34 +636,100 @@ body{
 .todo-item+.todo-item{border-top:1px solid var(--border)}
 .todo-item:hover{background:var(--bg2)}
 .todo-icon{
-  flex-shrink:0;width:20px;height:20px;border-radius:6px;
-  display:grid;place-items:center;font-size:12px;margin-top:1px;
-  border:1.5px solid var(--muted2);background:transparent;
-  transition:all .15s;
+  flex-shrink:0;width:22px;height:22px;border-radius:6px;
+  display:grid;place-items:center;font-size:15px;margin-top:1px;
+  border:none;background:transparent;
+  transition:all .15s;line-height:1;
 }
-.todo-item.pending .todo-icon{border-color:var(--border2);color:var(--muted2)}
+/* ── Pending: gentle wobble — "pick me pick me~" ── */
+.todo-item.pending .todo-icon{
+  animation:todoWobble 3s ease-in-out infinite;
+  opacity:.6;
+}
+.todo-item.pending:nth-child(2n) .todo-icon{animation-delay:-.7s}
+.todo-item.pending:nth-child(3n) .todo-icon{animation-delay:-1.4s}
+@keyframes todoWobble{
+  0%,100%{transform:rotate(0)}
+  20%{transform:rotate(-8deg)}
+  40%{transform:rotate(6deg)}
+  60%{transform:rotate(-4deg)}
+  80%{transform:rotate(2deg)}
+}
+
+/* ── In-progress: rainbow border + bouncy spin icon ── */
+.todo-item.in_progress{
+  border-left:3px solid transparent;
+  border-image:linear-gradient(180deg,#ff6b9d,#c084fc,#60a5fa,#34d399) 1;
+  background:linear-gradient(90deg,rgba(var(--accent-r),.04),transparent);
+  animation:todoRowGlow 2s ease-in-out infinite alternate;
+}
+@keyframes todoRowGlow{
+  0%{background:linear-gradient(90deg,rgba(var(--accent-r),.04),transparent)}
+  100%{background:linear-gradient(90deg,rgba(var(--accent-r),.08),transparent)}
+}
 .todo-item.in_progress .todo-icon{
-  border-color:rgba(var(--accent-r),.5);background:rgba(var(--accent-r),.12);
-  color:var(--accent2);
-  animation:todoPulse 2s ease-in-out infinite;
+  animation:todoBounce 1.2s ease-in-out infinite;
+  filter:drop-shadow(0 0 4px rgba(255,107,64,.4));
 }
+@keyframes todoBounce{
+  0%,100%{transform:translateY(0) scale(1)}
+  25%{transform:translateY(-3px) scale(1.1)}
+  50%{transform:translateY(0) scale(1)}
+  75%{transform:translateY(-1.5px) scale(1.05)}
+}
+
+/* ── Completed: pop-in celebration ── */
 .todo-item.completed .todo-icon{
-  border-color:var(--good);background:rgba(var(--accent-r),.06);
-  color:var(--good);opacity:.7;
+  opacity:.8;
+  animation:todoPop .5s cubic-bezier(.175,.885,.32,1.275) both;
 }
-@keyframes todoPulse{0%,100%{box-shadow:0 0 0 0 rgba(var(--accent-r),0)}50%{box-shadow:0 0 0 3px rgba(var(--accent-r),.15)}}
+@keyframes todoPop{
+  0%{transform:scale(0.3) rotate(-180deg);opacity:0}
+  60%{transform:scale(1.2) rotate(10deg);opacity:1}
+  100%{transform:scale(1) rotate(0);opacity:.8}
+}
+.todo-item.completed{position:relative;overflow:hidden}
+.todo-item.completed::after{
+  content:'🎉';position:absolute;right:12px;top:50%;transform:translateY(-50%);
+  font-size:14px;opacity:0;
+  animation:todoConfetti .8s ease-out .2s both;
+}
+.todo-item.completed:nth-child(2n)::after{content:'✨'}
+.todo-item.completed:nth-child(3n)::after{content:'💫'}
+@keyframes todoConfetti{
+  0%{opacity:0;transform:translateY(-50%) scale(0) rotate(-30deg)}
+  50%{opacity:1;transform:translateY(-60%) scale(1.3) rotate(15deg)}
+  100%{opacity:0;transform:translateY(-70%) scale(.8) rotate(0deg)}
+}
+
 .todo-text{
   flex:1;min-width:0;font-size:13px;line-height:1.5;
 }
 .todo-content{
   color:var(--text);font-weight:500;
 }
+/* ── In-progress text: typing cursor blink ── */
+.todo-item.in_progress .todo-content::after{
+  content:'▌';color:var(--accent2);font-weight:400;
+  animation:todoCursor .8s step-end infinite;margin-left:2px;
+}
+@keyframes todoCursor{0%,100%{opacity:1}50%{opacity:0}}
+
 .todo-item.completed .todo-content{
   color:var(--muted2);text-decoration:line-through;text-decoration-color:rgba(126,143,182,.4);
 }
 .todo-active{
   font-size:11px;color:var(--accent2);margin-top:1px;font-style:italic;
 }
+/* ── Active form: shimmer text ── */
+.todo-item.in_progress .todo-active{
+  background:linear-gradient(90deg,var(--accent2) 0%,#ff6b9d 30%,var(--accent2) 60%);
+  background-size:200% auto;
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+  animation:todoShimmer 2.5s linear infinite;
+}
+@keyframes todoShimmer{0%{background-position:200% center}100%{background-position:-200% center}}
+
 .todo-count{
   font-size:10px;color:var(--muted2);font-family:var(--mono);margin-left:auto;
 }
@@ -690,7 +760,19 @@ body{
   display:flex;align-items:center;gap:8px;padding:8px 0 12px;
 }
 .todo-drawer-body .todo-bar{flex:1;height:6px;border-radius:99px;background:var(--bg2);overflow:hidden}
-.todo-drawer-body .todo-bar-fill{height:100%;border-radius:99px;background:var(--good);transition:width .3s var(--spring)}
+.todo-drawer-body .todo-bar-fill{
+  height:100%;border-radius:99px;
+  background:linear-gradient(90deg,#34d399,#60a5fa,#c084fc,#ff6b9d);background-size:300% 100%;
+  animation:todoBarRainbow 3s linear infinite;
+  transition:width .3s var(--spring);position:relative;overflow:hidden;
+}
+.todo-drawer-body .todo-bar-fill::after{
+  content:'';position:absolute;top:0;left:-50%;width:50%;height:100%;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.3),transparent);
+  animation:todoBarGlint 2s ease-in-out infinite;
+}
+@keyframes todoBarRainbow{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+@keyframes todoBarGlint{0%{left:-50%}100%{left:150%}}
 .todo-drawer-body .todo-pct{font-size:11px;color:var(--muted2);font-family:var(--mono);min-width:32px;text-align:right}
 .todo-drawer-empty{padding:20px;text-align:center;color:var(--muted2);font-size:12px}
 .todo-tab{
@@ -866,11 +948,35 @@ body{
 .link-preview-host{font-size:10px;color:var(--muted2);font-family:var(--mono);margin-top:auto}
 .link-preview-img{width:80px;height:80px;border-radius:8px;object-fit:cover;flex-shrink:0;background:var(--bg2)}
 
+/* ── Status Bar (fixed bottom) ── */
+.status-bar{
+  position:fixed;bottom:0;left:0;right:0;z-index:25;
+  background:var(--topbar-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border-top:1px solid var(--border);
+  padding:5px 14px;padding-bottom:calc(5px + var(--safe-b));
+  padding-left:calc(14px + var(--safe-l));padding-right:calc(14px + var(--safe-r));
+  display:flex;align-items:center;justify-content:center;gap:10px;
+  font-size:10px;color:var(--muted2);letter-spacing:.02em;
+}
+.status-bar:empty{padding-top:0;padding-bottom:var(--safe-b);border-top:none}
+:root{--statusbar-h:26px}
+.status-bar .sb-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.status-bar .sb-dot.ok{background:var(--good)}
+.status-bar .sb-dot.connecting{background:var(--warn);animation:pulse .8s ease-in-out infinite}
+.status-bar .sb-dot.off{background:var(--bad)}
+.status-bar .sb-sep{color:var(--dim);font-size:8px}
+.status-bar .sb-model{color:var(--cost-color);font-weight:500}
+.status-bar .sb-ctx{color:var(--muted2)}
+.status-bar .sb-ctx.warn{color:var(--warn)}
+.status-bar .sb-ctx.danger{color:var(--bad)}
+.status-bar .sb-status{color:var(--dim)}
+.status-bar .sb-status.running{color:var(--good)}
+
 /* ── Composer ── */
 .composer{
   border-top:1px solid var(--border);
   background:var(--topbar-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
-  padding:10px;padding-bottom:calc(10px + var(--safe-b));
+  padding:10px;padding-bottom:calc(10px + var(--statusbar-h) + var(--safe-b));
   padding-left:calc(10px + var(--safe-l));padding-right:calc(10px + var(--safe-r));
 }
 .composer.disabled{opacity:.35;pointer-events:none}
@@ -1024,9 +1130,9 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   .tool-block.collapsed .tool-body{max-height:0}
 
   textarea{font-size:16px;min-height:40px;padding:10px 12px}
-  .composer{padding:8px;padding-bottom:calc(8px + var(--safe-b))}
+  .composer{padding:8px;padding-bottom:calc(8px + var(--statusbar-h) + var(--safe-b))}
 
-  .scroll-fab{bottom:72px;right:12px;width:36px;height:36px;font-size:14px}
+  .scroll-fab{bottom:132px;right:12px;width:36px;height:36px;font-size:14px}
 
   .welcome .wlogo{width:52px;height:52px;font-size:22px;border-radius:16px}
   .welcome .wlogo.has-image{max-width:calc(100% - 24px);max-height:min(50vh,400px)}
@@ -1034,6 +1140,45 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   .welcome h2{font-size:16px}
   .welcome p{font-size:12px}
 
+}
+
+/* ── Mobile Landscape ── */
+@media (orientation:landscape) and (max-height:500px){
+  :root{--topbar-h:36px;--statusbar-h:20px}
+  .topbar{padding-top:0;padding-bottom:0;gap:6px}
+  .logo{width:24px;height:24px;border-radius:8px}
+  .brand h1{font-size:12px}
+  .brand .sub{display:none}
+  .menu-btn{min-width:36px;min-height:36px;font-size:18px;padding:4px}
+  .topbar .badge{font-size:9px;padding:2px 6px}
+  .topbar select{font-size:10px;padding:2px 4px;min-height:28px}
+
+  .content{padding:6px 8px}
+  .wrap{gap:6px}
+  .msg{border-radius:10px}
+  .body{padding:6px 10px 8px}
+  .md{font-size:13px;line-height:1.55}
+  .tool-block .tool-body{max-height:80px}
+
+  .composer{padding:6px 8px;padding-bottom:calc(4px + var(--statusbar-h) + var(--safe-b));padding-left:calc(8px + var(--safe-l));padding-right:calc(8px + var(--safe-r))}
+  textarea{font-size:14px;min-height:32px;padding:6px 10px}
+  .send-btn{width:36px;height:36px;font-size:16px}
+  .attach-row{gap:4px}
+  .attach-row button{width:32px;height:32px;font-size:14px}
+
+  .status-bar{padding:3px 14px;padding-bottom:calc(3px + var(--safe-b));font-size:9px;gap:6px}
+
+  .scroll-fab{bottom:100px;right:10px;width:32px;height:32px;font-size:12px}
+
+  .welcome .wlogo{width:40px;height:40px;font-size:18px}
+  .welcome .wlogo.has-image{max-width:50%;max-height:min(30vh,200px)}
+  .welcome .wlogo.has-image img{max-height:min(30vh,200px)}
+  .welcome h2{font-size:14px}
+  .welcome p{font-size:11px}
+  .welcome{gap:8px;padding:12px}
+
+  .sidebar{top:var(--topbar-h)}
+  .sidebar-backdrop{top:var(--topbar-h)}
 }
 
 /* Desktop: hide menu btn, show sidebar normally */
@@ -1118,6 +1263,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
       <div style="padding:4px 8px 6px;display:flex;gap:4px">
         <button class="cat-chip" onclick="setHash('usage');showSniffUsage()">Usage</button>
         <button class="cat-chip" onclick="setHash('logs');showSniffLogs()">Logs</button>
+        <button class="cat-chip" onclick="setHash('memory');showSniffMemory()">Memory</button>
       </div>
     </div>
   </div>
@@ -1215,6 +1361,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
     </div>
   </div>
 </div>
+<div class="status-bar" id="status-bar"></div>
 
 <!-- Todo Drawer -->
 <div class="todo-tab" id="todo-tab" onclick="toggleTodoDrawer()">📋 Todo</div>
@@ -1239,7 +1386,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   <input type="text" id="m-project" placeholder="Leave empty for default workspace">
   <label>Model</label>
   <select id="m-model" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font-size:14px;font-family:var(--sans);margin-bottom:14px;outline:none">
-    <option value="">— Default —</option>
+    <option value="">— Default ({{.DefaultInteractiveModel}}) —</option>
     <option value="opus">Opus 4.6</option>
     <option value="opus[1m]">Opus 4.6 (1M)</option>
     <option value="sonnet">Sonnet 4.6</option>
@@ -1257,7 +1404,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
     <span>Enable soul files (personality, memory)</span>
   </div>
   <div class="toggle">
-    <input type="checkbox" id="m-replace-soul" checked>
+    <input type="checkbox" id="m-replace-soul" {{if .DefaultReplaceSoul}}checked{{end}}>
     <span>本我模式 <span style="font-size:11px;color:var(--muted2)">(replace CC harness)</span></span>
   </div>
   <div class="actions">
@@ -1312,6 +1459,9 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/yaml.min.js"></script>
 <script>
 'use strict';
+
+// ── Server-injected config ──
+const SERVER_CONFIG = {defaultReplaceSoul: {{.DefaultReplaceSoul}}, defaultInteractiveModel: "{{.DefaultInteractiveModel}}"};
 
 // ── State ──
 let TOKEN = new URLSearchParams(location.search).get('token')||localStorage.getItem('weiran_token')||'';
@@ -2046,10 +2196,42 @@ function wsSend(msg){
   if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(msg));
 }
 
+var _connState='disconnected';
 function setConnState(state){
+  _connState=state;
   const dot=document.getElementById('conn-dot');
   dot.className='conn-dot'+(state==='ok'?' ok':state==='connecting'?' connecting':'');
   dot.title=state==='ok'?'Connected':state==='connecting'?'Connecting...':'Disconnected';
+  updateStatusBar();
+}
+
+function updateStatusBar(){
+  const bar=document.getElementById('status-bar');
+  if(!bar)return;
+  const parts=[];
+  // Connection dot
+  const dc=_connState==='ok'?'ok':_connState==='connecting'?'connecting':'off';
+  const dl=_connState==='ok'?'Connected':_connState==='connecting'?'Connecting':'Offline';
+  parts.push('<span class="sb-dot '+dc+'" title="'+dl+'"></span>');
+  // Model
+  if(currentModel){
+    const m=currentModel.replace(/^.*\//,'');
+    parts.push('<span class="sb-sep">·</span><span class="sb-model">'+esc(m)+'</span>');
+  }
+  // Context usage
+  if(contextMax>0&&contextTokensPeak>0){
+    const pct=Math.round(contextTokensPeak/contextMax*100);
+    const cls=pct>=90?'danger':pct>=70?'warn':'';
+    parts.push('<span class="sb-sep">·</span><span class="sb-ctx '+cls+'">ctx '+pct+'%</span>');
+  }
+  // Session status
+  if(activeSessionId&&sessions[activeSessionId]){
+    const s=sessions[activeSessionId];
+    const st=s.status||'idle';
+    const cls=st==='running'?'running':'';
+    parts.push('<span class="sb-sep">·</span><span class="sb-status '+cls+'">'+(st==='running'?'▶ running':'● idle')+'</span>');
+  }
+  bar.innerHTML=parts.join('');
 }
 
 function handleWSMessage(msg){
@@ -2147,6 +2329,7 @@ function handleSessionsUpdate(list){
     }
   });
   Object.keys(sessions).forEach(id=>{if(!newIds.has(id)){delete sessions[id];if(activeSessionId===id&&!resumeInProgress)selectSession(null)}});
+  updateStatusBar();
 
   // Re-sync 本我 badge + toggle if the active session's flag changed
   // (e.g. another tab toggled it, or a reload completed).
@@ -2178,7 +2361,9 @@ function handleSessionsUpdate(list){
     const rawCost=s.proxy_cost_usd||s.total_cost_usd||0;
     const cost=rawCost>0?fmtCost(rawCost):'';
     const modelDisplay=shortModelName(s.model);
-    el.innerHTML=`<div class="si-top"><span class="si-name">${esc(s.name||shortId(s.id))}</span><span class="si-dot ${s.status}"></span></div><div class="si-meta"><span class="${modelClass(s.model)}">${modelDisplay}</span><span>${s.status}</span><span>${s.num_turns||0}t</span>${cost?'<span>'+cost+'</span>':''}</div><div class="si-actions"><button class="si-rename" onclick="event.stopPropagation();promptRename('${s.id}','${esc(s.name||'')}')">&#9998;</button><button class="si-del" onclick="openDestroySheet('${s.id}')">&times;</button></div>`;
+    const title=s.first_msg||s.name||shortId(s.id);
+    const sub=shortId(s.id)+' · '+(s.name||shortId(s.id));
+    el.innerHTML=`<div class="si-top"><span class="si-title" title="${esc(title)}">${esc(title)}</span><span class="si-dot ${s.status}"></span></div><div class="si-sub">${esc(sub)}</div><div class="si-meta"><span class="${modelClass(s.model)}">${modelDisplay}</span><span>${s.status}</span><span>${s.num_turns||0}t</span>${cost?'<span>'+cost+'</span>':''}</div><div class="si-actions"><button class="si-rename" onclick="event.stopPropagation();promptRename('${s.id}','${esc(s.name||'')}')">&#9998;</button><button class="si-del" onclick="openDestroySheet('${s.id}')">&times;</button></div>`;
   });
   existing.forEach((el,id)=>{if(!newIds.has(id))el.remove()});
   // Sync todo drawer from all sessions' server-side todos
@@ -2249,6 +2434,7 @@ function selectSession(id){
   setCwd('');
   currentModel='';contextMax=0;contextTokensPeak=0;
   updateSoulBadge(false);
+  updateStatusBar();
   updateTodoDrawer([]);
   document.getElementById('todo-drawer').classList.remove('open');
 
@@ -2278,6 +2464,7 @@ function selectSession(id){
   }
   // Update cost badge
   updateCostBadge(s);
+  updateStatusBar();
   // Restore chrome toggle state
   document.getElementById('toggle-chrome').checked=!!(s&&s.chrome_enabled);
   // Restore 本我 toggle + badge
@@ -2550,9 +2737,9 @@ function renderTodoList(todos){
   const done=todos.filter(t=>t.status==='completed').length;
   const active=todos.find(t=>t.status==='in_progress');
   const statusIcon=(s)=>{
-    if(s==='completed')return '✓';
-    if(s==='in_progress')return '◉';
-    return '○';
+    if(s==='completed')return '✅';
+    if(s==='in_progress')return '🔥';
+    return '💤';
   };
   let html=`<div class="todo-card">`;
   html+=`<div class="tool-head"><span class="tool-badge"><span class="icon">📋</span>Todo</span>`;
@@ -3019,7 +3206,7 @@ function createSession(){
   wsSend(msg);
   ['m-name','m-project','m-model','m-initial'].forEach(id=>document.getElementById(id).value='');
   document.getElementById('m-gal').value='';
-  document.getElementById('m-replace-soul').checked=false;
+  document.getElementById('m-replace-soul').checked=SERVER_CONFIG.defaultReplaceSoul;
 }
 
 function promptRename(id,currentName){
@@ -3255,7 +3442,7 @@ function renderTodoItems(todos){
   let html='<div class="todo-list">';
   todos.forEach(t=>{
     const cls=t.status||'pending';
-    const icon=cls==='completed'?'✓':cls==='in_progress'?'◉':'○';
+    const icon=cls==='completed'?'✅':cls==='in_progress'?'🔥':'💤';
     const activeForm=t.activeForm&&cls==='in_progress'?`<div class="todo-active">${esc(t.activeForm)}</div>`:'';
     html+=`<div class="todo-item ${cls}"><div class="todo-icon">${icon}</div><div class="todo-text"><div class="todo-content">${esc(t.content||'')}</div>${activeForm}</div></div>`;
   });
@@ -3942,6 +4129,7 @@ function updateContextBar(tokens){
   else if(ratio>.6)fill.classList.add('warn');
   pct.textContent=percent+'%';
   bar.classList.remove('hidden');
+  updateStatusBar();
 }
 
 // ── Helpers ──
@@ -3973,6 +4161,7 @@ function handleHashRoute(){
   const hash=location.hash.replace('#','').replace(/^\//,'');
   if(hash==='usage'&&window._sniffEnabled){showSniffUsage();return}
   if(hash==='logs'&&window._sniffEnabled){showSniffLogs();return}
+  if(hash==='memory'&&window._sniffEnabled){showSniffMemory();return}
 }
 function setHash(h){location.hash=h}
 
@@ -4325,6 +4514,112 @@ function sniffExportCSV(){
   p.delete('limit');p.delete('offset');p.delete('sort');p.delete('dir');
   window.open('/api/proxy/logs/export?'+p+'&token='+TOKEN);
 }
+
+let memoryAuditDays=7;
+async function showSniffMemory(){
+  showSniffPanel('Memory');
+  const el=document.getElementById('sniff-content');
+  el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted2)">Loading...</div>';
+  try{
+    const [statsR,logR]=await Promise.all([
+      fetch('/api/memory/stats?days='+memoryAuditDays+'&token='+TOKEN),
+      fetch('/api/memory/audit?days='+memoryAuditDays+'&limit=50&token='+TOKEN)
+    ]);
+    const stats=await statsR.json();
+    const logs=await logR.json();
+
+    // Time presets
+    let html='<div class="sniff-filter" style="gap:6px">';
+    [1,3,7,14,30].forEach(d=>{
+      const cls=memoryAuditDays===d?'cat-chip active':'cat-chip';
+      html+=`<button class="${cls}" onclick="memoryAuditDays=${d};showSniffMemory()">${d}d</button>`;
+    });
+    html+='</div>';
+
+    // Summary cards
+    const ops=stats.by_operation||{};
+    const recall=ops.recall||{count:0,hits:0,hit_rate:0,avg_latency_ms:0};
+    const search=ops.search||{count:0,hits:0,hit_rate:0,avg_latency_ms:0};
+    const store=ops.store||{count:0,hits:0,hit_rate:0,avg_latency_ms:0};
+    const list=ops.list||{count:0,hits:0,hit_rate:0,avg_latency_ms:0};
+
+    html+='<div class="sniff-summary">';
+    html+=`<div class="sniff-card"><div class="sniff-stat">${stats.total_ops||0}</div><div>Total Ops</div></div>`;
+    html+=`<div class="sniff-card"><div class="sniff-stat">${recall.count}</div><div>Recall</div><div style="font-size:11px;color:var(--muted2)">hit ${(recall.hit_rate*100).toFixed(0)}% · ${recall.avg_latency_ms}ms</div></div>`;
+    html+=`<div class="sniff-card"><div class="sniff-stat">${search.count}</div><div>Search</div><div style="font-size:11px;color:var(--muted2)">hit ${(search.hit_rate*100).toFixed(0)}% · ${search.avg_latency_ms}ms</div></div>`;
+    html+=`<div class="sniff-card"><div class="sniff-stat">${store.count}</div><div>Store</div></div>`;
+    html+='</div>';
+
+    // Hit rate bars
+    html+='<h4 style="margin:16px 0 8px;color:var(--text)">Hit Rate by Operation</h4>';
+    ['recall','search','store','list'].forEach(op=>{
+      const d=ops[op];if(!d||d.count===0)return;
+      const pct=(d.hit_rate*100).toFixed(1);
+      const color=d.hit_rate>=0.7?'var(--good)':d.hit_rate>=0.4?'var(--warn)':'var(--bad)';
+      html+=`<div style="margin:4px 0"><span style="display:inline-block;width:60px;color:var(--muted2)">${op}</span>`;
+      html+=`<div class="sniff-bar" style="display:inline-block;width:calc(100% - 130px);vertical-align:middle"><div style="width:${pct}%;background:${color};height:100%;border-radius:3px"></div></div>`;
+      html+=`<span style="display:inline-block;width:60px;text-align:right;color:var(--text)">${pct}%</span></div>`;
+    });
+
+    // Top paths
+    const topPaths=stats.top_paths||[];
+    if(topPaths.length){
+      const maxCount=topPaths[0].count||1;
+      html+='<h4 style="margin:16px 0 8px;color:var(--text)">Top Memory Paths</h4>';
+      topPaths.slice(0,10).forEach(p=>{
+        const pct=(p.count/maxCount*100).toFixed(0);
+        const short=p.path.replace(/.*\/(memory\/)/,'$1').replace(/.*\/(MEMORY\.md)/,'$1');
+        html+=`<div style="margin:3px 0;display:flex;align-items:center;gap:8px">`;
+        html+=`<span style="flex-shrink:0;width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted2);font-size:12px" title="${p.path}">${short}</span>`;
+        html+=`<div class="sniff-bar" style="flex:1"><div style="width:${pct}%;background:var(--accent);height:100%;border-radius:3px"></div></div>`;
+        html+=`<span style="flex-shrink:0;width:30px;text-align:right;color:var(--text);font-size:12px">${p.count}</span></div>`;
+      });
+    }
+
+    // Daily trend
+    const byDay=stats.by_day||[];
+    if(byDay.length){
+      html+='<h4 style="margin:16px 0 8px;color:var(--text)">Daily Trend</h4>';
+      html+='<table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr style="color:var(--muted2);text-align:left"><th style="padding:4px 8px">Date</th><th>Ops</th><th>Hits</th><th>Hit Rate</th></tr></thead><tbody>';
+      byDay.forEach(d=>{
+        const pct=(d.hit_rate*100).toFixed(1);
+        const color=d.hit_rate>=0.7?'var(--good)':d.hit_rate>=0.4?'var(--warn)':'var(--bad)';
+        html+=`<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px;color:var(--text)">${d.date}</td><td>${d.ops}</td><td>${d.hits}</td><td style="color:${color}">${pct}%</td></tr>`;
+      });
+      html+='</tbody></table>';
+    }
+
+    // Recent ops table
+    if(logs&&logs.length){
+      html+='<h4 style="margin:16px 0 8px;color:var(--text)">Recent Operations</h4>';
+      html+='<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr style="color:var(--muted2);text-align:left">';
+      html+='<th style="padding:4px 6px">Time</th><th>Op</th><th>Tool</th><th>Path</th><th>Hit</th><th>Latency</th><th>Session</th></tr></thead><tbody>';
+      logs.forEach(l=>{
+        const t=new Date(l.timestamp);
+        const ts=t.toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
+        const short=(l.path||'').replace(/.*\/(memory\/)/,'$1').replace(/.*\/(MEMORY\.md)/,'$1');
+        const hitColor=l.hit?'var(--good)':'var(--bad)';
+        const hitText=l.hit?'✓':'✗';
+        const latency=l.latency_ms?l.latency_ms+'ms':'—';
+        const sess=l.session_name||l.session_id?.slice(0,8)||'—';
+        html+=`<tr style="border-top:1px solid var(--border)"><td style="padding:4px 6px;white-space:nowrap">${ts}</td>`;
+        html+=`<td><span style="padding:1px 6px;border-radius:3px;background:var(--surface2);font-size:11px">${l.operation}</span></td>`;
+        html+=`<td>${l.tool_name}</td>`;
+        html+=`<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${l.path}">${short}</td>`;
+        html+=`<td style="color:${hitColor}">${hitText}</td>`;
+        html+=`<td>${latency}</td>`;
+        html+=`<td style="color:var(--muted2)">${sess}</td></tr>`;
+      });
+      html+='</tbody></table></div>';
+    }
+
+    if(!stats.total_ops)html='<div style="text-align:center;padding:60px;color:var(--muted2)">No memory operations recorded yet.<br>Start a session and interact with memory files.</div>';
+    el.innerHTML=html;
+  }catch(e){
+    el.innerHTML='<div style="text-align:center;padding:40px;color:var(--bad)">Error: '+e.message+'</div>';
+  }
+}
+
 function modelClass(m){if(!m)return '';const l=m.toLowerCase();if(l.includes('opus'))return 'model-opus';if(l.includes('haiku'))return 'model-haiku';if(l.includes('glm'))return 'model-sonnet';if(l.includes('minimax'))return 'model-sonnet';return 'model-sonnet'}
 function shortModelName(m){if(!m)return 'default';const l=m.toLowerCase();if(l.includes('[1m]')){if(l.includes('opus'))return 'opus(1M)';if(l.includes('sonnet'))return 'sonnet(1M)'}if(l.includes('opus'))return 'opus';if(l.includes('sonnet'))return 'sonnet';if(l.includes('haiku'))return 'haiku';if(l.includes('/'))return m.split('/').pop();return m.replace(/^claude-/,'')}
 function statusClass(s){if(s>=500)return 'status-5xx';if(s>=400)return 'status-4xx';return 'status-2xx'}
@@ -4512,6 +4807,13 @@ if(window.visualViewport){
   window.visualViewport.addEventListener('resize',()=>{
     document.documentElement.style.setProperty('--vvh',window.visualViewport.height+'px');
   });
+}
+
+// ── Service Worker Registration ──
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/service-worker.js')
+    .then(function(reg){console.log('[SW] registered',reg.scope)})
+    .catch(function(err){console.warn('[SW] registration failed',err)});
 }
 </script>
 </body>

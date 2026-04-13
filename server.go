@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	_ "embed"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"text/template"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -28,6 +30,15 @@ import (
 
 //go:embed web/index.html
 var indexHTML []byte
+
+//go:embed web/manifest.json
+var manifestJSON []byte
+
+//go:embed web/service-worker.js
+var serviceWorkerJS []byte
+
+//go:embed web/icons
+var iconsFS embed.FS
 
 // ── Server Config ──
 
@@ -44,6 +55,8 @@ type serverConfig struct {
 	Proxy                proxyConfig         `json:"proxy"`
 	SessionReset         sessionResetConfig  `json:"sessionReset"`
 	S3                   s3Config            `json:"s3"`
+	DefaultReplaceSoul      bool                `json:"defaultReplaceSoul"`      // 本我模式 default for new sessions
+	DefaultInteractiveModel string              `json:"defaultInteractiveModel"` // default model for new interactive sessions; fallback: opus[1m]
 }
 
 // s3Config holds Wasabi/S3 upload settings for image hosting.
@@ -116,6 +129,7 @@ func defaultServerConfig() serverConfig {
 		RateLimitPerMin:      60,
 		MaxInteractionRounds: defaultMaxInteractionRounds,
 		Proxy:                defaultProxyConfig(),
+		DefaultReplaceSoul:   true, // 本我模式 default on
 	}
 }
 
@@ -174,8 +188,26 @@ func loadServerConfig() serverConfig {
 					cfg.Proxy.Upstream = wrapper.Server.Proxy.Upstream
 				}
 			}
+			// Default interactive model
+			if wrapper.Server.DefaultInteractiveModel != "" {
+				cfg.DefaultInteractiveModel = wrapper.Server.DefaultInteractiveModel
+			}
 		}
 		break
+	}
+
+	// Validate defaultInteractiveModel; fallback to opus[1m] if unset or invalid.
+	// Use nativeModelAliases for validation first (no provider dependency),
+	// then try resolveFuzzyModel for provider models.
+	const fallbackInteractiveModel = "opus[1m]"
+	if cfg.DefaultInteractiveModel == "" {
+		cfg.DefaultInteractiveModel = fallbackInteractiveModel
+	} else if _, ok := nativeModelAliases[cfg.DefaultInteractiveModel]; !ok {
+		// Not a native alias — try full resolution (may depend on providers)
+		if resolved, err := resolveFuzzyModel(cfg.DefaultInteractiveModel); err != nil || resolved == "" {
+			fmt.Fprintf(os.Stderr, "[%s] server: invalid defaultInteractiveModel %q, falling back to %s\n", appName, cfg.DefaultInteractiveModel, fallbackInteractiveModel)
+			cfg.DefaultInteractiveModel = fallbackInteractiveModel
+		}
 	}
 
 	return cfg
@@ -279,7 +311,7 @@ func handleServer(args []string) {
 	rl := newRateLimiter(cfg.RateLimitPerMin)
 
 	// WebSocket hub for bidirectional real-time sync
-	hub := newWSHub(cfg.Token, rl)
+	hub := newWSHub(cfg.Token, rl, cfg.DefaultReplaceSoul, cfg.DefaultInteractiveModel)
 	hub.sm = sm
 	sm.hub = hub
 
@@ -312,12 +344,14 @@ func handleServer(args []string) {
 	// Config info (authed)
 	mux.HandleFunc("GET /api/config", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"max_sessions":     cfg.MaxSessions,
-			"idle_timeout_min": cfg.IdleTimeoutMin,
-			"max_lifetime_hrs": cfg.MaxLifetimeHrs,
-			"rate_limit":       cfg.RateLimitPerMin,
-			"workspace":        workspace,
-			"claude_bin":       claudeBin,
+			"max_sessions":              cfg.MaxSessions,
+			"idle_timeout_min":          cfg.IdleTimeoutMin,
+			"max_lifetime_hrs":          cfg.MaxLifetimeHrs,
+			"rate_limit":                cfg.RateLimitPerMin,
+			"default_replace_soul":      cfg.DefaultReplaceSoul,
+			"default_interactive_model": cfg.DefaultInteractiveModel,
+			"workspace":                 workspace,
+			"claude_bin":                claudeBin,
 		})
 	}))
 
@@ -351,6 +385,51 @@ func handleServer(args []string) {
 			"hits":  hits,
 			"total": len(hits),
 		})
+	}))
+
+	// Memory audit log
+	// GET /api/memory/audit?days=7&op=recall&limit=100
+	mux.HandleFunc("GET /api/memory/audit", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			fmt.Sscanf(d, "%d", &days)
+		}
+		limit := 100
+		if l := r.URL.Query().Get("limit"); l != "" {
+			fmt.Sscanf(l, "%d", &limit)
+		}
+		op := r.URL.Query().Get("op")
+		db := openAuditDB()
+		if db == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "audit DB not available"})
+			return
+		}
+		entries, err := queryMemoryAudit(db, days, op, limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "total": len(entries)})
+	}))
+
+	// Memory audit aggregated stats
+	// GET /api/memory/stats?days=7
+	mux.HandleFunc("GET /api/memory/stats", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			fmt.Sscanf(d, "%d", &days)
+		}
+		db := openAuditDB()
+		if db == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "audit DB not available"})
+			return
+		}
+		stats, err := queryMemoryAuditStats(db, days)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, stats)
 	}))
 
 	// Link preview (OG tags)
@@ -489,7 +568,7 @@ func handleServer(args []string) {
 			GalID          string   `json:"gal_id"`
 			Category       string   `json:"category"`
 			Tags           []string `json:"tags"`
-			ReplaceSoul    bool     `json:"replace_soul"`
+			ReplaceSoul    *bool    `json:"replace_soul"` // nil → use config default
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -507,16 +586,26 @@ func handleServer(args []string) {
 			req.Project = workspace
 		}
 
+		replaceSoul := cfg.DefaultReplaceSoul
+		if req.ReplaceSoul != nil {
+			replaceSoul = *req.ReplaceSoul
+		}
+
+		model := req.Model
+		if model == "" && (req.Category == "" || req.Category == CategoryInteractive) {
+			model = cfg.DefaultInteractiveModel
+		}
+
 		sess, err := sm.createSessionWithOpts(sessionCreateOpts{
 			Name:        req.Name,
 			Project:     req.Project,
-			Model:       req.Model,
+			Model:       model,
 			Soul:        req.SoulFiles,
 			MCP:         req.MCPConfig,
 			GalID:       req.GalID,
 			Category:    req.Category,
 			Tags:        req.Tags,
-			ReplaceSoul: req.ReplaceSoul,
+			ReplaceSoul: replaceSoul,
 		})
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
@@ -524,6 +613,15 @@ func handleServer(args []string) {
 		}
 
 		fmt.Fprintf(os.Stderr, "[%s] server: session created: %s (%s)\n", appName, shortID(sess.ID), sess.Name)
+
+		// Capture first user message for hint display
+		if req.InitialMessage != "" {
+			sess.mu.Lock()
+			if sess.FirstMsg == "" {
+				sess.FirstMsg = req.InitialMessage
+			}
+			sess.mu.Unlock()
+		}
 
 		// Send initial message if provided — wait for Claude Code to emit init
 		// before writing to stdin (500ms hardcoded sleep was unreliable for slow
@@ -680,6 +778,17 @@ func handleServer(args []string) {
 
 		sess.touch()
 		sess.setStatus("running")
+
+		// Capture first user message for hint display
+		sess.mu.Lock()
+		firstMsgCaptured := sess.FirstMsg == ""
+		if firstMsgCaptured {
+			sess.FirstMsg = req.Message
+		}
+		sess.mu.Unlock()
+		if firstMsgCaptured && hub != nil {
+			hub.notifySessions()
+		}
 
 		// Broadcast user message to SSE/WS so it persists in history
 		// (without this, switching sessions and back loses user messages)
@@ -1249,23 +1358,24 @@ func handleServer(args []string) {
 		// Link or touch soul session once Claude session ID is available
 		if soulSessionID > 0 {
 			go func(soulID int64, s *serverSession) {
-				deadline := time.Now().Add(30 * time.Second)
-				for time.Now().Before(deadline) {
-					s.mu.Lock()
-					cid := s.ClaudeSID
-					s.mu.Unlock()
-					if cid != "" {
-						linkSoulSession(soulID, cid)
-						return
-					}
-					time.Sleep(500 * time.Millisecond)
+				// Wait for init (which sets ClaudeSID) instead of polling
+				if !s.process.waitInit(30 * time.Second) {
+					return
+				}
+				s.mu.Lock()
+				cid := s.ClaudeSID
+				s.mu.Unlock()
+				if cid != "" {
+					linkSoulSession(soulID, cid)
 				}
 			}(soulSessionID, sess)
 		}
 
-		// Send heartbeat task as initial message
+		// Send heartbeat task as initial message — wait for init before writing to stdin
 		go func() {
-			time.Sleep(500 * time.Millisecond)
+			if !sess.process.waitInit(30 * time.Second) {
+				fmt.Fprintf(os.Stderr, "[%s] server: wake init timeout for %s, sending task anyway\n", appName, shortID(sess.ID))
+			}
 			if err := sess.process.sendMessage(taskMsg); err != nil {
 				fmt.Fprintf(os.Stderr, "[%s] server: wake failed to send task: %v\n", appName, err)
 			}
@@ -1300,6 +1410,8 @@ func handleServer(args []string) {
 			Agent string `json:"agent"`
 			Task  string `json:"task"`
 			Wait  bool   `json:"wait"`
+			Self  bool   `json:"self"`
+			Model string `json:"model"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Agent == "" || req.Task == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent and task are required"})
@@ -1316,9 +1428,7 @@ func handleServer(args []string) {
 		if agent == nil {
 			available := []string{}
 			for _, a := range agents {
-				if a.ID != "main" {
-					available = append(available, a.ID)
-				}
+				available = append(available, a.ID)
 			}
 			writeJSON(w, http.StatusNotFound, map[string]any{
 				"error":     "agent not found: " + req.Agent,
@@ -1327,9 +1437,18 @@ func handleServer(args []string) {
 			return
 		}
 
-		if agent.ID == "main" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "use /api/wake for main agent"})
+		if agent.ID == "main" && !req.Self {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "spawning main agent requires self:true"})
 			return
+		}
+
+		// --self --model override
+		if req.Self && req.Model != "" {
+			if resolved, resolveErr := resolveFuzzyModel(req.Model); resolveErr == nil && resolved != "" {
+				agent.Model = resolved
+			} else {
+				agent.Model = req.Model
+			}
 		}
 
 		// Per-agent mutual exclusion
@@ -1387,13 +1506,18 @@ func handleServer(args []string) {
 			notifyBin = os.Args[0]
 		}
 
+		// Shell-escape values interpolated into the wrapper script's double-quoted
+		// notify arguments to prevent injection via agent.Name / sessionName.
+		safeAgentName := shellEscapeForDoubleQuote(agent.Name)
+		safeSessionName := shellEscapeForDoubleQuote(sessionName)
+		safeLogFile := shellEscapeForDoubleQuote(logFile)
 		wrapperScript := fmt.Sprintf("#!/bin/sh\necho $$ > %q\n%s > %q 2>&1\nEXIT_CODE=$?\necho \"$EXIT_CODE\" > %q\nDURATION=$SECONDS\n%s spawn finish %d $EXIT_CODE $DURATION %q 2>/dev/null\nif [ \"$EXIT_CODE\" -eq 0 ]; then\n  %s notify \"✅ spawn %s 完成 (${DURATION}s)\\nsession: %s\"\nelse\n  %s notify \"❌ spawn %s 失败 (exit=$EXIT_CODE, ${DURATION}s)\\nsession: %s\\nlog: %s\"\nfi\n",
 			pidFile,
 			shellQuoteArgs(cmd.Path, cmd.Args[1:]...), logFile,
 			exitFile,
 			notifyBin, spawnID, logFile,
-			notifyBin, agent.Name, sessionName,
-			notifyBin, agent.Name, sessionName, logFile,
+			notifyBin, safeAgentName, safeSessionName,
+			notifyBin, safeAgentName, safeSessionName, safeLogFile,
 		)
 
 		wrapperPath := filepath.Join(tmpDir, "run.sh")
@@ -1485,14 +1609,44 @@ func handleServer(args []string) {
 		http.ServeFile(w, r, filePath)
 	}))
 
-	// Serve UI
+	// PWA assets (no auth — browser needs direct access during install)
+	mux.HandleFunc("GET /manifest.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/manifest+json")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(manifestJSON)
+	})
+	mux.HandleFunc("GET /service-worker.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Cache-Control", "no-cache") // SW must not be cached
+		w.Write(serviceWorkerJS)
+	})
+	iconsSubFS, _ := fs.Sub(iconsFS, "web/icons")
+	mux.HandleFunc("GET /icons/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=604800")
+		http.StripPrefix("/icons/", http.FileServerFS(iconsSubFS)).ServeHTTP(w, r)
+	})
+
+	// Serve UI — render index.html as Go template to inject server config
+	indexTmpl, err := template.New("index").Parse(string(indexHTML))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] server: FATAL: failed to parse index.html template: %v\n", appName, err)
+		os.Exit(1)
+	}
+	type uiConfig struct {
+		DefaultReplaceSoul      bool
+		DefaultInteractiveModel string
+	}
+	uiCfg := uiConfig{
+		DefaultReplaceSoul:      cfg.DefaultReplaceSoul,
+		DefaultInteractiveModel: cfg.DefaultInteractiveModel,
+	}
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(indexHTML)
+		indexTmpl.Execute(w, uiCfg)
 	})
 
 	// Start Telegram bot if enabled

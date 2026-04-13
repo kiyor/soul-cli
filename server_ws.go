@@ -29,18 +29,22 @@ const (
 
 // wsHub manages all WebSocket client connections and broadcasts events.
 type wsHub struct {
-	mu      sync.RWMutex
-	clients map[*wsClient]struct{}
-	sm      *sessionManager
-	rl      *rateLimiter
-	token   string
+	mu                      sync.RWMutex
+	clients                 map[*wsClient]struct{}
+	sm                      *sessionManager
+	rl                      *rateLimiter
+	token                   string
+	defaultReplaceSoul      bool   // from serverConfig
+	defaultInteractiveModel string // from serverConfig; fallback model for new sessions
 }
 
-func newWSHub(token string, rl *rateLimiter) *wsHub {
+func newWSHub(token string, rl *rateLimiter, defaultReplaceSoul bool, defaultInteractiveModel string) *wsHub {
 	return &wsHub{
-		clients: make(map[*wsClient]struct{}),
-		rl:      rl,
-		token:   token,
+		clients:                 make(map[*wsClient]struct{}),
+		rl:                      rl,
+		token:                   token,
+		defaultReplaceSoul:      defaultReplaceSoul,
+		defaultInteractiveModel: defaultInteractiveModel,
 	}
 }
 
@@ -235,7 +239,7 @@ func (c *wsClient) handleMessage(raw []byte) {
 		InitMsg     string `json:"initial_message"`
 		SkipReplay  bool   `json:"skip_replay"`
 		GalID       string `json:"gal_id"`
-		ReplaceSoul *bool  `json:"replace_soul"` // 本我模式; nil → default false for create, inherit-from-DB for resume
+		ReplaceSoul *bool  `json:"replace_soul"` // 本我模式; nil → default true for create, inherit-from-DB for resume
 	}
 	if json.Unmarshal(raw, &msg) != nil {
 		c.sendJSON(map[string]string{"type": "error", "error": "invalid JSON"})
@@ -296,6 +300,16 @@ func (c *wsClient) handleMessage(raw []byte) {
 		}
 		sess.touch()
 		sess.setStatus("running")
+		// Capture first user message for hint display
+		sess.mu.Lock()
+		if sess.FirstMsg == "" {
+			sess.FirstMsg = msg.Message
+			// Notify hub so sidebar updates with the new hint
+			if sess.hub != nil {
+				go sess.hub.notifySessions()
+			}
+		}
+		sess.mu.Unlock()
 		// Broadcast user message so it persists in history for session switching
 		userEvent, _ := json.Marshal(map[string]any{
 			"type":    "user",
@@ -326,14 +340,18 @@ func (c *wsClient) handleMessage(raw []byte) {
 		if msg.SoulFiles != nil {
 			soul = *msg.SoulFiles
 		}
-		replaceSoul := false
+		replaceSoul := c.hub.defaultReplaceSoul
 		if msg.ReplaceSoul != nil {
 			replaceSoul = *msg.ReplaceSoul
+		}
+		model := msg.Model
+		if model == "" {
+			model = c.hub.defaultInteractiveModel
 		}
 		sess, err := c.hub.sm.createSessionWithOpts(sessionCreateOpts{
 			Name:        name,
 			Project:     project,
-			Model:       msg.Model,
+			Model:       model,
 			Soul:        soul,
 			GalID:       msg.GalID,
 			Category:    CategoryInteractive,
@@ -344,15 +362,19 @@ func (c *wsClient) handleMessage(raw []byte) {
 			return
 		}
 		if msg.InitMsg != "" {
-			time.Sleep(500 * time.Millisecond)
-			userEvent, _ := json.Marshal(map[string]any{
-				"type":    "user",
-				"message": map[string]any{"role": "user", "content": msg.InitMsg},
-			})
-			sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
-			if err := sess.process.sendMessage(msg.InitMsg); err != nil {
-				fmt.Fprintf(os.Stderr, "[%s] ws: create: failed to send initial message: %v\n", appName, err)
-			}
+			go func() {
+				if !sess.process.waitInit(30 * time.Second) {
+					fmt.Fprintf(os.Stderr, "[%s] ws: create: init timeout for %s, sending message anyway\n", appName, shortID(sess.ID))
+				}
+				userEvent, _ := json.Marshal(map[string]any{
+					"type":    "user",
+					"message": map[string]any{"role": "user", "content": msg.InitMsg},
+				})
+				sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
+				if err := sess.process.sendMessage(msg.InitMsg); err != nil {
+					fmt.Fprintf(os.Stderr, "[%s] ws: create: failed to send initial message: %v\n", appName, err)
+				}
+			}()
 		}
 		// Auto-subscribe client to the new session
 		c.mu.Lock()

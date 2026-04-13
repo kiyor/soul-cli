@@ -438,6 +438,10 @@ func initProxyDB() {
 		fmt.Fprintf(os.Stderr, "[%s] proxy-db: failed to open %s: %v\n", appName, dbFile, err)
 		return
 	}
+	// SQLite is single-writer; limit connections to prevent busy_timeout failures
+	// under concurrent proxy requests.
+	proxyDB.SetMaxOpenConns(1)
+	proxyDB.SetMaxIdleConns(1)
 	if _, err := proxyDB.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] proxy-db: WAL mode failed: %v\n", appName, err)
 	}
@@ -729,44 +733,57 @@ func (r *streamCaptureReader) Read(p []byte) (int, error) {
 	if n > 0 {
 		r.buf.Write(p[:n])
 	}
-	if err == io.EOF {
-		// Stream finished, extract usage from buffered SSE data
-		bufBytes := r.buf.Bytes()
-
-		// Decompress gzip if needed (Anthropic API may return gzip-encoded SSE)
-		if len(bufBytes) >= 2 && bufBytes[0] == 0x1f && bufBytes[1] == 0x8b {
-			if gr, gzErr := gzip.NewReader(bytes.NewReader(bufBytes)); gzErr == nil {
-				if decoded, readErr := io.ReadAll(gr); readErr == nil {
-					bufBytes = decoded
-				}
-				gr.Close()
-			}
-		}
-
-		model, in, out, cr, cc, stopReason, toolCalls := extractUsageFromSSE(bufBytes)
-		if in > 0 || out > 0 || cr > 0 || cc > 0 {
-			pState.addTokens(model, in, out, cr, cc)
-		}
-		if in == 0 && out == 0 && cr == 0 && len(bufBytes) > 0 {
-			snippet := string(bufBytes)
-			if len(snippet) > 300 {
-				snippet = snippet[:300]
-			}
-			fmt.Fprintf(os.Stderr, "[%s] proxy-sse: zero tokens from %d bytes (model=%s) first300=%q\n", appName, len(bufBytes), model, snippet)
-		}
-		// Log to DB
-		r.info.InputTokens = in
-		r.info.OutputTokens = out
-		r.info.CacheRead = cr
-		r.info.CacheCreate = cc
-		r.info.StopReason = stopReason
-		r.info.ToolCalls = toolCalls
-		if model != "" {
-			r.info.Model = model
-		}
-		saveProxyRequest(r.info)
+	// Extract usage on stream completion (EOF) OR on any terminal error
+	// (e.g. client disconnect, context canceled). Without this, token usage
+	// for interrupted streams is silently lost.
+	if err != nil {
+		r.extractAndSaveUsage()
 	}
 	return n, err
+}
+
+// extractAndSaveUsage extracts token usage from the buffered SSE data and
+// saves the proxy request record. Safe to call multiple times (no-ops after first).
+func (r *streamCaptureReader) extractAndSaveUsage() {
+	bufBytes := r.buf.Bytes()
+	if len(bufBytes) == 0 {
+		return
+	}
+	// Drain the buffer so this is idempotent on repeated calls
+	r.buf.Reset()
+
+	// Decompress gzip if needed (Anthropic API may return gzip-encoded SSE)
+	if len(bufBytes) >= 2 && bufBytes[0] == 0x1f && bufBytes[1] == 0x8b {
+		if gr, gzErr := gzip.NewReader(bytes.NewReader(bufBytes)); gzErr == nil {
+			if decoded, readErr := io.ReadAll(gr); readErr == nil {
+				bufBytes = decoded
+			}
+			gr.Close()
+		}
+	}
+
+	model, in, out, cr, cc, stopReason, toolCalls := extractUsageFromSSE(bufBytes)
+	if in > 0 || out > 0 || cr > 0 || cc > 0 {
+		pState.addTokens(model, in, out, cr, cc)
+	}
+	if in == 0 && out == 0 && cr == 0 && len(bufBytes) > 0 {
+		snippet := string(bufBytes)
+		if len(snippet) > 300 {
+			snippet = snippet[:300]
+		}
+		fmt.Fprintf(os.Stderr, "[%s] proxy-sse: zero tokens from %d bytes (model=%s) first300=%q\n", appName, len(bufBytes), model, snippet)
+	}
+	// Log to DB
+	r.info.InputTokens = in
+	r.info.OutputTokens = out
+	r.info.CacheRead = cr
+	r.info.CacheCreate = cc
+	r.info.StopReason = stopReason
+	r.info.ToolCalls = toolCalls
+	if model != "" {
+		r.info.Model = model
+	}
+	saveProxyRequest(r.info)
 }
 
 // ── API Endpoints ──

@@ -302,6 +302,13 @@ func (tb *telegramBridge) processMessage(chat *tgChat, text string) {
 		msgToSend = buildTGContext(chatID) + text
 	}
 
+	// Capture first user message for hint display
+	sess.mu.Lock()
+	if sess.FirstMsg == "" {
+		sess.FirstMsg = text
+	}
+	sess.mu.Unlock()
+
 	// Broadcast user message to Web UI SSE/WS (show original text, not with context prefix)
 	userEvent, _ := json.Marshal(map[string]any{
 		"type":    "user",

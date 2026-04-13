@@ -77,9 +77,10 @@ func (b *sseBroadcaster) unsubscribe(sub *subscriber) {
 }
 
 // broadcast sends an event to all subscribers. Slow consumers are dropped.
+// NOTE: hub.broadcastSessionEvent is called OUTSIDE b.mu to avoid deadlock:
+// broadcast holds broadcaster.mu → hub call → notifySessions → snapshot → broadcaster.count (needs broadcaster.mu).
 func (b *sseBroadcaster) broadcast(ev sseEvent) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	// Append to history ring buffer
 	b.history = append(b.history, ev)
@@ -98,9 +99,14 @@ func (b *sseBroadcaster) broadcast(ev sseEvent) {
 		}
 	}
 
-	// Also push to WebSocket hub for bidirectional sync
-	if b.hub != nil && b.sessionID != "" {
-		b.hub.broadcastSessionEvent(b.sessionID, ev.Event, ev.Data)
+	// Capture hub/sessionID under lock, call outside
+	hub := b.hub
+	sid := b.sessionID
+	b.mu.Unlock()
+
+	// Push to WebSocket hub OUTSIDE broadcaster lock (avoids deadlock cycle)
+	if hub != nil && sid != "" {
+		hub.broadcastSessionEvent(sid, ev.Event, ev.Data)
 	}
 }
 
@@ -179,7 +185,10 @@ func serveSSE(w http.ResponseWriter, r *http.Request, broadcaster *sseBroadcaste
 // bridgeStdout reads Claude Code stdout and broadcasts as SSE events.
 // Also updates session status based on message types.
 // Blocks until the process stdout is closed.
-func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage)) {
+func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage), onMemoryAudit func(*memoryAuditEntry)) {
+	// Track pending memory tool_use ops waiting for their tool_result
+	pendingMemOps := make(map[string]*pendingMemoryOp)
+
 	proc.readLines(func(msgType string, raw json.RawMessage) {
 		// Route control_response to sync waiters
 		if msgType == "control_response" {
@@ -207,6 +216,29 @@ func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(
 		// Detect TodoWrite tool_use and extract todos for cross-session broadcast
 		if event == "tool_use" && onTodos != nil {
 			extractTodoWrite(raw, onTodos)
+		}
+
+		// Memory audit: track tool_use targeting memory paths
+		if event == "tool_use" && onMemoryAudit != nil {
+			if pending := extractMemoryToolUse(raw); pending != nil {
+				pendingMemOps[pending.ToolUseID] = pending
+			}
+			// Evict stale pending ops (>5min without matching tool_result)
+			if len(pendingMemOps) > 20 {
+				staleThreshold := time.Now().Add(-5 * time.Minute)
+				for id, op := range pendingMemOps {
+					if op.StartTime.Before(staleThreshold) {
+						delete(pendingMemOps, id)
+					}
+				}
+			}
+		}
+
+		// Memory audit: match tool_result back to pending memory ops
+		if event == "tool_result" && onMemoryAudit != nil && len(pendingMemOps) > 0 {
+			if entry := matchMemoryToolResult(raw, pendingMemOps); entry != nil {
+				onMemoryAudit(entry)
+			}
 		}
 	})
 

@@ -74,6 +74,22 @@ func openDB() (*sql.DB, error) {
 			started_at  TEXT NOT NULL,
 			finished_at TEXT DEFAULT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS memory_audit (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp    TEXT NOT NULL,
+			session_id   TEXT NOT NULL DEFAULT '',
+			session_name TEXT NOT NULL DEFAULT '',
+			operation    TEXT NOT NULL,
+			tool_name    TEXT NOT NULL DEFAULT '',
+			path         TEXT DEFAULT '',
+			query        TEXT DEFAULT '',
+			latency_ms   INTEGER DEFAULT 0,
+			hit          BOOLEAN DEFAULT 0,
+			result_size  INTEGER DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_maudit_ts ON memory_audit(timestamp)`,
+		`CREATE INDEX IF NOT EXISTS idx_maudit_op ON memory_audit(operation)`,
+		`CREATE INDEX IF NOT EXISTS idx_maudit_sess ON memory_audit(session_id)`,
 	}
 	for _, s := range schemas {
 		if _, err := db.Exec(s); err != nil {

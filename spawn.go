@@ -169,6 +169,7 @@ func handleSpawn(args []string) {
 	// Parse flags from all args
 	wait := false
 	bare := false
+	self := false
 	bareModel := ""
 	bareName := ""
 	bareProject := ""
@@ -179,6 +180,8 @@ func handleSpawn(args []string) {
 			wait = true
 		case "--bare":
 			bare = true
+		case "--self":
+			self = true
 		case "--model":
 			if i+1 < len(args) {
 				i++
@@ -236,25 +239,146 @@ func handleSpawn(args []string) {
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "usage: %s spawn <agent> \"task\" [--wait]\n", appName)
+		fmt.Fprintf(os.Stderr, "       %s spawn --self main \"task\" [--wait] [--model <model>]  — spawn with own soul\n", appName)
 		fmt.Fprintf(os.Stderr, "       %s spawn --bare --model <model> --project <path> \"task\" [--wait]\n", appName)
 		fmt.Fprintf(os.Stderr, "       %s spawn list          — show recent spawns\n", appName)
 		fmt.Fprintf(os.Stderr, "       %s spawn log <id>      — view spawn output\n\n", appName)
 		fmt.Fprintln(os.Stderr, "Available agents:")
 		for _, a := range agents {
-			if a.ID == "main" {
-				continue // don't spawn yourself
-			}
 			model := a.Model
 			if model == "" {
 				model = "default"
 			}
-			fmt.Fprintf(os.Stderr, "  %-12s %-10s model=%-8s workspace=%s\n", a.ID, a.Name, model, a.Workspace)
+			selfTag := ""
+			if a.ID == "main" {
+				selfTag = " (--self)"
+			}
+			fmt.Fprintf(os.Stderr, "  %-12s %-10s model=%-8s workspace=%s%s\n", a.ID, a.Name, model, a.Workspace, selfTag)
 		}
 		os.Exit(1)
 	}
 
 	agentQuery := positional[0]
 	task := positional[1]
+
+	// --self mode: construct main agent def from current workspace
+	if self {
+		if agentQuery != "main" && agentQuery != "self" {
+			fmt.Fprintf(os.Stderr, "[%s] --self only works with 'main' agent\n", appName)
+			os.Exit(1)
+		}
+		agent := &agentDef{
+			ID:        "main",
+			Name:      appName,
+			Workspace: workspace,
+		}
+		if bareModel != "" {
+			if resolved, err := resolveFuzzyModel(bareModel); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] %v\n", appName, err)
+				os.Exit(1)
+			} else if resolved != "" {
+				agent.Model = resolved
+			} else {
+				agent.Model = bareModel
+			}
+		}
+
+		// Try to delegate to server if running
+		if delegateSpawnToServer(agent, task, wait) {
+			return
+		}
+
+		fmt.Fprintf(os.Stderr, "[%s] spawning self (%s)...\n", appName, agent.Name)
+		fmt.Fprintf(os.Stderr, "[%s]   workspace: %s\n", appName, agent.Workspace)
+		if agent.Model != "" {
+			fmt.Fprintf(os.Stderr, "[%s]   model: %s\n", appName, agent.Model)
+		}
+		fmt.Fprintf(os.Stderr, "[%s]   task: %s\n", appName, truncate(task, 80))
+
+		// Build prompt file
+		promptContent := buildAgentPrompt(agent)
+		tmpDir, err := os.MkdirTemp("", fmt.Sprintf("%s-spawn-self-", appName))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] failed to create temp dir: %v\n", appName, err)
+			os.Exit(1)
+		}
+		promptFile := filepath.Join(tmpDir, "prompt.md")
+		if err := os.WriteFile(promptFile, []byte(promptContent), 0600); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] failed to write prompt: %v\n", appName, err)
+			os.Exit(1)
+		}
+
+		tokens := estimateTokens(promptContent)
+		fmt.Fprintf(os.Stderr, "[%s]   prompt: ~%dk tokens\n", appName, tokens/1000)
+
+		// Build claude args
+		sessionName := fmt.Sprintf("spawn-self-%s", time.Now().Format("0102-1504"))
+		claudeArgs := []string{
+			"--append-system-prompt-file", promptFile,
+			"--dangerously-skip-permissions",
+			"--name", sessionName,
+			"-p", task,
+		}
+		if agent.Model != "" {
+			claudeArgs = append(claudeArgs, "--model", agent.Model)
+		}
+
+		// Run claude in workspace
+		cmd := exec.Command(claudeBin, claudeArgs...)
+		cmd.Dir = agent.Workspace
+		cmd.Env = injectProxyEnv(os.Environ())
+
+		// Set JIRA_TOKEN from workspace .jira-token file
+		jiraTokenFile := filepath.Join(agent.Workspace, ".jira-token")
+		if data, err := os.ReadFile(jiraTokenFile); err == nil {
+			token := strings.TrimSpace(string(data))
+			if token != "" {
+				cmd.Env = append(cmd.Env, "JIRA_TOKEN="+token)
+			}
+		}
+
+		logFile := filepath.Join(tmpDir, "output.log")
+		spawnID := recordSpawnStart(agent, task, sessionName, tmpDir)
+
+		if wait {
+			fmt.Fprintf(os.Stderr, "[%s] running synchronously...\n", appName)
+			out, err := cmd.CombinedOutput()
+			os.WriteFile(logFile, out, 0600)
+			exitCode := 0
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					exitCode = exitErr.ExitCode()
+				} else {
+					exitCode = 1
+				}
+			}
+			recordSpawnFinish(spawnID, exitCode, 0, "")
+			fmt.Print(string(out))
+		} else {
+			f, _ := os.Create(logFile)
+			cmd.Stdout = f
+			cmd.Stderr = f
+			if err := cmd.Start(); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] failed to start: %v\n", appName, err)
+				os.Exit(1)
+			}
+			go func() {
+				exitCode := 0
+				if err := cmd.Wait(); err != nil {
+					if exitErr, ok := err.(*exec.ExitError); ok {
+						exitCode = exitErr.ExitCode()
+					} else {
+						exitCode = 1
+					}
+				}
+				f.Close()
+				recordSpawnFinish(spawnID, exitCode, 0, "")
+			}()
+			fmt.Fprintf(os.Stderr, "[%s] spawned self (async, id=%d)\n", appName, spawnID)
+			fmt.Printf("spawn_ok id=%d agent=main session=%s log=%s\n", spawnID, sessionName, logFile)
+		}
+		return
+	}
 
 	agents, err := loadAgents()
 	if err != nil {
@@ -267,15 +391,9 @@ func handleSpawn(args []string) {
 		fmt.Fprintf(os.Stderr, "[%s] agent not found: %s\n", appName, agentQuery)
 		fmt.Fprintln(os.Stderr, "Available:")
 		for _, a := range agents {
-			if a.ID != "main" {
-				fmt.Fprintf(os.Stderr, "  %s (%s)\n", a.ID, a.Name)
-			}
+			fmt.Fprintf(os.Stderr, "  %s (%s)\n", a.ID, a.Name)
 		}
-		os.Exit(1)
-	}
-
-	if agent.ID == "main" {
-		fmt.Fprintf(os.Stderr, "[%s] cannot spawn yourself (main agent)\n", appName)
+		fmt.Fprintf(os.Stderr, "\nTo spawn with own soul: %s spawn --self main \"task\"\n", appName)
 		os.Exit(1)
 	}
 
@@ -506,6 +624,19 @@ func shellQuoteArgs(bin string, args ...string) string {
 func shellQuote(s string) string {
 	// Single-quote the string, escaping any embedded single quotes
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+// shellEscapeForDoubleQuote escapes a string for safe interpolation inside
+// a double-quoted shell string. Escapes $, `, \, ", and ! characters.
+func shellEscapeForDoubleQuote(s string) string {
+	r := strings.NewReplacer(
+		`\`, `\\`,
+		`"`, `\"`,
+		`$`, `\$`,
+		"`", "\\`",
+		`!`, `\!`,
+	)
+	return r.Replace(s)
 }
 
 // recordSpawnStart inserts a new spawn record and returns its ID

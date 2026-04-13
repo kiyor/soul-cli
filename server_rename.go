@@ -554,6 +554,34 @@ func getModelFromJSONL(sessionID string) string {
 	return ""
 }
 
+// getFirstMsgFromJSONL reads the first user message from a session's JSONL file.
+func getFirstMsgFromJSONL(sessionID string) string {
+	path := findSessionJSONL(sessionID)
+	if path == "" {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		var ev struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &ev) == nil && ev.Type == "user" && len(ev.Message.Content) > 0 {
+			return extractText(ev.Message.Content)
+		}
+	}
+	return ""
+}
+
 // setRehydrateMessage marks a session to be woken with a message after server restart.
 func setRehydrateMessage(sessionID, message string) {
 	db, err := openServerDB()
