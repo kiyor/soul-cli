@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -634,20 +635,28 @@ func resolveFuzzyModel(input string) (string, error) {
 var lastClaudeSessionID string
 
 // limitedBuffer keeps the last N bytes written to it (ring-style, but simple: just truncate head).
+// Thread-safe: drainStderr goroutine writes while watchExit reads.
 type limitedBuffer struct {
 	buf   []byte
 	limit int
+	mu    sync.Mutex
 }
 
 func (lb *limitedBuffer) Write(p []byte) (n int, err error) {
+	lb.mu.Lock()
 	lb.buf = append(lb.buf, p...)
 	if lb.limit > 0 && len(lb.buf) > lb.limit {
 		lb.buf = lb.buf[len(lb.buf)-lb.limit:]
 	}
+	lb.mu.Unlock()
 	return len(p), nil
 }
 
-func (lb *limitedBuffer) String() string { return string(lb.buf) }
+func (lb *limitedBuffer) String() string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return string(lb.buf)
+}
 
 // classifyExitEvent determines the event type from exit code, error message, and stderr output.
 func classifyExitEvent(exitCode int, errMsg, stderr string) string {
