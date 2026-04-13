@@ -311,6 +311,13 @@ func attachProcessBridge(proc *claudeProcess, sess *serverSession, source string
 			sess.setTodos(todos)
 		}, makeOnMemoryAudit(sess))
 		close(doneCh)
+		// Clear bridgeDone if it still points to this generation's channel,
+		// so subsequent waitBridgeDone() won't return immediately on a stale close.
+		sess.mu.Lock()
+		if sess.bridgeDone == doneCh {
+			sess.bridgeDone = nil
+		}
+		sess.mu.Unlock()
 	}()
 	sess.mu.Lock()
 	sess.bridgeDone = doneCh
@@ -399,6 +406,10 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 	if opts.Model != "" {
 		if resolved, err := resolveFuzzyModel(opts.Model); err == nil && resolved != "" {
 			opts.Model = resolved
+		} else if err != nil {
+			return nil, fmt.Errorf("model %q could not be resolved: %w", opts.Model, err)
+		} else {
+			return nil, fmt.Errorf("model %q could not be resolved", opts.Model)
 		}
 	}
 

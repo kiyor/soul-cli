@@ -4526,7 +4526,8 @@ async function showSniffMemory(){
       fetch('/api/memory/audit?days='+memoryAuditDays+'&limit=50&token='+TOKEN)
     ]);
     const stats=await statsR.json();
-    const logs=await logR.json();
+    const logData=await logR.json().catch(()=>null);
+    const logs=(logData&&Array.isArray(logData.entries))?logData.entries:[];
 
     // Time presets
     let html='<div class="sniff-filter" style="gap:6px">';

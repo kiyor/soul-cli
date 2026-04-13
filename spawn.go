@@ -279,7 +279,8 @@ func handleSpawn(args []string) {
 			} else if resolved != "" {
 				agent.Model = resolved
 			} else {
-				agent.Model = bareModel
+				fmt.Fprintf(os.Stderr, "[%s] error: model %q could not be resolved\n", appName, bareModel)
+				os.Exit(1)
 			}
 		}
 

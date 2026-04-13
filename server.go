@@ -20,7 +20,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"text/template"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -1447,7 +1446,8 @@ func handleServer(args []string) {
 			if resolved, resolveErr := resolveFuzzyModel(req.Model); resolveErr == nil && resolved != "" {
 				agent.Model = resolved
 			} else {
-				agent.Model = req.Model
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("model %q could not be resolved", req.Model)})
+				return
 			}
 		}
 
@@ -1626,27 +1626,23 @@ func handleServer(args []string) {
 		http.StripPrefix("/icons/", http.FileServerFS(iconsSubFS)).ServeHTTP(w, r)
 	})
 
-	// Serve UI — render index.html as Go template to inject server config
-	indexTmpl, err := template.New("index").Parse(string(indexHTML))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] server: FATAL: failed to parse index.html template: %v\n", appName, err)
-		os.Exit(1)
-	}
-	type uiConfig struct {
-		DefaultReplaceSoul      bool
-		DefaultInteractiveModel string
-	}
-	uiCfg := uiConfig{
-		DefaultReplaceSoul:      cfg.DefaultReplaceSoul,
-		DefaultInteractiveModel: cfg.DefaultInteractiveModel,
-	}
+	// Serve UI — inject server config via string replacement (not text/template,
+	// because the HTML contains JS/CSS with {{ }} that would break template parsing).
+	// Sanitize config values to prevent JS/HTML injection from malformed config.
+	safeModel := strings.NewReplacer(
+		`\`, `\\`, `"`, `\"`, `'`, `\'`, `<`, `\x3c`, `>`, `\x3e`, `&`, `\x26`,
+	).Replace(cfg.DefaultInteractiveModel)
+	renderedIndex := string(indexHTML)
+	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DefaultReplaceSoul}}", fmt.Sprintf("%t", cfg.DefaultReplaceSoul))
+	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DefaultInteractiveModel}}", safeModel)
+	renderedIndexBytes := []byte(renderedIndex)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		indexTmpl.Execute(w, uiCfg)
+		w.Write(renderedIndexBytes)
 	})
 
 	// Start Telegram bot if enabled
