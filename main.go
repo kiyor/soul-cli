@@ -66,6 +66,10 @@ var (
 
 	// Default model for cron/heartbeat (from config.json "defaultModel")
 	defaultModel string
+	// Default model for interactive/print modes (from config.json "server.defaultInteractiveModel")
+	defaultInteractiveModel string
+	// Fallback models for non-interactive modes (from config.json "defaultModelFallbacks")
+	defaultModelFallbacks []string
 
 	// Max heartbeat rounds before soul session auto-compact (from config.json "soulSessionMaxRounds")
 	// 0 = disabled. Default 30 (~7.5h at 15-min intervals).
@@ -345,6 +349,9 @@ func loadConfig() {
 		}
 	}
 
+	type serverBlock struct {
+		DefaultInteractiveModel string `json:"defaultInteractiveModel"` // default model for interactive sessions (e.g. "opus[1m]")
+	}
 	type appConfig struct {
 		JiraToken            string   `json:"jiraToken"`
 		TelegramChatID       string   `json:"telegramChatID"`
@@ -353,8 +360,10 @@ func loadConfig() {
 		AvatarURL            string   `json:"avatarUrl"`            // optional avatar image URL for WebUI
 		UserAvatarURL        string   `json:"userAvatarUrl"`        // optional user avatar image URL for WebUI
 		WelcomeImage         string   `json:"welcomeImage"`         // optional full-body welcome page image URL
-		DefaultModel         string   `json:"defaultModel"`         // default model for cron/heartbeat (e.g. "zai/glm-5.1")
-		SoulSessionMaxRounds int      `json:"soulSessionMaxRounds"` // 0 = disabled, default 30
+		DefaultModel          string   `json:"defaultModel"`          // default model for cron/heartbeat (e.g. "zai/glm-5.1")
+		DefaultModelFallbacks []string `json:"defaultModelFallbacks"` // fallback models for non-interactive modes (e.g. ["minimax/MiniMax-M2.7-highspeed"])
+		SoulSessionMaxRounds  int      `json:"soulSessionMaxRounds"`  // 0 = disabled, default 30
+		Server                serverBlock `json:"server"`             // server-side config (shared with server mode)
 	}
 	var cfg appConfig
 	if cfgData != nil {
@@ -416,6 +425,16 @@ func loadConfig() {
 	}
 	if envModel := os.Getenv("WEIRAN_DEFAULT_MODEL"); envModel != "" {
 		defaultModel = envModel
+	}
+
+	// defaultModelFallbacks: config.json
+	if len(cfg.DefaultModelFallbacks) > 0 {
+		defaultModelFallbacks = cfg.DefaultModelFallbacks
+	}
+
+	// defaultInteractiveModel: config.json server.defaultInteractiveModel
+	if cfg.Server.DefaultInteractiveModel != "" {
+		defaultInteractiveModel = cfg.Server.DefaultInteractiveModel
 	}
 
 	// soulSessionMaxRounds: config.json (default 30)
@@ -691,15 +710,16 @@ func main() {
 	result := buildPrompt()
 	writePrompt(result)
 
-	// Apply defaultModel for automated modes only (cron/heartbeat/evolve).
-	// Interactive mode intentionally uses the upstream default (Opus) so the
-	// user gets the best model for conversational work. Automated jobs are
-	// high-volume and benefit from a cheaper/faster provider. This is a
-	// deliberate design choice — not a bug.
-	if overrideModel == "" && defaultModel != "" {
-		if mode == "cron" || mode == "heartbeat" || mode == "evolve" {
+	// Apply default models based on mode:
+	// - Automated modes (cron/heartbeat/evolve) use defaultModel (cheaper/faster provider)
+	// - Interactive/print modes use defaultInteractiveModel (from server.defaultInteractiveModel)
+	if overrideModel == "" {
+		if defaultModel != "" && (mode == "cron" || mode == "heartbeat" || mode == "evolve") {
 			overrideModel = defaultModel
 			fmt.Fprintf(os.Stderr, "[%s] using defaultModel: %s\n", appName, defaultModel)
+		} else if defaultInteractiveModel != "" && (mode == "" || mode == "print") {
+			overrideModel = defaultInteractiveModel
+			fmt.Fprintf(os.Stderr, "[%s] using defaultInteractiveModel: %s\n", appName, defaultInteractiveModel)
 		}
 	}
 

@@ -58,6 +58,13 @@ type serverSession struct {
 	mcpConfig   string        // remembered for reload
 	hub         *wsHub        // for WS notifications on status change
 	waiters     []chan string  // notified when status becomes idle/stopped/error
+
+	// Model fallback for non-interactive modes (heartbeat/cron/evolve):
+	// when process exits with rate_limit, retry with next fallback model.
+	fallbackModels []string // remaining models to try
+	taskMessage    string   // original task message for retry
+	sessionMgr     *sessionManager // back-reference for fallback retry
+
 	mu          sync.Mutex
 }
 
@@ -178,7 +185,10 @@ func makeOnInit(sess *serverSession, source string) func(json.RawMessage) {
 			sess.mu.Lock()
 			sess.ClaudeSID = init.SessionID
 			if init.Model != "" {
+				before := sess.Model
 				sess.Model = mergeInitModel(sess.Model, init.Model)
+				fmt.Fprintf(os.Stderr, "[%s] server: onInit model: before=%q init=%q after=%q (session %s)\n",
+					appName, before, init.Model, sess.Model, shortID(sess.ID))
 			}
 			hub := sess.hub // read under lock to avoid race
 			sess.mu.Unlock()
@@ -256,21 +266,126 @@ func makeOnResult(sess *serverSession, fullSync bool) func(json.RawMessage) {
 }
 
 // watchExit monitors process exit and updates session status.
+// For ephemeral sessions (heartbeat/cron/evolve), if the exit is classified as
+// rate_limit and fallback models are available, automatically retries with the
+// next fallback model.
 func watchExit(proc *claudeProcess, sess *serverSession) {
 	go func() {
 		<-proc.done
 		sess.mu.Lock()
 		alreadyStopped := sess.Status == "stopped"
+		category := sess.Category
+		fallbacks := append([]string(nil), sess.fallbackModels...)
+		taskMsg := sess.taskMessage
+		sm := sess.sessionMgr
+		model := sess.Model
+		claudeSID := sess.ClaudeSID
 		sess.mu.Unlock()
 		if alreadyStopped {
 			return
 		}
 		if proc.exitCode != 0 {
+			// Check for rate_limit exit on ephemeral sessions — trigger model fallback
+			if isEphemeralCategory(category) && len(fallbacks) > 0 && sm != nil {
+				event := classifyExitEvent(proc.exitCode, "", proc.stderrTail.String())
+				if event == "rate_limit" {
+					nextModel := fallbacks[0]
+					remaining := fallbacks[1:]
+					fmt.Fprintf(os.Stderr, "[%s] server: %s session %s hit rate_limit on %s, falling back to %s\n",
+						appName, category, shortID(sess.ID), model, nextModel)
+					// Fire-and-forget retry with next fallback model
+					go retryWithFallbackModel(sm, sess, nextModel, remaining, taskMsg, claudeSID)
+					sess.setStatus("error")
+					return
+				}
+			}
 			sess.setStatus("error")
 		} else {
 			sess.setStatus("stopped")
 		}
 	}()
+}
+
+// retryWithFallbackModel creates a new ephemeral session with the next fallback model
+// after the current one failed with rate_limit.
+func retryWithFallbackModel(sm *sessionManager, oldSess *serverSession, model string, remaining []string, taskMsg string, claudeSID string) {
+	oldSess.mu.Lock()
+	category := oldSess.Category
+	project := oldSess.Project
+	soul := oldSess.SoulEnabled
+	replaceSoul := oldSess.ReplaceSoul
+	oldModel := oldSess.Model
+	oldSess.mu.Unlock()
+
+	sessName := fmt.Sprintf("%s-fallback-%s", category, time.Now().Format("0102-150405"))
+	fmt.Fprintf(os.Stderr, "[%s] server: creating fallback session %s with model %s (%d remaining fallbacks)\n",
+		appName, sessName, model, len(remaining))
+
+	// Resume the original Claude session to preserve conversation context.
+	// For heartbeat, prefer the soul session (long-lived); for cron/evolve,
+	// resume the specific Claude session that hit rate_limit.
+	var resumeID string
+	if category == CategoryHeartbeat {
+		resumeID = getActiveSoulSession(agentName)
+	}
+	if resumeID == "" && claudeSID != "" {
+		resumeID = claudeSID
+		fmt.Fprintf(os.Stderr, "[%s] server: fallback resuming original Claude session %s\n",
+			appName, shortID(claudeSID))
+	}
+
+	sess, err := sm.createSessionWithOpts(sessionCreateOpts{
+		Name:        sessName,
+		Project:     project,
+		Model:       model,
+		Soul:        soul,
+		Category:    category,
+		Tags:        []string{"auto", "fallback"},
+		ReplaceSoul: replaceSoul,
+		ResumeID:    resumeID,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] server: fallback session creation failed: %v\n", appName, err)
+		// Continue consuming remaining fallback chain instead of giving up
+		if len(remaining) > 0 {
+			next := remaining[0]
+			fmt.Fprintf(os.Stderr, "[%s] server: skipping %s, trying next fallback: %s\n", appName, model, next)
+			go retryWithFallbackModel(sm, oldSess, next, remaining[1:], taskMsg, claudeSID)
+		} else {
+			go sendTelegram(fmt.Sprintf("❌ %s all fallback models exhausted (last: %s): %v", category, model, err))
+		}
+		return
+	}
+
+	// Set remaining fallbacks on the new session
+	sess.mu.Lock()
+	sess.fallbackModels = remaining
+	sess.taskMessage = taskMsg
+	sess.sessionMgr = sm
+	sess.mu.Unlock()
+
+	// Send the original task message — only if we didn't resume an existing
+	// Claude session (which already has the task in its conversation history).
+	// Sending it again on a resumed session would cause duplicate execution.
+	if taskMsg != "" && resumeID != "" {
+		fmt.Fprintf(os.Stderr, "[%s] server: fallback resumed session %s, skipping taskMsg re-send (already in conversation history)\n",
+			appName, shortID(resumeID))
+	}
+	if taskMsg != "" && resumeID == "" {
+		go func() {
+			if !sess.process.waitInit(30 * time.Second) {
+				fmt.Fprintf(os.Stderr, "[%s] server: fallback session init timeout for %s\n", appName, shortID(sess.ID))
+				return
+			}
+			if err := sess.process.sendMessage(taskMsg); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] server: fallback session failed to send task: %v\n", appName, err)
+			}
+		}()
+	}
+
+	// Notify via Telegram
+	notifyMsg := fmt.Sprintf("⚠️ %s model rate-limited, retrying with fallback: %s", oldModel, model)
+	go sendTelegram(notifyMsg)
 }
 
 // waitBridgeDone waits for the current bridgeStdout goroutine to exit (max 10s).
@@ -289,12 +404,17 @@ func (s *serverSession) waitBridgeDone() {
 	}
 }
 
-// drainStderr reads and discards stderr to prevent pipe deadlock.
+// drainStderr reads stderr to prevent pipe deadlock, capturing the last 4KB
+// in proc.stderrTail for exit event classification (e.g. rate_limit detection).
 func drainStderr(proc *claudeProcess) {
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			if _, err := proc.stderr.Read(buf); err != nil {
+			n, err := proc.stderr.Read(buf)
+			if n > 0 {
+				proc.stderrTail.Write(buf[:n])
+			}
+			if err != nil {
 				return
 			}
 		}
@@ -813,6 +933,8 @@ func (sm *sessionManager) shutdownAll() {
 		if sid != "" {
 			setClaudeSessionID(id, sid)
 		}
+		fmt.Fprintf(os.Stderr, "[%s] server: shutdownAll: session %s model=%q claude_sid=%s\n",
+			appName, shortID(id), model, shortID(sid))
 		if model != "" {
 			setSessionModel(id, model)
 		}
@@ -944,12 +1066,15 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 	}
 
 	// Model priority: explicit arg > DB record > JSONL init message
+	origModel := model
 	if model == "" {
 		model = getSessionModel(sessionID)
 	}
 	if model == "" {
 		model = getModelFromJSONL(sessionID)
 	}
+	fmt.Fprintf(os.Stderr, "[%s] server: resumeSession model trace: arg=%q → resolved=%q (session %s → %s)\n",
+		appName, origModel, model, shortID(sessionID), shortID(id))
 
 	// Resolve replace_soul: explicit arg wins, else inherit from persisted DB flag
 	resolvedReplaceSoul := false
@@ -1146,6 +1271,8 @@ func (sm *sessionManager) rehydrateSessions() {
 				"Do NOT assume they succeeded. Report your current status and wait for instructions."
 		}
 
+		fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: restoring %s (model=%q, claude_sid=%s)\n",
+			appName, shortID(s.SessionID), s.Model, shortID(s.ClaudeSID))
 		replaceSoul := s.ReplaceSoul
 		sess, err := sm.resumeSession(
 			s.ClaudeSID,        // sessionID to resume

@@ -143,6 +143,10 @@ type claudeProcess struct {
 	// toggle) so the UI doesn't see "Session ended."
 	suppressClose atomic.Bool
 
+	// stderrTail captures the last 4KB of stderr for exit event classification
+	// (e.g. detecting rate_limit / 429 errors for model fallback).
+	stderrTail limitedBuffer
+
 	// Response waiters for synchronous control requests
 	waitersMu sync.Mutex
 	waiters   map[string]chan json.RawMessage
@@ -234,13 +238,14 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 	}
 
 	proc := &claudeProcess{
-		cmd:       cmd,
-		stdin:     stdin,
-		stdout:    stdout,
-		stderr:    stderr,
-		done:      make(chan struct{}),
-		initReady: make(chan struct{}),
-		waiters:   make(map[string]chan json.RawMessage),
+		cmd:        cmd,
+		stdin:      stdin,
+		stdout:     stdout,
+		stderr:     stderr,
+		done:       make(chan struct{}),
+		initReady:  make(chan struct{}),
+		waiters:    make(map[string]chan json.RawMessage),
+		stderrTail: limitedBuffer{limit: 4096},
 	}
 
 	// Monitor process exit in background

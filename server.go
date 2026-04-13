@@ -1354,6 +1354,15 @@ func handleServer(args []string) {
 			return
 		}
 
+		// Set model fallback chain for rate_limit auto-retry (non-interactive only)
+		if len(defaultModelFallbacks) > 0 {
+			sess.mu.Lock()
+			sess.fallbackModels = append([]string{}, defaultModelFallbacks...)
+			sess.taskMessage = taskMsg
+			sess.sessionMgr = sm
+			sess.mu.Unlock()
+		}
+
 		// Link or touch soul session once Claude session ID is available
 		if soulSessionID > 0 {
 			go func(soulID int64, s *serverSession) {
@@ -1633,6 +1642,11 @@ func handleServer(args []string) {
 		`\`, `\\`, `"`, `\"`, `'`, `\'`, `<`, `\x3c`, `>`, `\x3e`, `&`, `\x26`,
 	).Replace(cfg.DefaultInteractiveModel)
 	renderedIndex := string(indexHTML)
+	replaceSoulChecked := ""
+	if cfg.DefaultReplaceSoul {
+		replaceSoulChecked = "checked"
+	}
+	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DefaultReplaceSoulChecked}}", replaceSoulChecked)
 	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DefaultReplaceSoul}}", fmt.Sprintf("%t", cfg.DefaultReplaceSoul))
 	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DefaultInteractiveModel}}", safeModel)
 	renderedIndexBytes := []byte(renderedIndex)

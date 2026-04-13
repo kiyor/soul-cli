@@ -932,6 +932,9 @@ func handleModels() {
 
 	if defaultModel != "" {
 		fmt.Printf("Default model (cron/heartbeat/evolve): %s\n", defaultModel)
+		if len(defaultModelFallbacks) > 0 {
+			fmt.Printf("  Fallbacks: %s\n", strings.Join(defaultModelFallbacks, " → "))
+		}
 	}
 	fmt.Printf("Usage: %s --model <name>   (e.g. `%s --model minimax/MiniMax-M2.7-highspeed`)\n", appName, appName)
 }
