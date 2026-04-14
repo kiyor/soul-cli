@@ -37,7 +37,7 @@ var (
 	agentAvatarURL    string // optional avatar image URL (from config.json "avatarUrl")
 	agentWelcomeImage string // optional full-body welcome image URL (from config.json "welcomeImage")
 	userAvatarURL     string // optional user avatar image URL (from config.json "userAvatarUrl")
-	claudeBin = filepath.Join(home, ".local", "bin", "claude")
+	claudeBin = findClaudeBin()
 	lockfile  string // /tmp/<appName>.lock
 	dbPath    string // <appDir>/sessions.db
 
@@ -112,6 +112,27 @@ var (
 	// Extra projectRoots read from config.json
 	extraProjectRoots []string
 )
+
+// findClaudeBin locates the claude binary. Priority:
+//  1. ~/.local/bin/claude (conventional install location)
+//  2. PATH lookup (for npm global installs on Linux: /usr/bin/claude, /usr/local/bin/claude)
+//  3. Falls back to ~/.local/bin/claude (will fail gracefully at exec time)
+func findClaudeBin() string {
+	preferred := filepath.Join(home, ".local", "bin", "claude")
+	if _, err := os.Stat(preferred); err == nil {
+		return preferred
+	}
+	// Search PATH for claude binary
+	if pathEnv := os.Getenv("PATH"); pathEnv != "" {
+		for _, dir := range filepath.SplitList(pathEnv) {
+			candidate := filepath.Join(dir, "claude")
+			if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+				return candidate
+			}
+		}
+	}
+	return preferred // fallback; error will surface when we try to exec
+}
 
 // initAppName derives appName from (in priority order):
 //  1. ldflags: -X main.defaultAppName=weiran

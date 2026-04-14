@@ -38,7 +38,20 @@ myai init --archetype engineer --name kuro --owner alex --tz America/Los_Angeles
 
 All flags provided = zero interactive prompts. Perfect for scripting or AI-driven setup.
 
-> **Requires:** Go 1.21+ and [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+> **Requires:** Go 1.25+ and [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+
+### One-Command Linux Deploy
+
+Don't want to set up manually? Feed the bootstrap guide to Claude Code and let it do everything:
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-..."  # your OAuth token first
+claude -p "$(curl -sfL https://raw.githubusercontent.com/kiyor/soul-cli/main/bootstrap.md)"
+```
+
+It'll ask you a few questions (AI name, personality, timezone), then handle Go, Node.js, build, systemd — everything. It even scans your existing Claude Code sessions to personalize the soul.
+
+See [Linux Server Deployment Guide](docs/guides/linux-deploy.md) if you prefer doing it yourself.
 
 ## How It Works
 
