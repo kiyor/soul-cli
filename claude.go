@@ -688,12 +688,16 @@ func classifyExitEvent(exitCode int, errMsg, stderr string) string {
 		}
 	}
 
-	// Signal-based classification
-	if exitCode == 137 {
+	// Signal-based classification (128 + signal number)
+	switch exitCode {
+	case 130:
+		return "interrupted" // SIGINT (Ctrl+C)
+	case 137:
 		return "oom_killed" // SIGKILL, usually OOM
-	}
-	if exitCode == 139 {
+	case 139:
 		return "segfault" // SIGSEGV
+	case 143:
+		return "terminated" // SIGTERM
 	}
 
 	return "crash" // generic non-zero exit

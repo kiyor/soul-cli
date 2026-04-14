@@ -143,6 +143,11 @@ type claudeProcess struct {
 	// toggle) so the UI doesn't see "Session ended."
 	suppressClose atomic.Bool
 
+	// rateLimited is set when stderr detects a 429/rate-limit error in real time.
+	// This allows watchExit to trigger model fallback even when the process exits
+	// with code 0 (Claude Code handles 429 internally but still exits cleanly).
+	rateLimited atomic.Bool
+
 	// stderrTail captures the last 4KB of stderr for exit event classification
 	// (e.g. detecting rate_limit / 429 errors for model fallback).
 	stderrTail limitedBuffer
@@ -314,11 +319,13 @@ func (p *claudeProcess) sendMessage(content string) error {
 	return err
 }
 
+// msgImageRe matches ![alt](url) image patterns in user messages.
+var msgImageRe = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+
 // buildMessageContent parses the message for image markdown and returns
 // either a plain string (no images) or a content array (text + image blocks).
 func buildMessageContent(content string) any {
-	re := regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
-	matches := re.FindAllStringSubmatchIndex(content, -1)
+	matches := msgImageRe.FindAllStringSubmatchIndex(content, -1)
 	if len(matches) == 0 {
 		return content // no images, keep as plain string
 	}
