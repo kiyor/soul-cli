@@ -46,7 +46,7 @@ Don't want to set up manually? Feed the bootstrap guide to Claude Code and let i
 
 ```bash
 export CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-..."  # your OAuth token first
-claude -p "$(curl -sfL https://raw.githubusercontent.com/kiyor/soul-cli/main/bootstrap.md)"
+claude -p "$(curl -sfL https://raw.githubusercontent.com/kiyor/soul-cli/main/bootstrap.md)" --dangerously-skip-permissions
 ```
 
 It'll ask you a few questions (AI name, personality, timezone), then handle Go, Node.js, build, systemd — everything. It even scans your existing Claude Code sessions to personalize the soul.
