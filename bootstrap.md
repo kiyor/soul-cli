@@ -1,6 +1,6 @@
 # soul-cli Linux Bootstrap
 
-You are deploying **soul-cli** on a fresh Linux server. Follow every step below. Do not skip anything. Execute commands directly — do not ask for confirmation on routine steps. Only pause to ask the user questions where explicitly noted (Steps 4 and 5).
+You are deploying **soul-cli** on a fresh Linux server. Follow every step below. Do not skip anything. Do not ask questions or wait for user input — use the defaults specified below for all choices. Execute every command directly.
 
 ## Context
 
@@ -101,10 +101,10 @@ Verify: `claude auth status` must show `loggedIn: true`.
 
 ## Step 4 — Build soul-cli
 
-Ask the user: **What should the CLI binary be called?** Default is `soul`, but they can pick any name (e.g. `aria`, `atlas`, `jarvis`). The binary name determines the app identity — all env vars, paths, and logs derive from it.
+Use `soul` as the binary name:
 
 ```bash
-BINARY_NAME=soul  # or whatever the user chose
+BINARY_NAME=soul
 
 git clone https://github.com/kiyor/soul-cli.git ~/soul-cli
 cd ~/soul-cli
@@ -125,36 +125,19 @@ Use `${BINARY_NAME}` in place of `soul` for all subsequent commands.
 
 ## Step 5 — Initialize workspace
 
-Before running init, ask the user these questions:
-
-1. **What should your AI be called?** (e.g. "aria", "kuro", "atlas" — this becomes the soul name)
-2. **What's your name?** (the owner/user name)
-3. **What personality archetype?** Options:
-   - `companion` — emotionally present partner, remembers details, picks up on mood
-   - `engineer` — technical peer, code first, explain later
-   - `steward` — operations manager, proactive, organized
-   - `mentor` — patient teacher, Socratic questions
-4. **What timezone are you in?** (e.g. `America/Los_Angeles`, `Asia/Tokyo`, `Europe/London`)
-
-Then run init with their answers. The env var prefix is derived from the binary name (uppercase, hyphens become underscores). For binary `soul`, it's `SOUL_HOME`. For `aria`, it's `ARIA_HOME`.
+Use defaults — the user can customize later by editing SOUL.md and IDENTITY.md.
 
 ```bash
-# Use uppercase binary name for env var prefix
 ENV_PREFIX=$(echo ${BINARY_NAME} | tr '[:lower:]-' '[:upper:]_')
 export ${ENV_PREFIX}_HOME=$HOME/.${BINARY_NAME}
 
-${BINARY_NAME} init --archetype <archetype> --name <ai-name> --owner <user-name> --tz <timezone>
-```
+OWNER=$(whoami)
+TZ=$(cat /etc/timezone 2>/dev/null || echo UTC)
 
-Example:
-```bash
-export ARIA_HOME=$HOME/.aria
-aria init --archetype companion --name aria --owner alex --tz America/Los_Angeles
+${BINARY_NAME} init --archetype engineer --name ${BINARY_NAME} --owner ${OWNER} --tz ${TZ}
 ```
 
 This creates the workspace with SOUL.md, IDENTITY.md, USER.md, AGENTS.md, MEMORY.md.
-
-Tell the user they can further customize by editing `SOUL.md` (personality) and `IDENTITY.md` (name and role) in the workspace directory.
 
 ## Step 6 — Create systemd service
 
