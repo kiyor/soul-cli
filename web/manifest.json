@@ -1,7 +1,7 @@
 {
-  "name": "未然",
-  "short_name": "未然",
-  "description": "Weiran AI Assistant",
+  "name": "{{.AppTitle}}",
+  "short_name": "{{.AppTitle}}",
+  "description": "{{.AppTitle}} AI Assistant",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0b0f17",

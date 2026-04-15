@@ -692,8 +692,10 @@ func classifyExitEvent(exitCode int, errMsg, stderr string) string {
 	switch exitCode {
 	case 130:
 		return "interrupted" // SIGINT (Ctrl+C)
+	case 134:
+		return "aborted" // SIGABRT (assertion failure / core dump)
 	case 137:
-		return "oom_killed" // SIGKILL, usually OOM
+		return "oom_killed" // SIGKILL (often OOM)
 	case 139:
 		return "segfault" // SIGSEGV
 	case 143:

@@ -357,7 +357,7 @@ body{
 .slash-item .slash-desc{font-size:11px;color:var(--muted2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .content{flex:1;overflow-y:auto;padding:12px;scroll-behavior:smooth;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain}
 .content::-webkit-scrollbar{width:0}
-.wrap{max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:10px}
+.wrap{max-width:min(90%, 1400px);margin:0 auto;display:flex;flex-direction:column;gap:10px}
 
 .welcome{
   display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -638,6 +638,7 @@ body{
   background:rgba(var(--accent-r),.06);color:var(--accent2);
 }
 .tool-badge .icon{font-size:11px}
+.tool-badge.result{border-color:rgba(var(--diff-add-r),.22);background:rgba(var(--diff-add-r),.08);color:var(--good)}
 .tool-block .tool-body{
   font-family:var(--mono);font-size:11px;line-height:1.5;padding:8px 10px;
   color:var(--muted);overflow:auto;white-space:pre-wrap;word-break:break-all;
@@ -767,8 +768,8 @@ body{
   position:fixed;right:0;top:var(--topbar-h);bottom:0;width:300px;
   background:var(--panel-blur);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
   border-left:1px solid var(--border);
-  transform:translateX(100%);transition:transform .3s var(--spring);
-  z-index:30;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  transform:translateX(100%);transition:transform .3s var(--spring),right .3s var(--spring);
+  z-index:31;overflow-y:auto;-webkit-overflow-scrolling:touch;
   display:flex;flex-direction:column;
 }
 .todo-drawer.open{transform:translateX(0)}
@@ -808,7 +809,7 @@ body{
   writing-mode:vertical-rl;text-orientation:mixed;
   padding:10px 5px;border-radius:8px 0 0 8px;
   background:var(--accent2);color:#fff;font-size:11px;font-weight:700;
-  cursor:pointer;opacity:.7;transition:opacity .2s;
+  cursor:pointer;opacity:.7;transition:opacity .2s,right .3s var(--spring);
   letter-spacing:1px;display:none;
 }
 .todo-tab:hover{opacity:1}
@@ -821,6 +822,69 @@ body{
 .todo-session-pct{font-size:10px;color:var(--muted2);font-family:var(--mono)}
 @media(max-width:768px){
   .todo-drawer{width:min(280px,80vw)}
+}
+
+/* ── Subagent Drawer ── */
+.subagent-drawer{
+  position:fixed;right:0;top:var(--topbar-h);bottom:0;width:300px;
+  background:var(--panel-blur);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border-left:1px solid var(--border);
+  transform:translateX(100%);transition:transform .3s var(--spring),right .3s var(--spring);
+  z-index:30;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  display:flex;flex-direction:column;
+}
+.subagent-drawer.open{transform:translateX(0)}
+.subagent-drawer-header{
+  padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0;
+  display:flex;align-items:center;gap:8px;
+}
+.subagent-drawer-header h3{font-size:13px;font-weight:750;color:var(--text);flex:1}
+.subagent-drawer-close{
+  appearance:none;border:none;background:none;color:var(--muted2);
+  font-size:18px;cursor:pointer;width:28px;height:28px;border-radius:8px;
+  display:grid;place-items:center;
+}
+.subagent-drawer-close:hover{background:var(--bg2);color:var(--text)}
+.subagent-drawer-body{flex:1;padding:8px 12px;overflow-y:auto}
+.subagent-drawer-empty{padding:20px;text-align:center;color:var(--muted2);font-size:12px}
+.subagent-tab{
+  position:fixed;right:0;top:calc(50% + 44px);transform:translateY(-50%);z-index:29;
+  writing-mode:vertical-rl;text-orientation:mixed;
+  padding:10px 5px;border-radius:8px 0 0 8px;
+  background:#a855f7;color:#fff;font-size:11px;font-weight:700;
+  cursor:pointer;opacity:.7;transition:opacity .2s,right .3s var(--spring);
+  letter-spacing:1px;display:none;
+}
+.subagent-tab:hover{opacity:1}
+.subagent-tab.visible{display:block}
+.subagent-card{
+  padding:10px 12px;margin:4px 0;border-radius:8px;background:var(--bg2);
+  cursor:pointer;transition:background .2s;border-left:3px solid transparent;
+}
+.subagent-card:hover{background:var(--bg3,var(--bg2))}
+.subagent-card.running{border-left-color:#a855f7}
+.subagent-card.idle{border-left-color:#34d399}
+.subagent-card.error{border-left-color:#f87171}
+.subagent-card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.subagent-card-model{font-size:11px;font-weight:700;color:var(--text)}
+.subagent-card-status{font-size:10px;font-weight:600;display:flex;align-items:center;gap:4px}
+.subagent-card-status .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+.subagent-card-status .dot.running{background:#a855f7;animation:pulse 1.5s infinite}
+.subagent-card-status .dot.idle{background:#34d399}
+.subagent-card-status .dot.error{background:#f87171}
+.subagent-card-name{font-size:10px;color:var(--muted2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:6px}
+.subagent-card-progress{display:flex;align-items:center;gap:6px}
+.subagent-card-bar{flex:1;height:4px;border-radius:99px;background:var(--bg3,rgba(128,128,128,.2));overflow:hidden}
+.subagent-card-bar-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#a855f7,#c084fc);transition:width .3s}
+.subagent-card-meta{font-size:10px;color:var(--muted2);font-family:var(--mono);white-space:nowrap}
+.subagent-card-goto{
+  appearance:none;border:none;background:none;color:var(--muted2);
+  font-size:13px;cursor:pointer;padding:2px 4px;border-radius:4px;float:right;margin-top:-2px;
+}
+.subagent-card-goto:hover{color:var(--accent2);background:var(--bg2)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@media(max-width:768px){
+  .subagent-drawer{width:min(280px,80vw)}
 }
 
 /* Hide tool chain by default, show when toggled */
@@ -960,6 +1024,68 @@ body{
 .settings-select:focus{border-color:var(--accent2);background:var(--bg2)}
 .settings-select option{color:var(--text)}
 .settings-divider{height:1px;margin:2px 6px;background:var(--border)}
+.settings-btn-row{display:flex;align-items:center;padding:4px 8px}
+.settings-btn-row button{
+  flex:1;padding:6px 0;border:1px solid var(--border2);border-radius:8px;
+  background:var(--btn-bg);color:var(--text);font-size:13px;cursor:pointer;
+  transition:background .15s,border-color .15s;
+}
+.settings-btn-row button:hover{background:var(--bg3);border-color:rgba(var(--accent-r),.4)}
+.settings-btn-row button:disabled{opacity:.4;cursor:not-allowed}
+.settings-btn-row button.compacting{
+  background:rgba(var(--accent-r),.15);border-color:rgba(var(--accent-r),.3);
+  color:var(--accent);cursor:default;
+}
+
+/* Compact indicator card */
+.compact-indicator{
+  display:flex;align-items:center;gap:10px;
+  padding:12px 16px;margin:8px 0;
+  border-radius:var(--radius2);
+  background:rgba(var(--accent-r),.08);
+  border:1px solid rgba(var(--accent-r),.15);
+}
+.compact-indicator-text{font-size:13px;color:var(--accent);font-weight:500;white-space:nowrap}
+.compact-indicator-bar{
+  flex:1;height:4px;border-radius:2px;
+  background:rgba(var(--accent-r),.15);overflow:hidden;
+}
+.compact-indicator-bar-fill{
+  width:0%;height:100%;border-radius:2px;
+  background:var(--accent2);
+  transition:width .8s ease;
+}
+.compact-pct{font-size:12px;color:var(--accent);font-weight:600;min-width:32px;text-align:right}
+
+/* Compact boundary line */
+.compact-boundary{
+  display:flex;align-items:center;gap:8px;
+  padding:12px 0;margin:8px 0;
+}
+.compact-boundary-line{
+  flex:1;height:1px;
+  background:linear-gradient(90deg, transparent, var(--border2), transparent);
+}
+.compact-boundary-label{
+  font-size:12px;color:var(--muted2);white-space:nowrap;
+  display:flex;flex-direction:column;align-items:center;gap:2px;
+}
+.compact-boundary-meta{
+  font-size:10px;opacity:.6;
+}
+/* Collapsed old messages */
+.compact-collapsed .compact-collapsed-content{
+  display:none;max-height:400px;overflow-y:auto;
+  border-left:2px solid var(--border);margin-left:8px;padding-left:8px;
+  opacity:.6;
+}
+.compact-collapsed.expanded .compact-collapsed-content{display:block}
+.compact-expand-btn{
+  background:none;border:none;color:var(--muted2);cursor:pointer;
+  font-size:12px;padding:4px 8px;border-radius:6px;
+  width:100%;text-align:left;
+}
+.compact-expand-btn:hover{background:var(--active-ov)}
 
 /* Link preview card */
 .link-preview{
@@ -1008,7 +1134,7 @@ body{
   padding-left:calc(10px + var(--safe-l));padding-right:calc(10px + var(--safe-r));
 }
 .composer.disabled{opacity:.35;pointer-events:none}
-.composer .inner{max-width:900px;margin:0 auto;display:flex;gap:8px;align-items:flex-end}
+.composer .inner{max-width:min(90%, 1400px);margin:0 auto;display:flex;gap:8px;align-items:flex-end}
 .inputwrap{
   flex:1;border-radius:var(--radius);border:1px solid var(--border2);
   background:var(--input-bg);overflow:hidden;display:flex;flex-direction:column;
@@ -1098,6 +1224,31 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 .sheet .actions .btn-primary{background:linear-gradient(135deg,rgba(var(--accent-r),.95),rgba(var(--pink-r),.8));color:#fff}
 .sheet .actions .btn-danger{background:rgba(239,68,68,.15);color:var(--bad);border:1px solid rgba(239,68,68,.25)}
 .sheet .actions .btn:active{transform:scale(.97)}
+
+/* ── Path Completion ── */
+.path-complete-wrap{position:relative}
+.path-complete-dropdown{
+  position:absolute;left:0;right:0;top:100%;margin-top:-10px;z-index:110;
+  background:var(--panel);border:1px solid var(--border2);border-radius:12px;
+  box-shadow:0 8px 24px rgba(0,0,0,.12);max-height:200px;overflow-y:auto;
+  padding:4px 0;display:none;
+}
+.path-complete-dropdown.show{display:block}
+.path-complete-dropdown .pc-item{
+  padding:8px 14px;font-size:13px;font-family:var(--mono);color:var(--text);
+  cursor:pointer;display:flex;align-items:center;gap:6px;
+}
+.path-complete-dropdown .pc-item:hover,
+.path-complete-dropdown .pc-item.active{background:rgba(var(--accent-rgb,.5),.1);color:var(--accent)}
+.path-complete-dropdown .pc-item::before{content:'📁';font-size:12px}
+@keyframes shake{
+  0%,100%{transform:translateX(0)}
+  20%{transform:translateX(-4px)}
+  40%{transform:translateX(4px)}
+  60%{transform:translateX(-3px)}
+  80%{transform:translateX(2px)}
+}
+.shake{animation:shake .35s ease}
 
 /* ── Toast ── */
 .toast-container{
@@ -1237,8 +1388,8 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 
 <!-- Login Screen -->
 <div class="login-screen" id="login-screen">
-  <div class="login-logo" id="login-logo">W</div>
-  <div class="login-title" id="login-title">Weiran Server</div>
+  <div class="login-logo" id="login-logo">{{.AppInitial}}</div>
+  <div class="login-title" id="login-title">{{.AppTitle}} Server</div>
   <div class="login-sub">Enter server token to connect</div>
   <input class="login-input" id="login-token" type="password" placeholder="Token" autocomplete="off" autocapitalize="off">
   <div class="login-error" id="login-error"></div>
@@ -1304,8 +1455,8 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
     <div class="cwd-badge" id="cwd-badge"></div>
     <div class="content" id="content">
       <div class="welcome" id="welcome">
-        <div class="wlogo" id="w-logo">W</div>
-        <h2 id="w-title">Weiran Server</h2>
+        <div class="wlogo" id="w-logo">{{.AppInitial}}</div>
+        <h2 id="w-title">{{.AppTitle}} Server</h2>
         <p>Persistent Claude Code sessions.<br>Create or resume a session to start.</p>
       </div>
       <div class="wrap" id="messages" style="display:none"></div>
@@ -1368,6 +1519,10 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
         <span class="settings-label">Show tools</span>
         <label class="toggle-switch"><input type="checkbox" id="toggle-tools" onchange="toggleTools(this.checked)"><span class="toggle-track"></span></label>
       </div>
+      <div class="settings-divider"></div>
+      <div class="settings-btn-row">
+        <button id="compact-btn" onclick="triggerCompact()" disabled>Compact</button>
+      </div>
     </div>
     <div class="thinking-indicator" id="thinking"><div class="thinking-dots"><span></span><span></span><span></span></div><div class="thinking-ticker" id="ticker"><span class="ticker-icon">&#9889;</span><span class="ticker-name"></span><span class="ticker-params"></span></div><button class="thinking-cancel" onclick="interruptSession()" title="Interrupt (Esc)">✕</button></div>
     <div class="composer disabled" id="composer">
@@ -1401,6 +1556,18 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   </div>
 </div>
 
+<!-- Subagent Drawer -->
+<div class="subagent-tab" id="subagent-tab" onclick="toggleSubagentDrawer()">🔗 Agents</div>
+<div class="subagent-drawer" id="subagent-drawer">
+  <div class="subagent-drawer-header">
+    <h3>🔗 Subagents</h3>
+    <button class="subagent-drawer-close" onclick="toggleSubagentDrawer()">&times;</button>
+  </div>
+  <div class="subagent-drawer-body" id="subagent-drawer-body">
+    <div class="subagent-drawer-empty">暂无子任务</div>
+  </div>
+</div>
+
 <!-- New Session Sheet -->
 <div class="sheet-overlay" id="new-overlay" onclick="closeNewSheet()"></div>
 <div class="sheet" id="new-sheet">
@@ -1408,8 +1575,11 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   <h2>New Session</h2>
   <label>Name</label>
   <input type="text" id="m-name" placeholder="e.g. fix-nginx-config">
-  <label>Project directory</label>
-  <input type="text" id="m-project" placeholder="Leave empty for default workspace">
+  <label>Project directory <span style="font-size:10px;color:var(--muted2)">(Tab to autocomplete)</span></label>
+  <div class="path-complete-wrap">
+    <input type="text" id="m-project" placeholder="Leave empty for default workspace" autocomplete="off">
+    <div class="path-complete-dropdown" id="pc-dropdown"></div>
+  </div>
   <label>Model</label>
   <select id="m-model" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font-size:14px;font-family:var(--sans);margin-bottom:14px;outline:none">
     <option value="">— Default ({{.DefaultInteractiveModel}}) —</option>
@@ -1421,10 +1591,12 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   </select>
   <label>Initial message</label>
   <input type="text" id="m-initial" placeholder="Optional: first message to send">
-  <label>GAL Resume <span style="font-size:10px;color:var(--muted2)">(optional)</span></label>
-  <select id="m-gal" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font-size:14px;font-family:var(--sans);margin-bottom:14px;outline:none">
-    <option value="">— No GAL save —</option>
-  </select>
+  <div id="gal-resume-wrap" style="display:none">
+    <label>GAL Resume <span style="font-size:10px;color:var(--muted2)">(optional)</span></label>
+    <select id="m-gal" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font-size:14px;font-family:var(--sans);margin-bottom:14px;outline:none">
+      <option value="">— No GAL save —</option>
+    </select>
+  </div>
   <div class="toggle">
     <input type="checkbox" id="m-soul" checked>
     <span>Enable soul files (personality, memory)</span>
@@ -1499,7 +1671,7 @@ let currentModel = '', contextMax = 0, contextTokensPeak = 0, currentCwd = '';
 function shortCwd(p){if(!p)return '';const h=p.replace(/^\/Users\/[^/]+/,'~');return h.length>50?'…'+h.slice(-49):h}
 function setCwd(p){currentCwd=p||'';document.getElementById('cwd-badge').textContent=shortCwd(currentCwd)}
 let linkPreviewCache = {};
-let agentName = 'Weiran', agentAvatar = 'W', agentAvatarURL = '', userAvatarURL = '';
+let agentName = '{{.AppTitle}}', agentAvatar = '{{.AppInitial}}', agentAvatarURL = '', userAvatarURL = '';
 let pendingResumeId = null, pendingResumeName = null, pendingResumeModel = null, pendingDestroyId = null;
 let historyData = [];
 let historyCat = 'interactive'; // current category filter
@@ -1948,6 +2120,15 @@ async function initApp(){
   document.getElementById('login-screen').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
 
+  // Load compact estimate from history
+  try{
+    const logs=JSON.parse(localStorage.getItem('compactLogs')||'[]').slice(-5);
+    if(logs.length>=2){
+      const avg=logs.reduce((s,l)=>s+l.duration,0)/logs.length;
+      _compactEstimateSec=Math.max(60,Math.round(avg*1.1));
+    }
+  }catch(e){}
+
   // Fetch agent info
   try{
     const r=await fetch('/api/health');
@@ -2129,7 +2310,13 @@ var _tabId=Math.random().toString(36).slice(2,8);
 var _isLeader=false;
 var _leaderBC=null;
 var _notifiedSessions=new Set();
+var _compactingSessions=new Map(); // sessionId → {timer, startTime}
+var _compactEstimateSec=300; // default 5 min, self-tuning via logged actuals
+var _compactTickTimer=null;
 var _leaderTimer=null;
+var _titleFlashTimer=null;
+var _titleOriginal='';
+var _titleFlashing=false;
 
 function initLeaderElection(){
   if(typeof BroadcastChannel==='undefined'){
@@ -2189,7 +2376,45 @@ function onSessionBecameIdle(session){
       });
     }catch(e){}
   }
+  // Title flash + PWA badge
+  _updateTitleBadge();
 }
+
+function _updateTitleBadge(){
+  const count=_notifiedSessions.size;
+  // PWA app badge (iOS 16.4+ / Chrome)
+  if('setAppBadge' in navigator){
+    try{count>0?navigator.setAppBadge(count):navigator.clearAppBadge()}catch(e){}
+  }
+  // Title flash when tab is hidden
+  if(count>0&&document.hidden){
+    if(!_titleFlashing){
+      _titleOriginal=agentName||document.title;
+      _titleFlashing=true;
+      let tick=0;
+      clearInterval(_titleFlashTimer);
+      _titleFlashTimer=setInterval(()=>{
+        const n=_notifiedSessions.size;
+        if(n===0||!document.hidden){_stopTitleFlash();return}
+        document.title=(tick++%2===0)?`(${n}) ✅ Session done`:_titleOriginal;
+      },1200);
+    }
+  }else if(count===0){
+    _stopTitleFlash();
+  }
+}
+
+function _stopTitleFlash(){
+  clearInterval(_titleFlashTimer);
+  _titleFlashTimer=null;
+  _titleFlashing=false;
+  document.title=agentName||_titleOriginal||'{{.AppTitle}}';
+}
+
+// Clear title flash + badge when tab becomes visible
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden&&_titleFlashing)_stopTitleFlash();
+});
 
 // ── WebSocket ──
 function connectWS(){
@@ -2359,6 +2584,13 @@ function handleSessionsUpdate(list){
     if(oldStatus==='running'&&s.status==='idle'){
       onSessionBecameIdle(s);
     }
+    // Clear compact state when session leaves "running" (idle/error/stopped)
+    if(oldStatus==='running'&&s.status!=='running'&&_compactingSessions.has(s.id)){
+      const entry=_compactingSessions.get(s.id);
+      if(entry&&entry.timer)clearTimeout(entry.timer);
+      _compactingSessions.delete(s.id);
+      if(s.id===activeSessionId){removeCompactIndicator();syncCompactBtn()}
+    }
   });
   Object.keys(sessions).forEach(id=>{if(!newIds.has(id)){delete sessions[id];if(activeSessionId===id&&!resumeInProgress)selectSession(null)}});
   updateStatusBar();
@@ -2401,8 +2633,11 @@ function handleSessionsUpdate(list){
     el.innerHTML=`<div class="si-top"><span class="si-title" title="${esc(title)}">${esc(title)}</span><span class="si-dot ${s.status}">${s.status==='running'?'<span></span>':''}</span></div><div class="si-sub">${esc(sub)}</div><div class="si-meta"><span class="${modelClass(s.model)}">${modelDisplay}</span><span>${s.status}</span><span>${s.num_turns||0}t</span>${cost?'<span>'+cost+'</span>':''}</div><div class="si-actions"><button class="si-rename" onclick="event.stopPropagation();promptRename('${s.id}','${esc(s.name||'')}')">&#9998;</button><button class="si-del" onclick="openDestroySheet('${s.id}')">&times;</button></div>`;
   });
   existing.forEach((el,id)=>{if(!newIds.has(id)){el.remove();_notifiedSessions.delete(id)}});
+  _updateTitleBadge();
   // Sync todo drawer from all sessions' server-side todos
   syncAllSessionTodos(list);
+  // Note: native Agent subagents are tracked client-side via tool_use/tool_result events,
+  // not from the session list. No sync needed here.
   // Refresh history tab so new/renamed sessions appear there too
   scheduleHistoryRefresh();
 }
@@ -2445,6 +2680,28 @@ function handleSessionEvent(event,data){
       handleControlResponse(data);
       break;
     case 'system':
+      if(data.subtype==='compact_boundary'){
+        const sid=data.session_id||activeSessionId;
+        const entry=_compactingSessions.get(sid);
+        if(entry){
+          if(entry.timer)clearTimeout(entry.timer);
+          if(entry.startTime){
+            const dur=(Date.now()-entry.startTime)/1000;
+            logCompactDuration(sid,dur);
+            console.log('[compact] session',sid.slice(0,8),'took',Math.round(dur)+'s','(estimate was',_compactEstimateSec+'s)');
+          }
+        }
+        _compactingSessions.delete(sid);
+        if(sid===activeSessionId){
+          removeCompactIndicator();
+          syncCompactBtn();
+          const meta=data.compactMetadata||data.compact_metadata||{};
+          const pre=meta.preTokens||meta.pre_tokens||0;
+          const trigger=meta.trigger||'manual';
+          addCompactBoundary(`compact_boundary|${trigger}|${pre}`);
+        }
+      }
+      break;
     case 'task_progress':
       break;
     case 'close':
@@ -2463,6 +2720,7 @@ function selectSession(id){
     _notifiedSessions.delete(id);
     const el=document.querySelector(`.si[data-id="${id}"]`);
     if(el)el.classList.remove('si-notify');
+    _updateTitleBadge();
   }
   // Clean up all streaming/typing state from previous session
   if(typeRAF){cancelAnimationFrame(typeRAF);typeRAF=null}
@@ -2478,6 +2736,9 @@ function selectSession(id){
   updateStatusBar();
   updateTodoDrawer([]);
   document.getElementById('todo-drawer').classList.remove('open');
+  document.getElementById('subagent-drawer').classList.remove('open');
+  // Render subagent drawer for newly selected session (state is preserved per-session)
+  renderSubagentDrawer();
 
   // Sync URL query string
   const u=new URL(location);
@@ -2488,6 +2749,7 @@ function selectSession(id){
   if(!id){
     w.style.display='';m.style.display='none';c.classList.add('disabled');
     document.getElementById('send-btn').disabled=true;
+    syncCompactBtn();
     updateSidebarActive();
     return;
   }
@@ -2512,6 +2774,8 @@ function selectSession(id){
   const replaceOn=!!(s&&s.replace_soul);
   document.getElementById('toggle-replace-soul').checked=replaceOn;
   updateSoulBadge(replaceOn);
+  // Restore compact UI state
+  syncCompactUI();
 
   // Load history messages for already-running sessions, then subscribe
   loadHistoryMessages(id).then(async msgs=>{
@@ -2521,7 +2785,11 @@ function selectSession(id){
         if(msg.role==='user')addUserMsg(msg.content,msg.timestamp);
         else if(msg.role==='assistant')addAIMsg(msg.content,false,msg.timestamp);
         else if(msg.role==='tool_use')addToolUseMsg(msg.tool_name,msg.tool_input);
-        else if(msg.role==='tool_result')addToolResultMsg(msg.content);
+        else if(msg.role==='tool_result'){
+          if(msg.content&&msg.content.includes('[Old tool result content cleared]'))return;
+          addToolResultMsg(msg.content);
+        }
+        else if(msg.role==='compact_boundary')addCompactBoundary(msg.content,msg.timestamp);
         else if(msg.role==='image'&&msg.images)addHistoryImages(msg.images);
       });
       scrollBottom();
@@ -2619,6 +2887,10 @@ function handleToolUse(data){
         const m=b.input.command.match(/^\s*cd\s+("[^"]+"|'[^']+'|\S+)/);
         if(m){let d=m[1].replace(/^['"]|['"]$/g,'');if(d.startsWith('~'))d='/Users/kiyor'+d.slice(1);else if(!d.startsWith('/'))d=currentCwd+'/'+d;setCwd(d)}
       }
+      // Track Agent subagent launches
+      if(b.name==='Agent'&&b.id&&b.input){
+        trackSubagentStart(b.id,b.input);
+      }
     }
   });
   if(!showToolsMode){
@@ -2633,6 +2905,8 @@ function handleToolResult(data){
   const msg=data.message;if(!msg||!msg.content)return;
   msg.content.forEach(b=>{
     if(b.type==='tool_result'){
+      // Track Agent subagent completions
+      if(b.tool_use_id)trackSubagentEnd(b.tool_use_id,b.is_error);
       // Check for image content (base64 from Read tool)
       const images=extractImages(b.content);
       if(images.length>0){
@@ -2709,6 +2983,45 @@ function addAIMsg(text,streaming=false,ts){
   scrollBottomSmooth();
   if(!streaming)injectLinkPreviews(el);
   return el;
+}
+
+function addCompactBoundary(info,ts){
+  const msgs=document.getElementById('messages');
+  // Parse info string: "compact_boundary|trigger|preTokens"
+  let trigger='manual',preTokens=0;
+  if(info&&info.startsWith('compact_boundary|')){
+    const parts=info.split('|');
+    trigger=parts[1]||'manual';
+    preTokens=parseInt(parts[2])||0;
+  }
+  // Remove compact indicator before folding (prevent it from being swept into collapsed container)
+  removeCompactIndicator();
+  // Collect all message elements before this boundary (stop at previous boundary)
+  const oldMsgs=[];
+  let el=msgs.lastElementChild;
+  while(el&&!el.classList.contains('compact-boundary')&&!el.classList.contains('compact-collapsed')){
+    oldMsgs.unshift(el);
+    el=el.previousElementSibling;
+  }
+  // Wrap old messages in collapsible container
+  if(oldMsgs.length>0){
+    const wrapper=document.createElement('div');
+    wrapper.className='compact-collapsed';
+    const btnLabel=`▶ ${oldMsgs.length} messages before compact`;
+    wrapper.innerHTML=`<button class="compact-expand-btn" onclick="this.parentElement.classList.toggle('expanded');this.textContent=this.parentElement.classList.contains('expanded')?'▼ Collapse old messages':'▶ ${oldMsgs.length} messages before compact'">${esc(btnLabel)}</button><div class="compact-collapsed-content"></div>`;
+    const content=wrapper.querySelector('.compact-collapsed-content');
+    oldMsgs.forEach(m=>content.appendChild(m));
+    msgs.appendChild(wrapper);
+  }
+  // Render boundary line
+  const boundary=document.createElement('div');
+  boundary.className='compact-boundary';
+  let meta=trigger!=='manual'?trigger:'manual';
+  if(preTokens)meta+=` · from ${Math.round(preTokens/1000)}k tokens`;
+  if(ts)meta+=` · ${timeStr(ts)}`;
+  boundary.innerHTML=`<div class="compact-boundary-line"></div><span class="compact-boundary-label">── Context compacted ──<span class="compact-boundary-meta">${esc(meta)}</span></span><div class="compact-boundary-line"></div>`;
+  msgs.appendChild(boundary);
+  scrollBottomSmooth();
 }
 
 function addSystemMsg(text,markdown,ts){
@@ -2860,7 +3173,7 @@ function addToolResultMsg(text){
   }
   const t=text.length>2000?text.slice(0,2000)+'...':text;
   const el=document.createElement('div');el.className='msg system-msg tool-msg';
-  el.innerHTML=`<div class="tool-block collapsed"><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge" style="border-color:rgba(33,192,122,.18);background:rgba(33,192,122,.06);color:rgba(180,255,220,.9)"><span class="icon">&#10003;</span>Result</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${esc(t)}</div></div>`;
+  el.innerHTML=`<div class="tool-block collapsed"><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge result"><span class="icon">&#10003;</span>Result</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${esc(t)}</div></div>`;
   document.getElementById('messages').appendChild(el);
   scrollBottomSmooth();
 }
@@ -2896,16 +3209,16 @@ function renderUserMsg(text){
   stdoutBlocks.forEach(s=>{
     htmlParts.push(`<div class="cmd-stdout"><span class="cmd-arrow">→</span>${esc(s)}</div>`);
   });
-  // Render remaining user text (with image support)
+  // Render remaining user text (with image support + newline preservation)
   if(text){
     const imgRe=/!\[([^\]]*)\]\(([^)]+)\)/g;
     const parts=[];let last=0,m;
     while((m=imgRe.exec(text))!==null){
-      if(m.index>last)parts.push(esc(text.slice(last,m.index)));
+      if(m.index>last)parts.push(esc(text.slice(last,m.index)).replace(/\n/g,'<br>'));
       parts.push(`<img src="${esc(m[2])}" alt="${esc(m[1])}" onclick="openLightbox(this.src)" loading="lazy" style="max-width:100%;border-radius:var(--radius2);cursor:pointer">`);
       last=imgRe.lastIndex;
     }
-    if(last<text.length)parts.push(esc(text.slice(last)));
+    if(last<text.length)parts.push(esc(text.slice(last)).replace(/\n/g,'<br>'));
     htmlParts.push(parts.join(''));
   }
   return htmlParts.join('');
@@ -3197,8 +3510,9 @@ function openNewSheet(){
   document.getElementById('new-overlay').classList.add('show');
   requestAnimationFrame(()=>document.getElementById('new-sheet').classList.add('show'));
   if(isMobile)closeSidebar();
-  // Fetch GAL saves for the dropdown
-  fetchGalSaves();
+  // Fetch GAL saves only when gal skill is available (easter egg)
+  const galWrap=document.getElementById('gal-resume-wrap');
+  if(galWrap&&galWrap.style.display!=='none')fetchGalSaves();
 }
 async function fetchGalSaves(){
   const sel=document.getElementById('m-gal');
@@ -3224,6 +3538,82 @@ function closeNewSheet(){
   document.getElementById('new-sheet').classList.remove('show');
   setTimeout(()=>document.getElementById('new-overlay').classList.remove('show'),350);
 }
+
+// ── Path Completion ──
+(function(){
+  const inp=document.getElementById('m-project');
+  const dd=document.getElementById('pc-dropdown');
+  let activeIdx=-1, items=[];
+
+  inp.addEventListener('keydown',async function(e){
+    // arrow nav inside dropdown
+    if(dd.classList.contains('show')){
+      if(e.key==='ArrowDown'){e.preventDefault();activeIdx=Math.min(activeIdx+1,items.length-1);highlightItem();return}
+      if(e.key==='ArrowUp'){e.preventDefault();activeIdx=Math.max(activeIdx-1,0);highlightItem();return}
+      if(e.key==='Enter'&&activeIdx>=0){e.preventDefault();selectItem(activeIdx);return}
+      if(e.key==='Escape'){e.preventDefault();closeDD();return}
+    }
+    if(e.key!=='Tab')return;
+    e.preventDefault();
+    let prefix=inp.value||'~';
+    // ensure trailing context
+    if(prefix==='~')prefix='~/';
+    try{
+      const r=await fetch('/api/complete-path?prefix='+encodeURIComponent(prefix),{headers:{'Authorization':'Bearer '+TOKEN}});
+      if(!r.ok){doShake();return}
+      const data=await r.json();
+      const matches=data.completions||[];
+      const base=data.base||'';
+      const common=data.common||'';
+      if(matches.length===0){doShake();return}
+      if(matches.length===1){
+        inp.value=base+'/'+matches[0]+'/';
+        closeDD();
+      } else if(common.length>(inp.value.split('/').pop()||'').length){
+        // can extend further
+        inp.value=base+'/'+common;
+        showDD(matches,base);
+      } else {
+        showDD(matches,base);
+      }
+    }catch(err){doShake();}
+  });
+
+  function showDD(matches,base){
+    items=matches;activeIdx=-1;
+    dd.innerHTML=matches.map((m,i)=>`<div class="pc-item" data-i="${i}">${m}/</div>`).join('');
+    dd.querySelectorAll('.pc-item').forEach(el=>{
+      el.addEventListener('click',()=>selectItem(+el.dataset.i));
+      el.addEventListener('mouseenter',()=>{activeIdx=+el.dataset.i;highlightItem()});
+    });
+    dd.classList.add('show');
+    // store base for selection
+    dd.dataset.base=base;
+  }
+  function selectItem(i){
+    const base=dd.dataset.base||'';
+    inp.value=base+'/'+items[i]+'/';
+    closeDD();
+    inp.focus();
+  }
+  function highlightItem(){
+    dd.querySelectorAll('.pc-item').forEach((el,i)=>el.classList.toggle('active',i===activeIdx));
+    // scroll active into view
+    const act=dd.querySelector('.pc-item.active');
+    if(act)act.scrollIntoView({block:'nearest'});
+  }
+  function closeDD(){dd.classList.remove('show');dd.innerHTML='';activeIdx=-1;items=[]}
+  function doShake(){
+    inp.classList.add('shake');
+    setTimeout(()=>inp.classList.remove('shake'),350);
+  }
+
+  // close dropdown when clicking outside or typing
+  inp.addEventListener('input',closeDD);
+  document.addEventListener('click',function(e){
+    if(!inp.contains(e.target)&&!dd.contains(e.target))closeDD();
+  });
+})();
 
 function createSession(){
   const name=document.getElementById('m-name').value.trim();
@@ -3306,7 +3696,11 @@ function doResume(sid,displayName,model){
         if(msg.role==='user')addUserMsg(msg.content,msg.timestamp);
         else if(msg.role==='assistant')addAIMsg(msg.content,false,msg.timestamp);
         else if(msg.role==='tool_use')addToolUseMsg(msg.tool_name,msg.tool_input);
-        else if(msg.role==='tool_result')addToolResultMsg(msg.content);
+        else if(msg.role==='tool_result'){
+          if(msg.content&&msg.content.includes('[Old tool result content cleared]'))return;
+          addToolResultMsg(msg.content);
+        }
+        else if(msg.role==='compact_boundary')addCompactBoundary(msg.content,msg.timestamp);
         else if(msg.role==='image'&&msg.images)addHistoryImages(msg.images);
       });
       scrollBottom();
@@ -3351,7 +3745,7 @@ function renderHistory(query){
   filtered.forEach(s=>{
     const el=document.createElement('div');el.className='hi';
     const d=s.name||s.title||s.first_msg||shortId(s.id);
-    const model=(s.model||'').replace(/^claude-/,'');
+    const model=shortModelName(s.model);
     const cat=s.category||'interactive';
     const catBadge=historyCat==='all'?`<span style="opacity:.6">${catIcons[cat]||'?'}</span> `:'';
     const meta=[shortId(s.id),relTime(s.mod_time),(s.messages||'?')+'msg',model].filter(Boolean).join(' \u00b7 ');
@@ -3401,7 +3795,35 @@ const allSessionTodos=new Map(); // sessionId → {name, todos[]}
 
 function toggleTodoDrawer(){
   const d=document.getElementById('todo-drawer');
+  const opening=!d.classList.contains('open');
   d.classList.toggle('open');
+  /* mobile: close the other drawer when opening this one */
+  if(opening&&window.innerWidth<=768){
+    document.getElementById('subagent-drawer').classList.remove('open');
+  }
+  adjustDrawerLayout();
+}
+function adjustDrawerLayout(){
+  const td=document.getElementById('todo-drawer');
+  const sd=document.getElementById('subagent-drawer');
+  const tt=document.getElementById('todo-tab');
+  const tOpen=td.classList.contains('open');
+  const sOpen=sd.classList.contains('open');
+  if(tOpen&&sOpen){
+    /* mobile: too narrow for side-by-side — todo takes priority, close subagent */
+    if(window.innerWidth<=768){
+      sd.classList.remove('open');
+      td.style.right='0';
+      if(tt)tt.style.right='0';
+      return;
+    }
+    const sw=sd.offsetWidth||300;
+    td.style.right=sw+'px';
+    if(tt)tt.style.right=sw+'px';
+  }else{
+    td.style.right='0';
+    if(tt)tt.style.right='0';
+  }
 }
 
 // Called from addToolUseMsg for the active session (real-time)
@@ -3490,6 +3912,101 @@ function renderTodoItems(todos){
   html+='</div>';
   return html;
 }
+
+// ── Subagent Drawer ──
+// Tracks native Agent tool calls (Explore/Plan/general-purpose) from SSE stream.
+// These are invisible in the session sidebar — they run inside Claude Code's process.
+// Stored per-session so switching sessions preserves state.
+const allSessionSubagents=new Map(); // sessionId → Map(tool_use_id → {description, type, status, startTime, ...})
+function getSubagents(sid){if(!sid)return new Map();if(!allSessionSubagents.has(sid))allSessionSubagents.set(sid,new Map());return allSessionSubagents.get(sid)}
+// Convenience alias for current session's subagents
+function nativeSubagentsForActive(){return getSubagents(activeSessionId)}
+
+function toggleSubagentDrawer(){
+  const d=document.getElementById('subagent-drawer');
+  const opening=!d.classList.contains('open');
+  d.classList.toggle('open');
+  /* mobile: close the other drawer when opening this one */
+  if(opening&&window.innerWidth<=768){
+    document.getElementById('todo-drawer').classList.remove('open');
+  }
+  adjustDrawerLayout();
+}
+
+function trackSubagentStart(toolUseId,input){
+  nativeSubagentsForActive().set(toolUseId,{
+    description:input.description||'Agent task',
+    type:input.subagent_type||'general-purpose',
+    model:input.model||'',
+    status:'running',
+    startTime:Date.now()
+  });
+  renderSubagentDrawer();
+}
+
+function trackSubagentEnd(toolUseId,isError){
+  const subs=nativeSubagentsForActive();
+  const sa=subs.get(toolUseId);
+  if(!sa)return;
+  sa.status=isError?'error':'completed';
+  sa.endTime=Date.now();
+  renderSubagentDrawer();
+  // Auto-hide completed agents after 30s
+  setTimeout(()=>{
+    if(sa.status==='completed'){subs.delete(toolUseId);renderSubagentDrawer()}
+  },30000);
+}
+
+function renderSubagentDrawer(){
+  const tab=document.getElementById('subagent-tab');
+  const body=document.getElementById('subagent-drawer-body');
+  const subs=nativeSubagentsForActive();
+
+  if(!subs.size){
+    tab.classList.remove('visible');
+    body.innerHTML='<div class="subagent-drawer-empty">暂无子任务</div>';
+    return;
+  }
+  tab.classList.add('visible');
+
+  const running=[...subs.values()].filter(a=>a.status==='running').length;
+  const total=subs.size;
+  // Update tab badge
+  tab.textContent=`🔗 Agents (${running}/${total})`;
+
+  let html='';
+  for(const [id,sa] of subs){
+    const st=sa.status;
+    const elapsed=sa.endTime
+      ?fmtDuration(sa.endTime-sa.startTime)
+      :fmtDuration(Date.now()-sa.startTime);
+    const icon=st==='running'?'⚡':st==='completed'?'✅':'❌';
+
+    html+=`<div class="subagent-card ${st}">
+      <div class="subagent-card-top">
+        <span class="subagent-card-model">${icon} ${esc(sa.type)}${sa.model?' · '+esc(sa.model):''}</span>
+        <span class="subagent-card-status">
+          <span class="dot ${st}"></span>
+          ${esc(elapsed)}
+        </span>
+      </div>
+      <div class="subagent-card-name">${esc(sa.description)}</div>
+    </div>`;
+  }
+  body.innerHTML=html;
+}
+
+function fmtDuration(ms){
+  const s=Math.floor(ms/1000);
+  if(s<60)return s+'s';
+  const m=Math.floor(s/60);
+  return m+'m'+String(s%60).padStart(2,'0')+'s';
+}
+
+// Tick running subagent timers every second
+setInterval(()=>{
+  if([...nativeSubagentsForActive().values()].some(a=>a.status==='running'))renderSubagentDrawer();
+},1000);
 
 // ── Toast ──
 function toast(text,type='info',duration=3000){
@@ -4005,11 +4522,19 @@ async function loadSkills(){
       {name:'model',desc:'Switch model (e.g. /model opus)',builtin:true},
       {name:'usage',desc:'Show context window usage breakdown',builtin:true},
       {name:'rename',desc:'Rename session (no args = auto)',builtin:true},
+      {name:'compact',desc:'Compact context window',builtin:true},
     ];
     // Skills from server
+    let hasGal=false;
     if(skills&&skills.length){
-      skills.forEach(s=>slashCommands.push({name:s.name,desc:s.description||'',builtin:false}));
+      skills.forEach(s=>{
+        slashCommands.push({name:s.name,desc:s.description||'',builtin:false});
+        if(s.name.toLowerCase()==='gal')hasGal=true;
+      });
     }
+    // Easter egg: show GAL Resume only when gal skill exists
+    const galWrap=document.getElementById('gal-resume-wrap');
+    if(galWrap)galWrap.style.display=hasGal?'':'none';
   }catch(e){}
 }
 
@@ -4089,6 +4614,11 @@ function executeSlashCommand(name,builtin){
     }
     return;
   }
+  if(builtin&&name==='compact'){
+    inp.value='';
+    triggerCompact();
+    return;
+  }
   // Skill — send as /skillname message, Claude handles it
   inp.value='/'+name;
   autoResize(inp);
@@ -4100,6 +4630,11 @@ function handleSlashSend(text){
   // /usage — show context window usage
   if(/^\/usage$/i.test(text.trim())){
     if(activeSessionId)fetchUsage();
+    return true;
+  }
+  // /compact — trigger context compaction
+  if(/^\/compact$/i.test(text.trim())){
+    triggerCompact();
     return true;
   }
   // /model <name> — handle client-side via apply_flag_settings
@@ -4133,6 +4668,122 @@ function handleSlashSend(text){
     return true;
   }
   return false; // not a built-in command, send as message
+}
+
+// ── Compact ──
+function triggerCompact(){
+  if(!activeSessionId)return;
+  if(_compactingSessions.has(activeSessionId))return;
+  const sid=activeSessionId;
+  const startTime=Date.now();
+  _compactingSessions.set(sid,{timer:null,startTime});
+  syncCompactBtn();
+  addCompactIndicator(startTime);
+  startCompactTick();
+  // Timeout safety: if compact_boundary never arrives, clean up after 10min
+  const tid=setTimeout(()=>{
+    if(_compactingSessions.has(sid)){
+      _compactingSessions.delete(sid);
+      if(sid===activeSessionId){syncCompactBtn();removeCompactIndicator();stopCompactTick()}
+      addSystemMsg('⚠️ Compact timed out (no response after 10min)');
+    }
+  },600000);
+  _compactingSessions.set(sid,{timer:tid,startTime});
+  // Send /compact as a message to the session
+  fetch(`/api/sessions/${activeSessionId}/message`,{
+    method:'POST',
+    headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},
+    body:JSON.stringify({message:'/compact'})
+  }).then(r=>{
+    if(!r.ok){throw new Error('HTTP '+r.status)}
+  }).catch(e=>{
+    addErrorMsg('Compact failed: '+e.message);
+    clearTimeout(tid);
+    _compactingSessions.delete(sid);
+    if(sid===activeSessionId){syncCompactBtn();removeCompactIndicator();stopCompactTick()}
+  });
+  closeSettingsPanel();
+}
+
+function addCompactIndicator(startTime){
+  if(!activeSessionId)return;
+  if(document.getElementById('compact-indicator'))return;
+  const el=document.createElement('div');
+  el.id='compact-indicator';
+  el.className='compact-indicator';
+  el.dataset.startTime=startTime||Date.now();
+  el.innerHTML='<span class="compact-indicator-text">Compressing… <span class="compact-elapsed">0s</span></span>'
+    +'<div class="compact-indicator-bar"><div class="compact-indicator-bar-fill"></div></div>'
+    +'<span class="compact-pct">0%</span>';
+  document.getElementById('messages').appendChild(el);
+  updateCompactProgress();
+  scrollBottomSmooth();
+}
+
+function removeCompactIndicator(){
+  const el=document.getElementById('compact-indicator');
+  if(el)el.remove();
+  stopCompactTick();
+}
+
+function startCompactTick(){
+  stopCompactTick();
+  _compactTickTimer=setInterval(()=>{
+    if(!activeSessionId||!_compactingSessions.has(activeSessionId)){stopCompactTick();return}
+    updateCompactProgress();
+  },1000);
+}
+
+function stopCompactTick(){
+  if(_compactTickTimer){clearInterval(_compactTickTimer);_compactTickTimer=null}
+}
+
+function updateCompactProgress(){
+  const el=document.getElementById('compact-indicator');
+  if(!el)return;
+  const start=parseInt(el.dataset.startTime)||Date.now();
+  const elapsed=(Date.now()-start)/1000;
+  const pct=Math.min(95,Math.round((elapsed/_compactEstimateSec)*100));
+  const elapsedText=elapsed<60?Math.round(elapsed)+'s':Math.floor(elapsed/60)+'m'+Math.round(elapsed%60)+'s';
+  const etaText=elapsed<_compactEstimateSec?'~'+Math.max(1,Math.round((_compactEstimateSec-elapsed)/60))+'min left':'any moment…';
+  el.querySelector('.compact-elapsed').textContent=elapsedText+' · '+etaText;
+  el.querySelector('.compact-indicator-bar-fill').style.width=pct+'%';
+  el.querySelector('.compact-pct').textContent=pct+'%';
+}
+
+function logCompactDuration(sid,durationSec){
+  // Log actual compact duration for future estimation tuning
+  const logs=JSON.parse(localStorage.getItem('compactLogs')||'[]');
+  logs.push({sid,duration:Math.round(durationSec),ts:Date.now()});
+  // Keep last 20
+  while(logs.length>20)logs.shift();
+  localStorage.setItem('compactLogs',JSON.stringify(logs));
+  // Update estimate: weighted average of last 5
+  const recent=logs.slice(-5);
+  if(recent.length>=2){
+    const avg=recent.reduce((s,l)=>s+l.duration,0)/recent.length;
+    _compactEstimateSec=Math.max(60,Math.round(avg*1.1)); // +10% buffer
+  }
+}
+
+function syncCompactBtn(){
+  const btn=document.getElementById('compact-btn');
+  if(!btn)return;
+  const compacting=activeSessionId&&_compactingSessions.has(activeSessionId);
+  const hasSession=!!activeSessionId;
+  btn.disabled=!hasSession||compacting;
+  btn.textContent=compacting?'Compressing...':'Compact';
+  btn.classList.toggle('compacting',!!compacting);
+}
+
+function syncCompactUI(){
+  syncCompactBtn();
+  removeCompactIndicator();
+  if(activeSessionId&&_compactingSessions.has(activeSessionId)){
+    const entry=_compactingSessions.get(activeSessionId);
+    addCompactIndicator(entry.startTime||Date.now());
+    startCompactTick();
+  }
 }
 
 // ── Cost Badge ──

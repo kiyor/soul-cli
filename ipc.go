@@ -121,15 +121,19 @@ func ipcList() {
 	_, _, myID := ipcEnv()
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tSTATUS\tMODEL\tCATEGORY")
+	fmt.Fprintln(w, "ID\tCC_SID\tNAME\tSTATUS\tMODEL\tCATEGORY")
 	for _, s := range sessions {
 		id := fmt.Sprintf("%v", s["id"])
+		ccSID := ""
+		if v, ok := s["claude_session_id"]; ok && v != nil && fmt.Sprintf("%v", v) != "" {
+			ccSID = shortID(fmt.Sprintf("%v", v))
+		}
 		marker := ""
 		if id == myID {
 			marker = " (me)"
 		}
-		fmt.Fprintf(w, "%s\t%v%s\t%v\t%v\t%v\n",
-			shortID(id), s["name"], marker, s["status"], s["model"], s["category"])
+		fmt.Fprintf(w, "%s\t%s\t%v%s\t%v\t%v\t%v\n",
+			shortID(id), ccSID, s["name"], marker, s["status"], s["model"], s["category"])
 	}
 	w.Flush()
 }
@@ -253,46 +257,110 @@ func ipcSearch(targetID, keyword string) {
 }
 
 // resolveSessionID resolves a short ID prefix to a full session ID by listing active sessions.
+// It matches against both weiran session ID and CC session ID.
+// If multiple sessions match, it prints their metadata and exits so the caller can disambiguate.
 func resolveSessionID(input string) string {
 	// If it looks like a full UUID, use as-is
 	if len(input) > 16 {
 		return input
 	}
 
-	resp, err := ipcRequest("GET", "/api/sessions", nil)
-	if err != nil {
-		return input // fallback to raw input
+	type candidate struct {
+		id    string // weiran session ID
+		ccSID string // CC session ID
+		name  string
+		model string
+		time  string // created_at or last_active
 	}
-	defer resp.Body.Close()
 
-	var sessions []map[string]any
-	json.NewDecoder(resp.Body).Decode(&sessions)
+	var candidates []candidate
 
-	for _, s := range sessions {
-		id := fmt.Sprintf("%v", s["id"])
-		if strings.HasPrefix(id, input) {
-			return id
+	// Check active sessions
+	resp, err := ipcRequest("GET", "/api/sessions", nil)
+	if err == nil {
+		defer resp.Body.Close()
+		var sessions []map[string]any
+		json.NewDecoder(resp.Body).Decode(&sessions)
+
+		for _, s := range sessions {
+			id := fmt.Sprintf("%v", s["id"])
+			ccSID := ""
+			if v, ok := s["claude_session_id"]; ok && v != nil {
+				ccSID = fmt.Sprintf("%v", v)
+			}
+			if strings.HasPrefix(id, input) || (ccSID != "" && strings.HasPrefix(ccSID, input)) {
+				ts := ""
+				if v, ok := s["created_at"]; ok && v != nil {
+					ts = fmt.Sprintf("%v", v)
+				}
+				candidates = append(candidates, candidate{
+					id: id, ccSID: ccSID,
+					name:  fmt.Sprintf("%v", s["name"]),
+					model: fmt.Sprintf("%v", s["model"]),
+					time:  ts,
+				})
+			}
 		}
 	}
 
 	// Also check history for non-active sessions
 	resp2, err := ipcRequest("GET", "/api/history?limit=50", nil)
-	if err != nil {
-		return input
-	}
-	defer resp2.Body.Close()
+	if err == nil {
+		defer resp2.Body.Close()
+		var history []map[string]any
+		json.NewDecoder(resp2.Body).Decode(&history)
 
-	var history []map[string]any
-	json.NewDecoder(resp2.Body).Decode(&history)
-
-	for _, s := range history {
-		id := fmt.Sprintf("%v", s["id"])
-		if strings.HasPrefix(id, input) {
-			return id
+		for _, s := range history {
+			id := fmt.Sprintf("%v", s["id"])
+			ccSID := ""
+			if v, ok := s["claude_session_id"]; ok && v != nil {
+				ccSID = fmt.Sprintf("%v", v)
+			}
+			// Skip if already in candidates (active session covers this CC session)
+			dup := false
+			for _, c := range candidates {
+				if c.id == id || c.ccSID == id {
+					dup = true
+					break
+				}
+			}
+			if dup {
+				continue
+			}
+			if strings.HasPrefix(id, input) || (ccSID != "" && strings.HasPrefix(ccSID, input)) {
+				ts := ""
+				if v, ok := s["created_at"]; ok && v != nil {
+					ts = fmt.Sprintf("%v", v)
+				}
+				candidates = append(candidates, candidate{
+					id: id, ccSID: ccSID,
+					name:  fmt.Sprintf("%v", s["name"]),
+					model: fmt.Sprintf("%v", s["model"]),
+					time:  ts,
+				})
+			}
 		}
 	}
 
-	return input // couldn't resolve, return as-is
+	if len(candidates) == 0 {
+		return input // couldn't resolve, return as-is
+	}
+	if len(candidates) == 1 {
+		return candidates[0].id
+	}
+
+	// Multiple matches — print disambiguation table to stderr and return first match.
+	// Callers see the resolution succeed but the user gets a warning to use a longer prefix.
+	fmt.Fprintf(os.Stderr, "prefix %q matches %d sessions (using first match):\n\n", input, len(candidates))
+	w := tabwriter.NewWriter(os.Stderr, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tCC_SID\tNAME\tMODEL\tCREATED")
+	for _, c := range candidates {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			shortID(c.id), shortID(c.ccSID), c.name, c.model, c.time)
+	}
+	w.Flush()
+	fmt.Fprintf(os.Stderr, "\ntip: use a longer prefix to disambiguate\n")
+	return candidates[0].id
 }
 
 // ipcClose destroys a target session via DELETE /api/sessions/{id}.

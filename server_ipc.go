@@ -91,6 +91,24 @@ func getParticipants(sessionID string) []string {
 	return participants
 }
 
+// updateSpawnedBy persists the parent session ID for a child session.
+func updateSpawnedBy(childSessionID, parentSessionID string) {
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	serverDBMu.Lock()
+	defer serverDBMu.Unlock()
+	result, err := db.Exec(`UPDATE server_sessions SET spawned_by = ? WHERE session_id = ?`, parentSessionID, childSessionID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] ipc: updateSpawnedBy failed: %v\n", appName, err)
+		return
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		fmt.Fprintf(os.Stderr, "[%s] ipc: updateSpawnedBy: no row matched session_id=%s\n", appName, shortID(childSessionID))
+	}
+}
+
 // ── HTTP Handlers ──
 
 // handleIPCMessageFrom handles POST /api/sessions/{id}/message-from
@@ -149,6 +167,9 @@ func handleIPCMessageFrom(sm *sessionManager, hub *wsHub, maxRounds int) http.Ha
 
 		// Update participants on target
 		updateParticipants(targetID, req.FromSessionID)
+
+		// Note: spawned_by is set explicitly via opts.SpawnedBy at session creation,
+		// not inferred from IPC messages (first sender ≠ parent).
 
 		// Build prefixed message
 		fromName := fromSess.Name

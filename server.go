@@ -532,6 +532,79 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, skills)
 	}))
 
+	// Path completion for project directory input
+	mux.HandleFunc("GET /api/complete-path", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		prefix := r.URL.Query().Get("prefix")
+		home, _ := os.UserHomeDir()
+
+		// expand ~ to home dir
+		if strings.HasPrefix(prefix, "~/") {
+			prefix = filepath.Join(home, prefix[2:])
+		} else if prefix == "~" {
+			prefix = home
+		}
+
+		// split into directory and partial filename
+		dir := filepath.Dir(prefix)
+		partial := filepath.Base(prefix)
+		// if prefix ends with /, list that directory
+		if strings.HasSuffix(r.URL.Query().Get("prefix"), "/") || prefix == home {
+			dir = prefix
+			partial = ""
+		}
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"prefix":      prefix,
+				"completions": []string{},
+				"common":      "",
+				"base":        dir,
+			})
+			return
+		}
+
+		var matches []string
+		for _, e := range entries {
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			if partial == "" || strings.HasPrefix(e.Name(), partial) {
+				matches = append(matches, e.Name())
+			}
+		}
+		// cap at 20
+		if len(matches) > 20 {
+			matches = matches[:20]
+		}
+
+		// compute longest common prefix
+		common := ""
+		if len(matches) == 1 {
+			common = matches[0]
+		} else if len(matches) > 1 {
+			common = matches[0]
+			for _, m := range matches[1:] {
+				for !strings.HasPrefix(m, common) {
+					common = common[:len(common)-1]
+				}
+			}
+		}
+
+		// convert dir back to ~/ for display
+		base := dir
+		if strings.HasPrefix(base, home) {
+			base = "~" + base[len(home):]
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"prefix":      prefix,
+			"completions": matches,
+			"common":      common,
+			"base":        base,
+		})
+	}))
+
 	// List sessions (optional ?category=interactive to filter)
 	mux.HandleFunc("GET /api/sessions", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		all := sm.listSessions()
@@ -568,6 +641,7 @@ func handleServer(args []string) {
 			Category       string   `json:"category"`
 			Tags           []string `json:"tags"`
 			ReplaceSoul    *bool    `json:"replace_soul"` // nil → use config default
+			SpawnedBy      string   `json:"spawned_by"`   // parent session ID
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -605,6 +679,7 @@ func handleServer(args []string) {
 			Category:    req.Category,
 			Tags:        req.Tags,
 			ReplaceSoul: replaceSoul,
+			SpawnedBy:   req.SpawnedBy,
 		})
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
@@ -1112,11 +1187,21 @@ func handleServer(args []string) {
 		// Build spawn agent lookup: session_name → agent_id
 		spawnAgentMap := loadSpawnAgentMap()
 
+		// Collect IDs for batch DB query
+		sessionIDs := make([]string, len(all))
+		for i, s := range all {
+			sessionIDs[i] = s.ID
+		}
+		// Batch-load session meta from DB (category, model, cost) — single WHERE IN query
+		metaMap := batchLoadSessionMeta(sessionIDs)
+
 		// Convert to JSON-friendly format, applying category filter
 		items := make([]map[string]any, 0, len(all))
 		for _, s := range all {
-			// Look up category from DB via Claude session ID
-			cat := getSessionCategoryByClaudeSID(s.ID)
+			// Look up meta from batch (by claude_session_id which == JSONL s.ID)
+			meta := metaMap[s.ID]
+
+			cat := meta.Category
 			if cat == "" {
 				cat = inferCategoryFromName(s.Name, s.FirstMsg)
 			}
@@ -1133,19 +1218,32 @@ func handleServer(args []string) {
 			// Determine agent: DB record > spawn name match > default "main" for server sessions
 			agent := getSessionAgent(s.ID)
 			if agent == "" {
-				// Check if session name matches a spawn pattern
 				if a, ok := spawnAgentMap[s.Name]; ok {
 					agent = a
 				}
 			}
 
-			cost := getSessionCostByClaudeSID(s.ID)
+			// Prefer DB model (contains [1m] suffix) over JSONL-scanned model
+			model := meta.Model
+			if model == "" {
+				model = s.Model
+			}
+
+			// Cost: try live proxy first, then persisted from batch
+			cost := float64(0)
+			if meta.WeiranSID != "" {
+				cost = getSessionProxyCost(meta.WeiranSID)
+			}
+			if cost <= 0 {
+				cost = meta.Cost
+			}
+
 			items = append(items, map[string]any{
 				"id":            s.ID,
 				"name":          s.Name,
 				"title":         s.Title,
 				"project":       s.Project,
-				"model":         s.Model,
+				"model":         model,
 				"category":      cat,
 				"agent":         agent,
 				"first_msg":     s.FirstMsg,
@@ -1618,11 +1716,17 @@ func handleServer(args []string) {
 		http.ServeFile(w, r, filePath)
 	}))
 
+	// Dynamic branding: derive UI title from binary name (e.g. "weiran" → "Weiran", "soul" → "Soul")
+	appTitle := strings.ToUpper(appName[:1]) + appName[1:]
+	appInitial := strings.ToUpper(appName[:1])
+
 	// PWA assets (no auth — browser needs direct access during install)
+	renderedManifest := strings.ReplaceAll(string(manifestJSON), "{{.AppTitle}}", appTitle)
+	renderedManifestBytes := []byte(renderedManifest)
 	mux.HandleFunc("GET /manifest.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/manifest+json")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
-		w.Write(manifestJSON)
+		w.Write(renderedManifestBytes)
 	})
 	mux.HandleFunc("GET /service-worker.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
@@ -1646,6 +1750,8 @@ func handleServer(args []string) {
 	if cfg.DefaultReplaceSoul {
 		replaceSoulChecked = "checked"
 	}
+	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.AppTitle}}", appTitle)
+	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.AppInitial}}", appInitial)
 	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DefaultReplaceSoulChecked}}", replaceSoulChecked)
 	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DefaultReplaceSoul}}", fmt.Sprintf("%t", cfg.DefaultReplaceSoul))
 	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DefaultInteractiveModel}}", safeModel)

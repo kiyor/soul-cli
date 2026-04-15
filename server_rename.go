@@ -66,6 +66,9 @@ func openServerDB() (*sql.DB, error) {
 		// Migration: add model — persisted for rehydration (e.g. "claude-opus-4-6[1m]")
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`)
 
+		// Migration: add spawned_by for parent-child session tracking
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN spawned_by TEXT NOT NULL DEFAULT ''`)
+
 		// Migration: session_interactions table for IPC anti-loop tracking
 		serverDB.Exec(`CREATE TABLE IF NOT EXISTS session_interactions (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -501,6 +504,58 @@ func batchSuspendActiveSessions() int {
 	}
 	n, _ := res.RowsAffected()
 	return int(n)
+}
+
+// sessionMeta holds batch-loaded metadata from server_sessions DB.
+type sessionMeta struct {
+	WeiranSID string
+	Category  string
+	Model     string
+	Cost      float64
+}
+
+// batchLoadSessionMeta loads metadata for the given session IDs only (matched against
+// both session_id and claude_session_id columns via WHERE IN).
+func batchLoadSessionMeta(ids []string) map[string]sessionMeta {
+	if len(ids) == 0 {
+		return nil
+	}
+	db, err := openServerDB()
+	if err != nil {
+		return nil
+	}
+	ph := make([]string, len(ids))
+	for i := range ph {
+		ph[i] = "?"
+	}
+	in := strings.Join(ph, ",")
+	// Build args: same IDs used for both IN clauses
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	// Duplicate for the second IN clause
+	allArgs := append(args, args...)
+	rows, err := db.Query(fmt.Sprintf(
+		`SELECT session_id, claude_session_id, COALESCE(category,''), COALESCE(model,''), COALESCE(total_cost_usd,0)
+		 FROM server_sessions WHERE session_id IN (%s) OR claude_session_id IN (%s)`, in, in), allArgs...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	m := make(map[string]sessionMeta, len(ids))
+	for rows.Next() {
+		var sid, csid, cat, model string
+		var cost float64
+		if rows.Scan(&sid, &csid, &cat, &model, &cost) == nil {
+			meta := sessionMeta{WeiranSID: sid, Category: cat, Model: model, Cost: cost}
+			if csid != "" {
+				m[csid] = meta
+			}
+			m[sid] = meta
+		}
+	}
+	return m
 }
 
 // setSessionModel persists the model name for a session.

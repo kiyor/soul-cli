@@ -50,6 +50,7 @@ type serverSession struct {
 	FirstMsg      string          `json:"first_msg,omitempty"` // First user message (for hint display)
 	GalID         string          `json:"gal_id,omitempty"`    // GAL save id this session was resumed from
 	Todos         json.RawMessage `json:"todos,omitempty"`     // latest TodoWrite state (broadcast to all clients)
+	SpawnedBy     string          `json:"spawned_by,omitempty"` // parent session ID that spawned this one
 
 	process     *claudeProcess
 	broadcaster *sseBroadcaster
@@ -133,6 +134,12 @@ func (s *serverSession) snapshot() map[string]any {
 	if tags == nil {
 		tags = []string{}
 	}
+	var todosSnap json.RawMessage
+	if len(s.Todos) > 0 {
+		todosSnap = make(json.RawMessage, len(s.Todos))
+		copy(todosSnap, s.Todos)
+	}
+	spawnedBy := s.SpawnedBy
 	snap := map[string]any{
 		"id":                id,
 		"name":              s.Name,
@@ -153,9 +160,10 @@ func (s *serverSession) snapshot() map[string]any {
 		"chrome_enabled":    s.ChromeEnabled,
 		"replace_soul":      s.ReplaceSoul,
 		"first_msg":         s.FirstMsg,
+		"spawned_by":        spawnedBy,
 	}
-	if galID == "" {
-		galID = s.GalID // already read above, but keep for clarity
+	if todosSnap != nil {
+		snap["todos"] = todosSnap
 	}
 	s.mu.Unlock()
 
@@ -229,6 +237,21 @@ func makeOnResult(sess *serverSession, fullSync bool) func(json.RawMessage) {
 			newStatus := "idle"
 			if result.Subtype == "error" {
 				newStatus = "error"
+				// Detect 429/rate-limit in result text for ephemeral sessions.
+				// Claude Code handles 429 internally and may exit cleanly (code 0),
+				// so we must detect it here in stdout and flag the process for fallback.
+				if isEphemeralCategory(sess.Category) && len(sess.fallbackModels) > 0 && sess.process != nil {
+					lower := strings.ToLower(result.Result)
+					if strings.Contains(lower, "429") || strings.Contains(lower, "rate limit") ||
+						strings.Contains(lower, "too many requests") || strings.Contains(lower, "quota exceeded") {
+						proc := sess.process
+						sess.mu.Unlock()
+						proc.rateLimited.Store(true)
+						fmt.Fprintf(os.Stderr, "[%s] server: detected 429/rate-limit in result message, killing process for fallback\n", appName)
+						proc.cmd.Process.Kill()
+						return
+					}
+				}
 			}
 			sess.mu.Unlock()
 			sess.setStatus(newStatus)
@@ -284,21 +307,30 @@ func watchExit(proc *claudeProcess, sess *serverSession) {
 		if alreadyStopped {
 			return
 		}
-		if proc.exitCode != 0 {
-			// Check for rate_limit exit on ephemeral sessions — trigger model fallback
-			if isEphemeralCategory(category) && len(fallbacks) > 0 && sm != nil {
+		// Determine if this was a rate_limit exit (either from exit code classification
+		// or from real-time stderr detection via the rateLimited flag).
+		isRateLimit := false
+		if isEphemeralCategory(category) && len(fallbacks) > 0 && sm != nil {
+			if proc.rateLimited.Load() {
+				isRateLimit = true
+			} else if proc.exitCode != 0 {
 				event := classifyExitEvent(proc.exitCode, "", proc.stderrTail.String())
-				if event == "rate_limit" {
-					nextModel := fallbacks[0]
-					remaining := fallbacks[1:]
-					fmt.Fprintf(os.Stderr, "[%s] server: %s session %s hit rate_limit on %s, falling back to %s\n",
-						appName, category, shortID(sess.ID), model, nextModel)
-					// Fire-and-forget retry with next fallback model
-					go retryWithFallbackModel(sm, sess, nextModel, remaining, taskMsg, claudeSID)
-					sess.setStatus("error")
-					return
-				}
+				isRateLimit = (event == "rate_limit")
 			}
+		}
+
+		if isRateLimit {
+			nextModel := fallbacks[0]
+			remaining := fallbacks[1:]
+			fmt.Fprintf(os.Stderr, "[%s] server: %s session %s hit rate_limit on %s, falling back to %s\n",
+				appName, category, shortID(sess.ID), model, nextModel)
+			// Fire-and-forget retry with next fallback model
+			go retryWithFallbackModel(sm, sess, nextModel, remaining, taskMsg, claudeSID)
+			sess.setStatus("error")
+			return
+		}
+
+		if proc.exitCode != 0 {
 			sess.setStatus("error")
 		} else {
 			sess.setStatus("stopped")
@@ -406,13 +438,32 @@ func (s *serverSession) waitBridgeDone() {
 
 // drainStderr reads stderr to prevent pipe deadlock, capturing the last 4KB
 // in proc.stderrTail for exit event classification (e.g. rate_limit detection).
-func drainStderr(proc *claudeProcess) {
+// For ephemeral sessions with fallback models, it also detects 429/rate-limit
+// errors in real time and kills the process to trigger model fallback via watchExit.
+func drainStderr(proc *claudeProcess, sess *serverSession) {
+	// Determine if we should monitor for rate-limit errors
+	sess.mu.Lock()
+	shouldMonitor := isEphemeralCategory(sess.Category) && len(sess.fallbackModels) > 0
+	sess.mu.Unlock()
+
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := proc.stderr.Read(buf)
 			if n > 0 {
 				proc.stderrTail.Write(buf[:n])
+
+				// Real-time 429 detection for ephemeral sessions
+				if shouldMonitor && !proc.rateLimited.Load() {
+					chunk := strings.ToLower(string(buf[:n]))
+					if strings.Contains(chunk, "429") || strings.Contains(chunk, "rate limit") ||
+						strings.Contains(chunk, "too many requests") || strings.Contains(chunk, "quota exceeded") {
+						proc.rateLimited.Store(true)
+						fmt.Fprintf(os.Stderr, "[%s] server: detected 429/rate-limit in stderr, killing process for fallback\n", appName)
+						proc.cmd.Process.Kill()
+						return
+					}
+				}
 			}
 			if err != nil {
 				return
@@ -443,7 +494,7 @@ func attachProcessBridge(proc *claudeProcess, sess *serverSession, source string
 	sess.bridgeDone = doneCh
 	sess.mu.Unlock()
 	watchExit(proc, sess)
-	drainStderr(proc)
+	drainStderr(proc, sess)
 }
 
 // makeOnMemoryAudit returns a callback that logs memory operations to the audit DB.
@@ -499,6 +550,7 @@ type sessionCreateOpts struct {
 	EnvOverride string   // if set, replaces the environment section in BOOT.md
 	ReplaceSoul bool     // 本我模式 — use --system-prompt-file instead of --append-system-prompt-file
 	ResumeID    string   // Claude Code session ID to resume (adds --resume <id>)
+	SpawnedBy   string   // parent session ID that spawned this one
 }
 
 // createSession spawns a new Claude Code session.
@@ -564,21 +616,10 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		broadcaster: bc,
 		hub:         sm.hub,
 		GalID:       opts.GalID,
+		SpawnedBy:   opts.SpawnedBy,
 	}
 
 	sm.mu.Lock()
-	if category == CategoryInteractive {
-		interactiveCount := 0
-		for _, s := range sm.sessions {
-			if s.Category == CategoryInteractive {
-				interactiveCount++
-			}
-		}
-		if interactiveCount >= sm.maxSessions {
-			sm.mu.Unlock()
-			return nil, fmt.Errorf("max interactive sessions reached (%d)", sm.maxSessions)
-		}
-	}
 	// Register immediately to hold the slot (status="starting")
 	sm.sessions[id] = sess
 	sm.mu.Unlock()
@@ -641,6 +682,9 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 	ensureServerSessionFull(id, opts.Name, category, opts.Tags)
 	if opts.Model != "" {
 		setSessionModel(id, opts.Model)
+	}
+	if opts.SpawnedBy != "" {
+		updateSpawnedBy(id, opts.SpawnedBy)
 	}
 	if opts.GalID != "" {
 		setGalID(id, opts.GalID)
@@ -1119,17 +1163,6 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 			return s, nil
 		}
 	}
-	// Only count interactive sessions toward maxSessions
-	interactiveCount := 0
-	for _, s := range sm.sessions {
-		if s.Category == CategoryInteractive {
-			interactiveCount++
-		}
-	}
-	if interactiveCount >= sm.maxSessions {
-		sm.mu.Unlock()
-		return nil, fmt.Errorf("max interactive sessions reached (%d)", sm.maxSessions)
-	}
 	// Register placeholder to hold the slot
 	sm.sessions[id] = sess
 	sm.mu.Unlock()
@@ -1268,7 +1301,9 @@ func (sm *sessionManager) rehydrateSessions() {
 		if resumeMsg == "" {
 			resumeMsg = "⚠️ Server was restarted. Your previous session was interrupted — " +
 				"any in-flight tool calls (Bash, etc.) were killed and did NOT complete. " +
-				"Do NOT assume they succeeded. Report your current status and wait for instructions."
+				"Do NOT assume they succeeded. Report your current status and wait for instructions. " +
+				"IMPORTANT: If YOU triggered this restart (e.g. via `make restart`, `launchctl stop/start`, or similar), " +
+				"do NOT restart again — it already happened."
 		}
 
 		fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: restoring %s (model=%q, claude_sid=%s)\n",
@@ -1425,6 +1460,43 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 				all = append(all, historyMessage{
 					Role:      "user",
 					Content:   text,
+					Timestamp: ev.Timestamp,
+				})
+			}
+
+		case "system":
+			var sysPeek struct {
+				Subtype     string `json:"subtype"`
+				CompactMeta struct {
+					Trigger   string `json:"trigger"`
+					PreTokens int    `json:"preTokens"`
+					PreTokens2 int   `json:"pre_tokens"`
+				} `json:"compactMetadata"`
+				CompactMeta2 struct {
+					Trigger   string `json:"trigger"`
+					PreTokens int    `json:"preTokens"`
+					PreTokens2 int   `json:"pre_tokens"`
+				} `json:"compact_metadata"`
+			}
+			if json.Unmarshal(line, &sysPeek) == nil && sysPeek.Subtype == "compact_boundary" {
+				// Merge both naming conventions: pick non-zero from either struct
+				trigger := sysPeek.CompactMeta.Trigger
+				if trigger == "" {
+					trigger = sysPeek.CompactMeta2.Trigger
+				}
+				tokens := sysPeek.CompactMeta.PreTokens
+				if tokens == 0 {
+					tokens = sysPeek.CompactMeta.PreTokens2
+				}
+				if tokens == 0 {
+					tokens = sysPeek.CompactMeta2.PreTokens
+				}
+				if tokens == 0 {
+					tokens = sysPeek.CompactMeta2.PreTokens2
+				}
+				all = append(all, historyMessage{
+					Role:      "compact_boundary",
+					Content:   fmt.Sprintf("compact_boundary|%s|%d", trigger, tokens),
 					Timestamp: ev.Timestamp,
 				})
 			}
