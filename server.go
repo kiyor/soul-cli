@@ -456,7 +456,7 @@ func handleServer(args []string) {
 		providers, _ := loadAllProviders()
 		var infos []providerInfo
 		for name, prov := range providers {
-			if prov.BaseURL == "" && prov.Type != "openai" {
+			if prov.BaseURL == "" && prov.Type != "openai" && prov.Type != "ollama" {
 				continue
 			}
 			infos = append(infos, providerInfo{Name: name, Models: prov.Models})
@@ -492,6 +492,32 @@ func handleServer(args []string) {
 			return
 		}
 		serverOpenAIProxies.Store(providerName, port)
+		writeJSON(w, http.StatusOK, map[string]int{"port": port})
+	}))
+
+	// Ollama proxy management: start ollama proxy in server process and return port.
+	// GET /api/proxy/ollama?provider=ollama
+	mux.HandleFunc("GET /api/proxy/ollama", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		providerName := r.URL.Query().Get("provider")
+		if providerName == "" {
+			http.Error(w, "provider query param required", http.StatusBadRequest)
+			return
+		}
+		provider := resolveProvider(providerName)
+		if provider == nil || provider.Type != "ollama" {
+			http.Error(w, "provider not found or not ollama type", http.StatusNotFound)
+			return
+		}
+		if cached, ok := serverOllamaProxies.Load(providerName); ok {
+			writeJSON(w, http.StatusOK, map[string]int{"port": cached.(int)})
+			return
+		}
+		port, err := startOllamaProxy(*provider)
+		if err != nil {
+			http.Error(w, "start proxy: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		serverOllamaProxies.Store(providerName, port)
 		writeJSON(w, http.StatusOK, map[string]int{"port": port})
 	}))
 
@@ -573,9 +599,15 @@ func handleServer(args []string) {
 				matches = append(matches, e.Name())
 			}
 		}
-		// cap at 20
-		if len(matches) > 20 {
-			matches = matches[:20]
+		// cap results (default 20 for tab-complete, higher for browse mode)
+		limit := 20
+		if lq := r.URL.Query().Get("limit"); lq != "" {
+			if n, err := strconv.Atoi(lq); err == nil && n > 0 && n <= 200 {
+				limit = n
+			}
+		}
+		if len(matches) > limit {
+			matches = matches[:limit]
 		}
 
 		// compute longest common prefix

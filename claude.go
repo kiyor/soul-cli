@@ -450,6 +450,23 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 		}
 		filtered = append(filtered, fmt.Sprintf("ANTHROPIC_BASE_URL=http://127.0.0.1:%d", port))
 		filtered = append(filtered, "ANTHROPIC_AUTH_TOKEN=dummy")
+	} else if provider.Type == "ollama" {
+		// Ollama: start embedded proxy that translates Anthropic → OpenAI chat/completions.
+		var port int
+		if serverPort := detectServerOllamaProxy(providerName); serverPort > 0 {
+			port = serverPort
+			fmt.Fprintf(os.Stderr, "[%s] using provider %q → server ollama proxy http://127.0.0.1:%d\n", appName, providerName, port)
+		} else {
+			var err error
+			port, err = startOllamaProxy(*provider)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] failed to start ollama proxy: %v\n", appName, err)
+				return env, false
+			}
+			fmt.Fprintf(os.Stderr, "[%s] using provider %q → embedded ollama proxy http://127.0.0.1:%d\n", appName, providerName, port)
+		}
+		filtered = append(filtered, fmt.Sprintf("ANTHROPIC_BASE_URL=http://127.0.0.1:%d", port))
+		filtered = append(filtered, "ANTHROPIC_AUTH_TOKEN=dummy")
 	} else {
 		fmt.Fprintf(os.Stderr, "[%s] using provider %q → %s\n", appName, providerName, provider.BaseURL)
 		filtered = append(filtered, "ANTHROPIC_BASE_URL="+provider.BaseURL)

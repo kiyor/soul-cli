@@ -272,6 +272,8 @@ body{
 @keyframes si-zzz{0%,100%{transform:translateY(0) scale(0.85);opacity:.5}50%{transform:translateY(-3px) scale(1);opacity:1}}
 .si .si-dot.stopped,.si .si-dot.error{width:8px;height:8px;border-radius:99px;background:var(--bad)}
 .si .si-dot.starting{width:8px;height:8px;border-radius:99px;background:var(--accent);animation:pulse .8s ease-in-out infinite}
+.sid-chip,.sid-cell{cursor:pointer;border-radius:3px;padding:0 3px;transition:background .15s;font-family:var(--mono);font-size:11px}
+.sid-chip:hover,.sid-cell:hover{background:var(--surface2);color:var(--accent)}
 .si .si-sub{font-size:10px;color:var(--muted2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px;font-family:var(--mono)}
 .si .si-meta{font-size:10px;color:var(--muted2);font-family:var(--mono);display:flex;gap:6px}
 .si-actions{
@@ -1159,7 +1161,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 .voice-btn.transcribing{color:var(--muted2);opacity:.6;pointer-events:none}
 @keyframes voice-pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.15);opacity:.7}}
 .voice-timer{position:absolute;bottom:100%;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.8);color:#ff4444;font-size:11px;padding:2px 8px;border-radius:8px;white-space:nowrap;margin-bottom:4px;font-variant-numeric:tabular-nums}
-.voice-btn{position:relative}
+.voice-btn{position:relative;z-index:10}
 .voice-cancel-btn{display:none;width:36px;height:36px;border-radius:10px;border:none;flex-shrink:0;background:rgba(255,68,68,.12);color:#ff4444;font-size:16px;font-weight:bold;cursor:pointer;place-items:center;transition:all .15s;align-self:flex-end;margin-bottom:4px}
 .voice-cancel-btn.show{display:grid}
 .voice-cancel-btn:hover{background:rgba(255,68,68,.25)}
@@ -1249,6 +1251,60 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   80%{transform:translateX(2px)}
 }
 .shake{animation:shake .35s ease}
+
+/* ── Path Browse Button ── */
+.path-complete-wrap{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0}
+#m-project{flex:1;min-width:0;padding-right:42px}
+.path-browse-btn{
+  position:absolute;right:8px;top:50%;transform:translateY(-50%);
+  background:none;border:none;font-size:18px;cursor:pointer;padding:4px 6px;
+  border-radius:6px;line-height:1;z-index:2;opacity:.7;transition:opacity .15s;
+}
+.path-browse-btn:hover,.path-browse-btn:active{opacity:1;background:rgba(var(--accent-rgb,.5),.1)}
+
+/* ── Path Browser Panel ── */
+.path-browser{
+  display:none;width:100%;margin-top:6px;
+  background:var(--panel);border:1px solid var(--border2);border-radius:12px;
+  box-shadow:0 8px 24px rgba(0,0,0,.12);overflow:hidden;
+}
+.path-browser.show{display:block}
+.pb-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 14px;border-bottom:1px solid var(--border2);
+  background:rgba(var(--accent-rgb,.5),.05);
+}
+.pb-path{
+  font-family:var(--mono);font-size:12px;color:var(--muted);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;
+  direction:rtl;text-align:left;
+}
+.pb-close{
+  background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;
+  padding:2px 6px;border-radius:6px;margin-left:8px;flex-shrink:0;
+}
+.pb-close:hover{color:var(--text);background:rgba(var(--accent-rgb,.5),.1)}
+.pb-list{max-height:260px;overflow-y:auto;padding:4px 0}
+.pb-item{
+  display:flex;align-items:center;padding:10px 14px;gap:10px;
+  font-size:13px;font-family:var(--mono);color:var(--text);cursor:pointer;
+  transition:background .1s;
+}
+.pb-item:active,.pb-item:hover{background:rgba(var(--accent-rgb,.5),.08)}
+.pb-item-icon{font-size:14px;flex-shrink:0}
+.pb-item-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pb-item-select{
+  font-size:11px;color:var(--accent);background:rgba(var(--accent-rgb,.5),.1);
+  border:none;border-radius:6px;padding:4px 10px;cursor:pointer;flex-shrink:0;
+  opacity:0;transition:opacity .15s;
+}
+.pb-item:hover .pb-item-select,.pb-item:active .pb-item-select{opacity:1}
+@media(max-width:768px){
+  .pb-item-select{opacity:1}
+  .hide-mobile{display:none}
+}
+.pb-empty{padding:20px 14px;text-align:center;font-size:13px;color:var(--muted)}
+.pb-loading{padding:20px 14px;text-align:center;font-size:13px;color:var(--muted)}
 
 /* ── Toast ── */
 .toast-container{
@@ -1415,6 +1471,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
         <button class="sniff-dropdown-item" onclick="setHash('usage');showSniffUsage();closeSniffMenu()">📈 Usage</button>
         <button class="sniff-dropdown-item" onclick="setHash('logs');showSniffLogs();closeSniffMenu()">📋 Logs</button>
         <button class="sniff-dropdown-item" onclick="setHash('memory');showSniffMemory();closeSniffMenu()">🧠 Memory</button>
+        <button class="sniff-dropdown-item" onclick="setHash('telemetry');showSniffTelemetry();closeSniffMenu()">📡 Telemetry</button>
       </div>
     </div>
   </div>
@@ -1575,10 +1632,18 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   <h2>New Session</h2>
   <label>Name</label>
   <input type="text" id="m-name" placeholder="e.g. fix-nginx-config">
-  <label>Project directory <span style="font-size:10px;color:var(--muted2)">(Tab to autocomplete)</span></label>
+  <label>Project directory <span style="font-size:10px;color:var(--muted2)" class="hide-mobile">(Tab to autocomplete)</span></label>
   <div class="path-complete-wrap">
     <input type="text" id="m-project" placeholder="Leave empty for default workspace" autocomplete="off">
+    <button type="button" class="path-browse-btn" id="pc-browse" title="Browse folders">📁</button>
     <div class="path-complete-dropdown" id="pc-dropdown"></div>
+    <div class="path-browser" id="pc-browser">
+      <div class="pb-header">
+        <span class="pb-path" id="pb-path">~</span>
+        <button class="pb-close" id="pb-close">✕</button>
+      </div>
+      <div class="pb-list" id="pb-list"></div>
+    </div>
   </div>
   <label>Model</label>
   <select id="m-model" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font-size:14px;font-family:var(--sans);margin-bottom:14px;outline:none">
@@ -2208,6 +2273,10 @@ async function initApp(){
     updateSlashDropdown();
   });
 
+  // IME composition guard — suppress Enter immediately after compositionend
+  let imeJustFinished=false;
+  inp.addEventListener('compositionend',()=>{imeJustFinished=true;setTimeout(()=>imeJustFinished=false,0)});
+
   // Keyboard handling
   inp.addEventListener('keydown',e=>{
     const dd=document.getElementById('slash-dropdown');
@@ -2219,7 +2288,7 @@ async function initApp(){
       }
       if(e.key==='Escape'){dd.classList.remove('show');slashDropdownIdx=-1;e.preventDefault();return}
     }
-    if(e.key==='Enter'){
+    if(e.key==='Enter'&&!e.isComposing&&!imeJustFinished){
       if(isMobile&&!e.shiftKey){e.preventDefault();sendMessage()}
       else if(!isMobile&&e.shiftKey){e.preventDefault();sendMessage()}
     }
@@ -2629,8 +2698,8 @@ function handleSessionsUpdate(list){
     const cost=rawCost>0?fmtCost(rawCost):'';
     const modelDisplay=shortModelName(s.model);
     const title=s.first_msg||s.name||shortId(s.id);
-    const sub=shortId(s.id)+' · '+(s.name||shortId(s.id));
-    el.innerHTML=`<div class="si-top"><span class="si-title" title="${esc(title)}">${esc(title)}</span><span class="si-dot ${s.status}">${s.status==='running'?'<span></span>':''}</span></div><div class="si-sub">${esc(sub)}</div><div class="si-meta"><span class="${modelClass(s.model)}">${modelDisplay}</span><span>${s.status}</span><span>${s.num_turns||0}t</span>${cost?'<span>'+cost+'</span>':''}</div><div class="si-actions"><button class="si-rename" onclick="event.stopPropagation();promptRename('${s.id}','${esc(s.name||'')}')">&#9998;</button><button class="si-del" onclick="openDestroySheet('${s.id}')">&times;</button></div>`;
+    const sub=s.name||shortId(s.id);
+    el.innerHTML=`<div class="si-top"><span class="si-title" title="${esc(title)}">${esc(title)}</span><span class="si-dot ${s.status}">${s.status==='running'?'<span></span>':''}</span></div><div class="si-sub"><span class="sid-chip" onclick="event.stopPropagation();copySid(this,'${s.id}')" title="Click to copy ID">${shortId(s.id)}</span> · ${esc(sub)}</div><div class="si-meta"><span class="${modelClass(s.model)}">${modelDisplay}</span><span>${s.status}</span><span>${s.num_turns||0}t</span>${cost?'<span>'+cost+'</span>':''}</div><div class="si-actions"><button class="si-rename" onclick="event.stopPropagation();promptRename('${s.id}','${esc(s.name||'')}')">&#9998;</button><button class="si-del" onclick="openDestroySheet('${s.id}')">&times;</button></div>`;
   });
   existing.forEach((el,id)=>{if(!newIds.has(id)){el.remove();_notifiedSessions.delete(id)}});
   _updateTitleBadge();
@@ -2962,8 +3031,12 @@ function finalizeStream(){
   }
   if(typeRAF){cancelAnimationFrame(typeRAF);typeRAF=null}
   const finEl=streamingMsgEl;
+  // Store final markdown for copy
+  const mdEl=finEl.querySelector('.md');
+  if(mdEl&&typeRendered)mdEl.dataset.raw=typeRendered;
   streamingMsgEl.classList.remove('streaming');
   streamingMsgEl.querySelectorAll('pre code').forEach(el=>{try{hljs.highlightElement(el)}catch(e){}});
+  injectCodeCopyButtons(finEl);
   streamingMsgEl=null;streamingText='';typeRendered='';typeBuf='';
   if(!showToolsMode){setThinking(false);clearTicker()}
   injectLinkPreviews(finEl);
@@ -3229,6 +3302,10 @@ function createMsg(type,av,name,text,ts){
   const rendered=type==='user'?renderUserMsg(text):renderMd(text);
   const avatarInner=(type==='ai'&&agentAvatarURL)?`<img src="${esc(agentAvatarURL)}" alt="${esc(av)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">`:(type==='user'&&userAvatarURL)?`<img src="${esc(userAvatarURL)}" alt="${esc(av)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">`:esc(av);
   el.innerHTML=`<div class="msghead"><div class="avatar ${type}">${avatarInner}</div><div class="who"><span class="name">${esc(name)}</span><span class="meta">${timeStr(ts)}</span></div></div><div class="body"><div class="copy-msg"><button onclick="copyText(this)">Copy</button></div><div class="md">${rendered}</div></div>`;
+  // Store original markdown for copy
+  const mdEl=el.querySelector('.md');
+  if(mdEl&&text)mdEl.dataset.raw=text;
+  injectCodeCopyButtons(el);
   return el;
 }
 
@@ -3480,9 +3557,11 @@ async function handleVoiceData(){
     const data=await r.json();
     if(!r.ok)throw new Error(data.error||'transcription failed');
     if(data.transcript){
-      // Auto-send the transcribed text
-      wsSend({type:'send',sid:activeSessionId,message:data.transcript});
-      setThinking(true);
+      // Put transcribed text into input box, let user send manually
+      const inp=document.getElementById('input');
+      inp.value=data.transcript;
+      inp.focus();
+      inp.dispatchEvent(new Event('input'));
     }
   }catch(e){
     showToast('语音转写失败: '+e.message);
@@ -3498,7 +3577,7 @@ function showToast(msg){
   if(!t){
     t=document.createElement('div');
     t.id='voice-toast';
-    t.style.cssText='position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.85);color:#fff;padding:8px 16px;border-radius:12px;font-size:13px;z-index:9999;transition:opacity .3s';
+    t.style.cssText='position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.85);color:#fff;padding:8px 16px;border-radius:12px;font-size:13px;z-index:9999;transition:opacity .3s;pointer-events:none';
     document.body.appendChild(t);
   }
   t.textContent=msg;t.style.opacity='1';
@@ -3612,6 +3691,97 @@ function closeNewSheet(){
   inp.addEventListener('input',closeDD);
   document.addEventListener('click',function(e){
     if(!inp.contains(e.target)&&!dd.contains(e.target))closeDD();
+  });
+})();
+
+// ── Path Browser (mobile-friendly folder explorer) ──
+(function(){
+  const inp=document.getElementById('m-project');
+  const browseBtn=document.getElementById('pc-browse');
+  const browser=document.getElementById('pc-browser');
+  const pbPath=document.getElementById('pb-path');
+  const pbList=document.getElementById('pb-list');
+  const pbClose=document.getElementById('pb-close');
+  let currentDir='~/';
+
+  browseBtn.addEventListener('click',function(e){
+    e.stopPropagation();
+    if(browser.classList.contains('show')){closeBrowser();return}
+    // start from input value or ~/
+    let start=inp.value.trim()||'~/';
+    if(!start.endsWith('/'))start=start.replace(/\/[^/]*$/,'/')||'~/';
+    if(start==='~')start='~/';
+    loadDir(start);
+    browser.classList.add('show');
+  });
+
+  pbClose.addEventListener('click',function(e){e.stopPropagation();closeBrowser()});
+
+  async function loadDir(dir){
+    currentDir=dir;
+    pbPath.textContent=dir;
+    pbList.innerHTML='<div class="pb-loading">Loading...</div>';
+    try{
+      const r=await fetch('/api/complete-path?prefix='+encodeURIComponent(dir)+'&limit=100',{headers:{'Authorization':'Bearer '+TOKEN}});
+      if(!r.ok){pbList.innerHTML='<div class="pb-empty">Cannot read directory</div>';return}
+      const data=await r.json();
+      const matches=data.completions||[];
+      const base=data.base||dir.replace(/\/$/,'');
+      renderList(matches,base);
+    }catch(err){
+      pbList.innerHTML='<div class="pb-empty">Error loading directory</div>';
+    }
+  }
+
+  function renderList(matches,base){
+    pbList.innerHTML='';
+    // parent dir button (unless at ~)
+    if(currentDir!=='~/'&&currentDir!=='~'){
+      const up=document.createElement('div');
+      up.className='pb-item';
+      up.innerHTML='<span class="pb-item-icon">⬆️</span><span class="pb-item-name">..</span>';
+      up.addEventListener('click',function(e){
+        e.stopPropagation();
+        let parent=base.replace(/\/[^/]+$/,'');
+        if(!parent||parent==='~')parent='~/';
+        else parent+='/';
+        loadDir(parent);
+      });
+      pbList.appendChild(up);
+    }
+    if(matches.length===0){
+      const empty=document.createElement('div');
+      empty.className='pb-empty';
+      empty.textContent='No subdirectories';
+      pbList.appendChild(empty);
+      return;
+    }
+    matches.forEach(function(name){
+      const row=document.createElement('div');
+      row.className='pb-item';
+      const icon=document.createElement('span');
+      icon.className='pb-item-icon';icon.textContent='📁';
+      const label=document.createElement('span');
+      label.className='pb-item-name';label.textContent=name;
+      const selBtn=document.createElement('button');
+      selBtn.className='pb-item-select';selBtn.textContent='Select';
+      selBtn.addEventListener('click',function(e){
+        e.stopPropagation();
+        inp.value=base+'/'+name;
+        closeBrowser();
+      });
+      row.appendChild(icon);row.appendChild(label);row.appendChild(selBtn);
+      // click row name = enter directory
+      row.addEventListener('click',function(e){e.stopPropagation();loadDir(base+'/'+name+'/')});
+      pbList.appendChild(row);
+    });
+  }
+
+  function closeBrowser(){browser.classList.remove('show');pbList.innerHTML=''}
+
+  // close when clicking outside
+  document.addEventListener('click',function(e){
+    if(!browser.contains(e.target)&&e.target!==browseBtn)closeBrowser();
   });
 })();
 
@@ -3748,7 +3918,7 @@ function renderHistory(query){
     const model=shortModelName(s.model);
     const cat=s.category||'interactive';
     const catBadge=historyCat==='all'?`<span style="opacity:.6">${catIcons[cat]||'?'}</span> `:'';
-    const meta=[shortId(s.id),relTime(s.mod_time),(s.messages||'?')+'msg',model].filter(Boolean).join(' \u00b7 ');
+    const metaRest=[relTime(s.mod_time),(s.messages||'?')+'msg',model].filter(Boolean).join(' \u00b7 ');
     // Check if this history session is already active (by id or resumed_from)
     let activeSid=null;
     if(sessions[s.id]){activeSid=s.id}
@@ -3758,7 +3928,7 @@ function renderHistory(query){
       el.classList.add('hi-live');
       if(activeSid===activeSessionId)el.classList.add('hi-active');
     }
-    el.innerHTML=`<div class="hi-title" title="${esc(d)}">${catBadge}${esc(d)}</div><div class="hi-meta">${esc(meta)}</div>${s.summary?'<div class="hi-summary">'+esc(s.summary)+'</div>':''}`;
+    el.innerHTML=`<div class="hi-title" title="${esc(d)}">${catBadge}${esc(d)}</div><div class="hi-meta"><span class="sid-chip" onclick="event.stopPropagation();copySid(this,'${s.id}')" title="Click to copy ID">${shortId(s.id)}</span> · ${esc(metaRest)}</div>${s.summary?'<div class="hi-summary">'+esc(s.summary)+'</div>':''}`;
     el.onclick=()=>{
       if(activeSid){selectSession(activeSid);if(isMobile)closeSidebar();return}
       doResume(s.id,d,s.model);
@@ -4836,8 +5006,37 @@ function scrollBottomSmooth(){
 }
 function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,160)+'px'}
 function copyText(btn){
+  // Single click = markdown, double click = HTML
+  if(btn._copyTimer){clearTimeout(btn._copyTimer);btn._copyTimer=null;copyHtml(btn);return}
+  btn._copyTimer=setTimeout(()=>{btn._copyTimer=null;copyMd(btn)},250);
+}
+function copyMd(btn){
   const md=btn.closest('.body').querySelector('.md');
-  navigator.clipboard.writeText(md.innerText).then(()=>{btn.textContent='Copied!';setTimeout(()=>btn.textContent='Copy',1500)});
+  const text=md.dataset.raw||md.innerText;
+  navigator.clipboard.writeText(text).then(()=>{btn.textContent='MD ✓';setTimeout(()=>btn.textContent='Copy',1500)});
+}
+function copyHtml(btn){
+  const md=btn.closest('.body').querySelector('.md');
+  const html=md.innerHTML;
+  const blob=new Blob([html],{type:'text/html'});
+  const item=new ClipboardItem({'text/html':blob,'text/plain':new Blob([md.innerText],{type:'text/plain'})});
+  navigator.clipboard.write([item]).then(()=>{btn.textContent='HTML ✓';setTimeout(()=>btn.textContent='Copy',1500)});
+}
+function copyCode(btn){
+  const pre=btn.closest('pre');
+  const code=pre.querySelector('code');
+  navigator.clipboard.writeText(code.textContent).then(()=>{btn.textContent='Copied!';setTimeout(()=>btn.textContent='Copy',1500)});
+}
+function injectCodeCopyButtons(el){
+  if(!el)return;
+  el.querySelectorAll('pre').forEach(pre=>{
+    if(pre.querySelector('.code-actions'))return;
+    const acts=document.createElement('div');acts.className='code-actions';
+    const btn=document.createElement('button');btn.className='codebtn';btn.textContent='Copy';
+    btn.onclick=function(){copyCode(this)};
+    acts.appendChild(btn);
+    pre.appendChild(acts);
+  });
 }
 function relTime(iso){
   if(!iso)return '';
@@ -4854,6 +5053,7 @@ function handleHashRoute(){
   if(hash==='usage'&&window._sniffEnabled){showSniffUsage();return}
   if(hash==='logs'&&window._sniffEnabled){showSniffLogs();return}
   if(hash==='memory'&&window._sniffEnabled){showSniffMemory();return}
+  if(hash==='telemetry'&&window._sniffEnabled){showSniffTelemetry();return}
 }
 function setHash(h){location.hash=h}
 
@@ -4897,6 +5097,14 @@ function fmtTokens(n){
   if(n>=1000000)return (n/1000000).toFixed(1)+'M';
   if(n>=1000)return (n/1000).toFixed(1)+'k';
   return String(n);
+}
+function fmtInput(net,cacheR,cacheW){
+  const total=net+cacheR+cacheW;
+  if(!total)return '0';
+  const hitPct=total>0?Math.round((cacheR/total)*100):0;
+  const t=fmtTokens(total);
+  if(cacheR>0)return `${t} <span style="opacity:.5;font-size:10px" title="net=${net} cache_read=${cacheR} cache_write=${cacheW}">(${hitPct}%)</span>`;
+  return t;
 }
 
 async function showSniffUsage(){
@@ -5172,9 +5380,28 @@ function sniffBuildParams(){
   if(model&&model.value)p.set('model',model.value);
   if(error&&error.checked)p.set('error','true');
   if(status&&status.value)p.set('status',status.value);
+  const sess=document.getElementById('sniff-log-session');
+  if(sess&&sess.value)p.set('session_id',sess.value);
+  const ccSess=document.getElementById('sniff-log-cc-session');
+  if(ccSess&&ccSess.value)p.set('cc_session_id',ccSess.value);
+  const ph=document.getElementById('sniff-log-prompt-hash');
+  if(ph&&ph.value)p.set('prompt_hash',ph.value);
   const since=sniffLogSinceISO();
   if(since)p.set('since',since);
   return p;
+}
+function copySid(el,sid){
+  if(!sid)return;
+  navigator.clipboard.writeText(sid).then(()=>{
+    const orig=el.textContent;el.textContent='✓';setTimeout(()=>el.textContent=orig,1000);
+  });
+}
+function sniffFilterByField(field,val){
+  if(!val)return;
+  const elMap={session_id:'sniff-log-session',cc_session_id:'sniff-log-cc-session',prompt_hash:'sniff-log-prompt-hash'};
+  const sel=document.getElementById(elMap[field]);
+  if(sel){sel.value=val}
+  sniffLogPage=0;showSniffLogs(0);
 }
 function sniffSortBy(col){
   if(sniffLogSort===col){sniffLogDir=sniffLogDir==='desc'?'asc':'desc'}
@@ -5317,6 +5544,7 @@ async function showSniffMemory(){
   }
 }
 
+
 function modelClass(m){if(!m)return '';const l=m.toLowerCase();if(l.includes('opus'))return 'model-opus';if(l.includes('haiku'))return 'model-haiku';if(l.includes('glm'))return 'model-sonnet';if(l.includes('minimax'))return 'model-sonnet';return 'model-sonnet'}
 function shortModelName(m){if(!m)return 'default';const l=m.toLowerCase();if(l.includes('[1m]')){if(l.includes('opus'))return 'opus(1M)';if(l.includes('sonnet'))return 'sonnet(1M)'}if(l.includes('opus'))return 'opus';if(l.includes('sonnet'))return 'sonnet';if(l.includes('haiku'))return 'haiku';if(l.includes('/'))return m.split('/').pop();return m.replace(/^claude-/,'')}
 function statusClass(s){if(s>=500)return 'status-5xx';if(s>=400)return 'status-4xx';return 'status-2xx'}
@@ -5344,14 +5572,18 @@ async function showSniffLogs(page){
   const prevModel=(document.getElementById('sniff-log-model')||{}).value||'';
   const prevError=(document.getElementById('sniff-log-error')||{}).checked||false;
   const prevStatus=(document.getElementById('sniff-log-status')||{}).value||'';
+  const prevSession=(document.getElementById('sniff-log-session')||{}).value||'';
+  const prevCcSession=(document.getElementById('sniff-log-cc-session')||{}).value||'';
+  const prevPromptHash=(document.getElementById('sniff-log-prompt-hash')||{}).value||'';
+
+  // Build params BEFORE clearing DOM (innerHTML destroys the filter dropdowns)
+  const params=sniffBuildParams();
 
   showSniffPanel('Logs');
   const el=document.getElementById('sniff-content');
   el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted2)">Loading...</div>';
 
   try{
-    // Fetch filters + logs in parallel
-    const params=sniffBuildParams();
     const [logsR,filtersR]=await Promise.all([
       fetch(`/api/proxy/logs?${params}`,{headers:{'Authorization':'Bearer '+TOKEN}}),
       fetch('/api/proxy/logs/filters',{headers:{'Authorization':'Bearer '+TOKEN}})
@@ -5367,6 +5599,9 @@ async function showSniffLogs(page){
 
     // Model options from server
     const modelOpts=(filters.models||[]).map(m=>`<option value="${esc(m)}"${m===prevModel?' selected':''}>${shortModel(m)}</option>`).join('');
+    const sessionOpts=(filters.sessions||[]).map(s=>`<option value="${esc(s.id)}"${s.id===prevSession?' selected':''}>${s.short}</option>`).join('');
+    const ccSessionOpts=(filters.cc_sessions||[]).map(s=>`<option value="${esc(s.id)}"${s.id===prevCcSession?' selected':''}>${s.short}</option>`).join('');
+    const promptHashOpts=(filters.prompt_hashes||[]).map(h=>`<option value="${esc(h)}"${h===prevPromptHash?' selected':''}>${h}</option>`).join('');
 
     let html='';
 
@@ -5377,6 +5612,15 @@ async function showSniffLogs(page){
       </div>
       <select id="sniff-log-model" onchange="sniffLogPage=0;showSniffLogs(0)">
         <option value="">All models</option>${modelOpts}
+      </select>
+      <select id="sniff-log-session" onchange="sniffLogPage=0;showSniffLogs(0)" style="max-width:120px" title="Weiran Session ID">
+        <option value="">Session ▾</option>${sessionOpts}
+      </select>
+      <select id="sniff-log-cc-session" onchange="sniffLogPage=0;showSniffLogs(0)" style="max-width:120px" title="CC Session ID">
+        <option value="">CC ▾</option>${ccSessionOpts}
+      </select>
+      <select id="sniff-log-prompt-hash" onchange="sniffLogPage=0;showSniffLogs(0)" style="max-width:120px" title="Prompt Hash (system[:2048])">
+        <option value="">Prompt ▾</option>${promptHashOpts}
       </select>
       <select id="sniff-log-status" onchange="sniffLogPage=0;showSniffLogs(0)">
         <option value=""${prevStatus===''?' selected':''}>All status</option>
@@ -5411,11 +5655,11 @@ async function showSniffLogs(page){
       // ── Table ──
       const th=(col,label)=>`<th${col?' data-col="'+col+'" onclick="sniffSortBy(\''+col+'\')"':''}${sniffLogSort===col?' class="sorted"':''}>${label}${col?sortArrow(col):''}</th>`;
       html+=`<table><thead><tr>
-        ${th('time','Time')}${th('model','Model')}${th('status','Status')}
-        ${th('input_tokens','Input')}${th('output_tokens','Output')}
+        ${th('time','Time')}${th('','WR')}${th('','CC')}${th('model','Model')}${th('status','Status')}
+        ${th('input_tokens','In(hit%)')}${th('output_tokens','Output')}
         ${th('','Cache R')}${th('','Cache W')}
         ${th('cost_usd','Cost')}${th('duration_ms','Duration')}
-        ${th('','Stop')}${th('','Tools')}${th('','Think')}
+        ${th('','Stop')}${th('','Tools')}${th('','Think')}${th('','Prompt')}
       </tr></thead><tbody>`;
 
       recs.forEach(r=>{
@@ -5429,11 +5673,15 @@ async function showSniffLogs(page){
         const think=(r.thinking_mode||'').replace('adaptive','A').replace('enabled','E').replace('disabled','D');
         const isExp=sniffLogExpandedId===r.id;
 
+        const sessShort=(r.session_id||'').slice(0,8);
+        const ccShort=(r.cc_session_id||'').slice(0,8);
         html+=`<tr id="row-${r.id}" class="log-main-row${isExp?' expanded':''}" onclick="sniffToggleDetail(${r.id})">
           <td>${ts}</td>
+          <td><span class="sid-cell" title="${esc(r.session_id||'')}\nClick: copy · Double-click: filter" onclick="event.stopPropagation();copySid(this,'${esc(r.session_id||'')}')" ondblclick="event.stopPropagation();sniffFilterByField('session_id','${esc(r.session_id||'')}')">${sessShort||'—'}</span></td>
+          <td><span class="sid-cell" title="${esc(r.cc_session_id||'')}\nClick: copy · Double-click: filter" onclick="event.stopPropagation();copySid(this,'${esc(r.cc_session_id||'')}')" ondblclick="event.stopPropagation();sniffFilterByField('cc_session_id','${esc(r.cc_session_id||'')}')">${ccShort||'—'}</span></td>
           <td class="${mc}">${sm}</td>
           <td><span class="${sc}">${r.status}</span></td>
-          <td class="token-val">${fmtTokens(r.input_tokens)}</td>
+          <td class="token-val">${fmtInput(r.input_tokens,r.cache_read||0,r.cache_create||0)}</td>
           <td class="token-val">${fmtTokens(r.output_tokens)}</td>
           <td>${fmtTokens(r.cache_read||0)}</td>
           <td>${fmtTokens(r.cache_create||0)}</td>
@@ -5442,20 +5690,25 @@ async function showSniffLogs(page){
           <td>${r.stop_reason||''}</td>
           <td>${tools}</td>
           <td>${think}</td>
+          <td><span class="sid-cell" title="${esc(r.prompt_hash||'')}\nClick: copy · Double-click: filter" onclick="event.stopPropagation();copySid(this,'${esc(r.prompt_hash||'')}')" ondblclick="event.stopPropagation();sniffFilterByField('prompt_hash','${esc(r.prompt_hash||'')}')">${(r.prompt_hash||'').slice(0,8)||'—'}</span></td>
         </tr>`;
 
         // Detail row
         const totalTok=(r.input_tokens||0)+(r.output_tokens||0);
         const tps=r.duration_ms>0?((totalTok/(r.duration_ms/1000)).toFixed(0)+' tok/s'):'—';
-        html+=`<tr id="detail-${r.id}" class="log-detail-row detail-row" style="display:${isExp?'':'none'}"><td colspan="12">
+        html+=`<tr id="detail-${r.id}" class="log-detail-row detail-row" style="display:${isExp?'':'none'}"><td colspan="15">
           <div class="detail-content">
             <div class="detail-item"><span class="dk">Request ID</span><br><span class="dv">${r.request_id||'—'}</span></div>
+            <div class="detail-item"><span class="dk">Prompt Hash</span><br><span class="dv sid-cell" onclick="event.stopPropagation();copySid(this,'${esc(r.prompt_hash||'')}')" ondblclick="event.stopPropagation();sniffFilterByField('prompt_hash','${esc(r.prompt_hash||'')}')" title="Click: copy · Double-click: filter">${r.prompt_hash||'—'}</span></div>
+            <div class="detail-item"><span class="dk">Session (WR)</span><br><span class="dv sid-cell" onclick="event.stopPropagation();copySid(this,'${esc(r.session_id||'')}')" ondblclick="event.stopPropagation();sniffFilterByField('session_id','${esc(r.session_id||'')}')" title="Click: copy · Double-click: filter">${r.session_id?(r.session_id.slice(0,8)):'—'}</span></div>
+            <div class="detail-item"><span class="dk">Session (CC)</span><br><span class="dv sid-cell" onclick="event.stopPropagation();copySid(this,'${esc(r.cc_session_id||'')}')" ondblclick="event.stopPropagation();sniffFilterByField('cc_session_id','${esc(r.cc_session_id||'')}')" title="Click: copy · Double-click: filter">${r.cc_session_id?(r.cc_session_id.slice(0,8)):'—'}</span></div>
             <div class="detail-item"><span class="dk">Model</span><br><span class="dv">${r.model||'—'}</span></div>
             <div class="detail-item"><span class="dk">Thinking</span><br><span class="dv">${r.thinking_mode||'—'}</span></div>
             <div class="detail-item"><span class="dk">Temperature</span><br><span class="dv">${r.temperature||'—'}</span></div>
             <div class="detail-item"><span class="dk">Throughput</span><br><span class="dv">${tps}</span></div>
             <div class="detail-item"><span class="dk">Stream</span><br><span class="dv">${r.stream?'Yes':'No'}</span></div>
-            <div class="detail-item"><span class="dk">Input</span><br><span class="dv token-val">${(r.input_tokens||0).toLocaleString()}</span></div>
+            <div class="detail-item"><span class="dk">Input (total)</span><br><span class="dv token-val">${((r.input_tokens||0)+(r.cache_read||0)+(r.cache_create||0)).toLocaleString()}</span></div>
+            <div class="detail-item"><span class="dk">Input (net new)</span><br><span class="dv token-val">${(r.input_tokens||0).toLocaleString()}</span></div>
             <div class="detail-item"><span class="dk">Output</span><br><span class="dv token-val">${(r.output_tokens||0).toLocaleString()}</span></div>
             <div class="detail-item"><span class="dk">Cache Read</span><br><span class="dv">${(r.cache_read||0).toLocaleString()}</span></div>
             <div class="detail-item"><span class="dk">Cache Write</span><br><span class="dv">${(r.cache_create||0).toLocaleString()}</span></div>
@@ -5486,6 +5739,136 @@ async function showSniffLogs(page){
     if(sniffAutoRefresh)sniffStartAutoRefresh();
   }catch(e){
     el.innerHTML=`<div style="text-align:center;padding:40px;color:var(--bad)">Error: ${e.message}</div>`;
+  }
+}
+
+// ── Telemetry Viewer ──
+
+let telemPage=0,telemTotal=0,telemPageSize=50,telemExpandedId=null;
+let telemTimePreset='24';
+
+async function showSniffTelemetry(){
+  showSniffPanel('Telemetry');
+  const el=document.getElementById('sniff-content');
+  el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted2)">Loading...</div>';
+
+  try{
+    const params=new URLSearchParams({limit:telemPageSize,offset:telemPage*telemPageSize});
+    const prevType=(document.getElementById('telem-type')||{}).value||'';
+    if(prevType)params.set('event_type',prevType);
+    const since=sniffLogSinceISO();
+    if(since)params.set('since',since);
+
+    const [dataR,filtersR]=await Promise.all([
+      fetch('/api/proxy/telemetry?'+params,{headers:{'Authorization':'Bearer '+TOKEN}}),
+      fetch('/api/proxy/telemetry/filters',{headers:{'Authorization':'Bearer '+TOKEN}})
+    ]);
+    const data=await dataR.json();
+    const filters=await filtersR.json();
+    telemTotal=data.total||0;
+    const recs=data.records||[];
+    const types=data.types||[];
+    const typeOpts=(filters.event_types||[]).map(t=>`<option value="${esc(t)}"${t===prevType?' selected':''}>${esc(t)}</option>`).join('');
+
+    let html='';
+
+    // Filter bar
+    html+=`<div class="sniff-filter">
+      <div class="time-presets">
+        ${['1','6','24','168','720','0'].map(h=>`<button data-hours="${h}" class="${telemTimePreset===h?'active':''}" onclick="telemTimePreset='${h}';this.parentNode.querySelectorAll('button').forEach(b=>b.classList.remove('active'));this.classList.add('active');telemPage=0;showSniffTelemetry()">${h==='0'?'All':h<24?h+'h':h<168?Math.round(h/24)+'d':h<720?'7d':'30d'}</button>`).join('')}
+      </div>
+      <select id="telem-type" onchange="telemPage=0;showSniffTelemetry()">
+        <option value="">All types</option>${typeOpts}
+      </select>
+    </div>`;
+
+    // Summary
+    html+=`<div class="sniff-summary">`;
+    html+=`<div class="s-item"><div class="s-label">Total Events</div><div class="s-value">${telemTotal.toLocaleString()}</div></div>`;
+    if(types.length>0){
+      const topTypes=types.slice(0,5);
+      topTypes.forEach(t=>{
+        html+=`<div class="s-item"><div class="s-label">${esc(t.type||t.name||'?')}</div><div class="s-value">${(t.count||0).toLocaleString()}</div></div>`;
+      });
+    }
+    html+=`</div>`;
+
+    // Type breakdown bar
+    if(types.length>0){
+      const maxCount=types[0].count||1;
+      html+='<h4 style="margin:16px 0 8px;color:var(--text)">Event Types</h4>';
+      types.slice(0,10).forEach(t=>{
+        const pct=((t.count/maxCount)*100).toFixed(0);
+        const name=t.type||'?';
+        html+=`<div style="margin:3px 0;display:flex;align-items:center;gap:8px">
+          <span style="flex-shrink:0;width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted2);font-size:12px" title="${esc(name)}">${esc(name)}</span>
+          <div class="sniff-bar" style="flex:1"><div style="width:${pct}%;background:var(--accent);height:100%;border-radius:3px"></div></div>
+          <span style="flex-shrink:0;width:50px;text-align:right;color:var(--text);font-size:12px">${t.count}</span>
+        </div>`;
+      });
+    }
+
+    if(recs.length===0){
+      html+='<div style="text-align:center;padding:40px;color:var(--muted2)">No telemetry events captured yet.<br><span style="font-size:11px">Events appear when Claude Code POSTs to /api/event_logging/batch</span></div>';
+    }else{
+      // Event list — log-style
+      html+=`<div style="margin-top:12px">`;
+      recs.forEach(r=>{
+        const t=new Date(r.time);
+        const ts=t.toLocaleString('en-US',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+        const isExp=telemExpandedId===r.id;
+        const sessionShort=(r.session_id||'').slice(0,8);
+        let payloadPreview='';
+        try{
+          const p=JSON.parse(r.payload);
+          // Try to extract a human-readable summary
+          if(p.name)payloadPreview=p.name;
+          else if(p.event)payloadPreview=p.event;
+          else if(p.action)payloadPreview=p.action;
+          else if(p.model)payloadPreview='model: '+p.model;
+          else payloadPreview=JSON.stringify(p).slice(0,120);
+        }catch(e){
+          payloadPreview=(r.payload||'').slice(0,120);
+        }
+
+        html+=`<div style="border-bottom:1px solid var(--border);padding:8px 4px;cursor:pointer;${isExp?'background:var(--bg2)':''}" onclick="telemExpandedId=telemExpandedId===${r.id}?null:${r.id};showSniffTelemetry()">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="color:var(--muted2);font-size:11px;font-family:var(--mono);flex-shrink:0">${ts}</span>
+            <span class="chip" style="font-size:10px;padding:1px 6px;flex-shrink:0">${esc(r.event_type||'?')}</span>
+            ${sessionShort?`<span style="color:var(--muted2);font-size:10px;font-family:var(--mono)" title="${esc(r.session_id)}">${sessionShort}</span>`:''}
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:12px;flex:1">${esc(payloadPreview)}</span>
+          </div>
+          ${isExp?`<div style="margin-top:8px;padding:8px;background:var(--bg1);border-radius:var(--radius2);font-size:11px;font-family:var(--mono);white-space:pre-wrap;word-break:break-all;max-height:400px;overflow:auto">${esc(formatPayload(r.payload))}</div>`:''}
+        </div>`;
+      });
+      html+=`</div>`;
+
+      // Pagination
+      const totalPages=Math.ceil(telemTotal/telemPageSize);
+      html+=`<div class="sniff-pager">
+        <div class="page-size">
+          <select onchange="telemPageSize=parseInt(this.value);telemPage=0;showSniffTelemetry()">
+            ${[25,50,100,200].map(n=>`<option value="${n}"${n===telemPageSize?' selected':''}>${n}/page</option>`).join('')}
+          </select>
+        </div>
+        <button onclick="telemPage--;showSniffTelemetry()"${telemPage<=0?' disabled':''}>← Prev</button>
+        <span>${telemPage+1} / ${totalPages||1}</span>
+        <button onclick="telemPage++;showSniffTelemetry()"${telemPage>=totalPages-1?' disabled':''}>Next →</button>
+      </div>`;
+    }
+
+    el.innerHTML=html;
+  }catch(e){
+    el.innerHTML=`<div style="text-align:center;padding:40px;color:var(--bad)">Error: ${e.message}</div>`;
+  }
+}
+
+function formatPayload(raw){
+  try{
+    const p=JSON.parse(raw);
+    return JSON.stringify(p,null,2);
+  }catch(e){
+    return raw||'';
   }
 }
 

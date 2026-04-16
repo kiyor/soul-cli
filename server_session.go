@@ -13,6 +13,21 @@ import (
 	"github.com/google/uuid"
 )
 
+// expandHome expands a leading ~ to the user's home directory.
+func expandHome(path string) (string, error) {
+	if !strings.HasPrefix(path, "~/") && path != "~" {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path, fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	if path == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, path[2:]), nil
+}
+
 // ── Session ──
 
 // Session categories determine lifecycle behavior.
@@ -568,6 +583,22 @@ func (sm *sessionManager) createSession(name, project, model string, soulEnabled
 
 // createSessionWithOpts spawns a new Claude Code session with full options.
 func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*serverSession, error) {
+	// Expand ~ in project path and validate it exists
+	if opts.Project != "" {
+		expanded, err := expandHome(opts.Project)
+		if err != nil {
+			return nil, fmt.Errorf("invalid project path %q: %w", opts.Project, err)
+		}
+		opts.Project = expanded
+		info, err := os.Stat(opts.Project)
+		if err != nil {
+			return nil, fmt.Errorf("project directory %q does not exist: %w", opts.Project, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("project path %q is not a directory", opts.Project)
+		}
+	}
+
 	category := opts.Category
 	if category == "" {
 		category = CategoryInteractive

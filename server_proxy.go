@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -36,6 +37,8 @@ func defaultProxyConfig() proxyConfig {
 		Upstream: "https://api.anthropic.com",
 	}
 }
+
+// ── OAuth Token Pool ──
 
 // RateLimitSnapshot holds captured rate-limit info from API response headers.
 type RateLimitSnapshot struct {
@@ -160,6 +163,7 @@ func captureRateLimitHeaders(h http.Header) RateLimitSnapshot {
 type proxyRequestInfo struct {
 	StartTime    time.Time
 	SessionID    string // weiran session ID, extracted from URL path prefix /s/{id}/
+	CCSessionID  string // Claude Code native session ID (X-Claude-Code-Session-Id header), stable across resume
 	Model        string
 	Stream       bool
 	InputTokens  int64
@@ -173,21 +177,23 @@ type proxyRequestInfo struct {
 	Temperature  string
 	UserAgent    string
 	RequestID    string
+	PromptHash   string // sha256 of first 2048 bytes of system prompt
 	Status       int
 	IsError      bool
 	ErrorDetail  string
 }
 
-// extractRequestMeta pulls model, temperature, thinking mode, tools count from request body.
-func extractRequestMeta(body []byte) (model, thinkingMode, temperature string, toolsCount int) {
+// extractRequestMeta pulls model, temperature, thinking mode, tools count, and prompt hash from request body.
+func extractRequestMeta(body []byte) (model, thinkingMode, temperature string, toolsCount int, promptHash string) {
 	var req struct {
 		Model    string `json:"model"`
 		Thinking struct {
 			Type   string `json:"type"`
 			Budget int    `json:"budget_tokens"`
 		} `json:"thinking"`
-		Temperature *float64 `json:"temperature"`
-		Tools       []any    `json:"tools"`
+		Temperature *float64        `json:"temperature"`
+		Tools       []any           `json:"tools"`
+		System      json.RawMessage `json:"system"`
 	}
 	if json.Unmarshal(body, &req) == nil {
 		model = req.Model
@@ -200,6 +206,52 @@ func extractRequestMeta(body []byte) (model, thinkingMode, temperature string, t
 		}
 		if req.Temperature != nil {
 			temperature = fmt.Sprintf("%.2f", *req.Temperature)
+		}
+		// Hash system prompt for cache-hit fingerprinting.
+		// Claude Code sends system as content block array where:
+		// - Block 0: billing header with dynamic cch= hash (skip)
+		// - Block with cache_control: the cached prefix (this is what Anthropic caches)
+		// - Later blocks: dynamic system-reminders (change per request)
+		// We hash only the first cache_control block's text[:2048] — that's the
+		// stable cached prefix, matching what Anthropic actually cache-hits on.
+		if len(req.System) > 0 {
+			var prefix string
+			var s string
+			if json.Unmarshal(req.System, &s) == nil {
+				prefix = s // plain string — hash as-is
+			} else {
+				// Array of content blocks — find the first cached block
+				var blocks []struct {
+					Text         string `json:"text"`
+					CacheControl *struct {
+						Type string `json:"type"`
+					} `json:"cache_control"`
+				}
+				if json.Unmarshal(req.System, &blocks) == nil {
+					for _, b := range blocks {
+						if strings.HasPrefix(b.Text, "x-anthropic-billing-header:") {
+							continue
+						}
+						// Use first non-billing block with cache_control,
+						// or fall back to first non-billing block
+						if prefix == "" {
+							prefix = b.Text // fallback
+						}
+						if b.CacheControl != nil {
+							prefix = b.Text
+							break
+						}
+					}
+				}
+			}
+			if len(prefix) > 0 {
+				p := prefix
+				if len(p) > 2048 {
+					p = p[:2048]
+				}
+				h := sha256.Sum256([]byte(p))
+				promptHash = fmt.Sprintf("%x", h[:8]) // 16-char hex
+			}
 		}
 	}
 	return
@@ -470,7 +522,8 @@ func initProxyDB() {
 		temperature   TEXT NOT NULL DEFAULT '',
 		user_agent    TEXT NOT NULL DEFAULT '',
 		error_detail  TEXT NOT NULL DEFAULT '',
-		request_id    TEXT NOT NULL DEFAULT ''
+		request_id    TEXT NOT NULL DEFAULT '',
+		cc_session_id TEXT NOT NULL DEFAULT ''
 	)`)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] proxy-db: create table failed: %v\n", appName, err)
@@ -479,6 +532,8 @@ func initProxyDB() {
 	// Migrations (idempotent — ignore "duplicate column" errors)
 	proxyDB.Exec("ALTER TABLE proxy_requests ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0")
 	proxyDB.Exec("ALTER TABLE proxy_requests ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+	proxyDB.Exec("ALTER TABLE proxy_requests ADD COLUMN cc_session_id TEXT NOT NULL DEFAULT ''")
+	proxyDB.Exec("ALTER TABLE proxy_requests ADD COLUMN prompt_hash TEXT NOT NULL DEFAULT ''")
 
 	// Backfill cost_usd for existing records that have tokens but no cost
 	go func() {
@@ -501,11 +556,26 @@ func initProxyDB() {
 	proxyDB.Exec("CREATE INDEX IF NOT EXISTS idx_proxy_time ON proxy_requests(time)")
 	proxyDB.Exec("CREATE INDEX IF NOT EXISTS idx_proxy_model ON proxy_requests(model)")
 	proxyDB.Exec("CREATE INDEX IF NOT EXISTS idx_proxy_session ON proxy_requests(session_id)")
+	proxyDB.Exec("CREATE INDEX IF NOT EXISTS idx_proxy_cc_session ON proxy_requests(cc_session_id)")
+
+		// telemetry_events table — stores Claude Code telemetry captured from /api/event_logging/batch
+		proxyDB.Exec(`CREATE TABLE IF NOT EXISTS telemetry_events (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			time        TEXT NOT NULL,
+			session_id  TEXT NOT NULL DEFAULT '',
+			event_type  TEXT NOT NULL DEFAULT '',
+			source      TEXT NOT NULL DEFAULT '',
+			payload     TEXT NOT NULL DEFAULT ''
+		)`)
+		proxyDB.Exec("CREATE INDEX IF NOT EXISTS idx_telem_time ON telemetry_events(time)")
+		proxyDB.Exec("CREATE INDEX IF NOT EXISTS idx_telem_type ON telemetry_events(event_type)")
+		proxyDB.Exec("CREATE INDEX IF NOT EXISTS idx_telem_session ON telemetry_events(session_id)")
 
 	// Auto-cleanup: delete records older than 30 days
 	go func() {
 		cutoff := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
 		proxyDB.Exec("DELETE FROM proxy_requests WHERE time < ?", cutoff)
+		proxyDB.Exec("DELETE FROM telemetry_events WHERE time < ?", cutoff)
 	}()
 
 	fmt.Fprintf(os.Stderr, "[%s] proxy-db: initialized %s\n", appName, dbFile)
@@ -526,19 +596,20 @@ func saveProxyRequest(info proxyRequestInfo) {
 		}
 		costUSD := calcCost(info.Model, info.InputTokens, info.OutputTokens, info.CacheRead, info.CacheCreate)
 		_, err := proxyDB.Exec(`INSERT INTO proxy_requests
-			(time, session_id, model, status, is_error, stream, input_tokens, output_tokens,
+			(time, session_id, cc_session_id, model, status, is_error, stream, input_tokens, output_tokens,
 			 cache_read, cache_create, cost_usd, duration_ms, stop_reason, tools_count,
-			 tool_calls, thinking_mode, temperature, user_agent, error_detail, request_id)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			 tool_calls, thinking_mode, temperature, user_agent, error_detail, request_id, prompt_hash)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			info.StartTime.Format(time.RFC3339),
 			info.SessionID,
+			info.CCSessionID,
 			info.Model, info.Status, isErr, isStream,
 			info.InputTokens, info.OutputTokens, info.CacheRead, info.CacheCreate,
 			costUSD,
 			time.Since(info.StartTime).Milliseconds(),
 			info.StopReason, info.ToolsCount, info.ToolCalls,
 			info.ThinkingMode, info.Temperature, info.UserAgent,
-			info.ErrorDetail, info.RequestID,
+			info.ErrorDetail, info.RequestID, info.PromptHash,
 		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[%s] proxy-db: insert failed: %v\n", appName, err)
@@ -580,16 +651,23 @@ func startProxyServer(cfg proxyConfig) {
 			req.Header.Set("X-Proxy-Start", fmt.Sprintf("%d", time.Now().UnixNano()))
 			req.Header.Set("X-Proxy-UA", req.Header.Get("User-Agent"))
 
+			// Capture Claude Code's native session ID for cross-resume cost tracking.
+			// CC sends this on every request; it persists across the process lifetime.
+			if ccSID := req.Header.Get("X-Claude-Code-Session-Id"); ccSID != "" {
+				req.Header.Set("X-Proxy-CC-Session-ID", ccSID)
+			}
+
 			// Extract request body metadata (model, thinking, temperature, tools)
 			if req.Body != nil && req.Method == "POST" {
 				body, err := io.ReadAll(req.Body)
 				req.Body.Close()
 				if err == nil {
-					model, thinking, temp, toolsCount := extractRequestMeta(body)
+					model, thinking, temp, toolsCount, pHash := extractRequestMeta(body)
 					req.Header.Set("X-Proxy-Req-Model", model)
 					req.Header.Set("X-Proxy-Req-Thinking", thinking)
 					req.Header.Set("X-Proxy-Req-Temp", temp)
 					req.Header.Set("X-Proxy-Req-Tools", strconv.Itoa(toolsCount))
+					req.Header.Set("X-Proxy-Req-PromptHash", pHash)
 					isStream := strings.Contains(string(body), `"stream":true`) || strings.Contains(string(body), `"stream": true`)
 					if isStream {
 						req.Header.Set("X-Proxy-Stream", "1")
@@ -626,6 +704,7 @@ func startProxyServer(cfg proxyConfig) {
 			info := proxyRequestInfo{
 				StartTime:    time.Now(),
 				SessionID:    req.Header.Get("X-Proxy-Session-ID"),
+				CCSessionID:  req.Header.Get("X-Proxy-CC-Session-ID"),
 				Status:       resp.StatusCode,
 				IsError:      resp.StatusCode >= 400,
 				UserAgent:    req.Header.Get("X-Proxy-UA"),
@@ -633,6 +712,7 @@ func startProxyServer(cfg proxyConfig) {
 				Model:        req.Header.Get("X-Proxy-Req-Model"),
 				ThinkingMode: req.Header.Get("X-Proxy-Req-Thinking"),
 				Temperature:  req.Header.Get("X-Proxy-Req-Temp"),
+				PromptHash:   req.Header.Get("X-Proxy-Req-PromptHash"),
 				Stream:       req.Header.Get("X-Proxy-Stream") == "1",
 			}
 			if tc := req.Header.Get("X-Proxy-Req-Tools"); tc != "" {
@@ -682,10 +762,21 @@ func startProxyServer(cfg proxyConfig) {
 		},
 	}
 
+	// Wrap proxy with telemetry interceptor — captures /api/event_logging/batch
+	// instead of forwarding to upstream. CC sends telemetry here because
+	// ANTHROPIC_BASE_URL points to this proxy.
+	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/event_logging/batch" || r.URL.Path == "/v1/api/event_logging/batch" {
+			handleTelemetryBatch(w, r)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	})
+
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      proxy,
+		Handler:      proxyHandler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 0, // streaming needs no write timeout
 		IdleTimeout:  120 * time.Second,
@@ -709,7 +800,18 @@ type headerStrippingTransport struct {
 }
 
 func (t *headerStrippingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Clone headers so we don't modify the original (ModifyResponse needs them)
+	// Collect X-Proxy-* headers before stripping — we need to restore them on
+	// resp.Request so ModifyResponse can read them. Go's http.Transport sets
+	// resp.Request = the request passed to RoundTrip, so after cloning + stripping,
+	// the original X-Proxy-* headers are lost unless we explicitly restore them.
+	var proxyHeaders [][2]string
+	for key := range req.Header {
+		if strings.HasPrefix(key, "X-Proxy-") {
+			proxyHeaders = append(proxyHeaders, [2]string{key, req.Header.Get(key)})
+		}
+	}
+
+	// Clone and strip X-Proxy-* so they don't leak to upstream
 	h2 := req.Header.Clone()
 	for key := range h2 {
 		if strings.HasPrefix(key, "X-Proxy-") {
@@ -718,7 +820,16 @@ func (t *headerStrippingTransport) RoundTrip(req *http.Request) (*http.Response,
 	}
 	req2 := req.Clone(req.Context())
 	req2.Header = h2
-	return t.base.RoundTrip(req2)
+
+	resp, err := t.base.RoundTrip(req2)
+	if err != nil {
+		return resp, err
+	}
+	// Restore X-Proxy-* on resp.Request so ModifyResponse can read them
+	for _, kv := range proxyHeaders {
+		resp.Request.Header.Set(kv[0], kv[1])
+	}
+	return resp, err
 }
 
 // streamCaptureReader wraps an SSE stream body, buffering it to extract usage on Close.
@@ -786,6 +897,82 @@ func (r *streamCaptureReader) extractAndSaveUsage() {
 	saveProxyRequest(r.info)
 }
 
+// ── Telemetry Capture ──
+
+// handleTelemetryBatch captures Claude Code telemetry POSTed to /api/event_logging/batch.
+// CC sends a JSON array of event objects. We parse each event, extract key fields,
+// and store them in telemetry_events for inspection in the Web UI.
+func handleTelemetryBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read failed", http.StatusBadRequest)
+		return
+	}
+
+	// CC may send gzip-encoded batches
+	if len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
+		if gr, gzErr := gzip.NewReader(bytes.NewReader(body)); gzErr == nil {
+			if decoded, readErr := io.ReadAll(gr); readErr == nil {
+				body = decoded
+			}
+			gr.Close()
+		}
+	}
+
+	// Try parsing as JSON array (batch) or single object
+	var events []json.RawMessage
+	if bytes.HasPrefix(bytes.TrimSpace(body), []byte("[")) {
+		json.Unmarshal(body, &events)
+	} else {
+		events = append(events, json.RawMessage(body))
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	sessionID := r.Header.Get("X-Claude-Code-Session-Id")
+	source := "cc"
+
+	if proxyDB != nil {
+		go func() {
+			for _, raw := range events {
+				// Extract event_type from the JSON payload
+				var evt struct {
+					Type   string `json:"type"`
+					Name   string `json:"name"`
+					Event  string `json:"event"`
+					Action string `json:"action"`
+				}
+				eventType := "unknown"
+				if json.Unmarshal(raw, &evt) == nil {
+					if evt.Type != "" {
+						eventType = evt.Type
+					} else if evt.Event != "" {
+						eventType = evt.Event
+					} else if evt.Name != "" {
+						eventType = evt.Name
+					} else if evt.Action != "" {
+						eventType = evt.Action
+					}
+				}
+				// Truncate large payloads to 64KB
+				payload := string(raw)
+				if len(payload) > 65536 {
+					payload = payload[:65536]
+				}
+				proxyDB.Exec(`INSERT INTO telemetry_events (time, session_id, event_type, source, payload) VALUES (?, ?, ?, ?, ?)`,
+					now, sessionID, eventType, source, payload)
+			}
+		}()
+	}
+
+	// Return 202 Accepted — CC expects success, doesn't check response body
+	w.WriteHeader(http.StatusAccepted)
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
 // ── API Endpoints ──
 
 // registerProxyAPI adds proxy-related endpoints to the main server mux.
@@ -815,9 +1002,17 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 			where = append(where, "session_id = ?")
 			args = append(args, sid)
 		}
+		if ccSid := q.Get("cc_session_id"); ccSid != "" {
+			where = append(where, "cc_session_id = ?")
+			args = append(args, ccSid)
+		}
 		if m := q.Get("model"); m != "" {
 			where = append(where, "model LIKE ?")
 			args = append(args, "%"+m+"%")
+		}
+		if ph := q.Get("prompt_hash"); ph != "" {
+			where = append(where, "prompt_hash = ?")
+			args = append(args, ph)
 		}
 		if q.Get("error") == "true" {
 			where = append(where, "is_error = 1")
@@ -855,7 +1050,7 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 		}
 
 		query := fmt.Sprintf(
-			"SELECT id,time,session_id,model,status,is_error,stream,input_tokens,output_tokens,cache_read,cache_create,cost_usd,duration_ms,stop_reason,tools_count,tool_calls,thinking_mode,temperature,user_agent,error_detail,request_id FROM proxy_requests WHERE %s ORDER BY %s %s LIMIT ? OFFSET ?",
+			"SELECT id,time,session_id,cc_session_id,model,status,is_error,stream,input_tokens,output_tokens,cache_read,cache_create,cost_usd,duration_ms,stop_reason,tools_count,tool_calls,thinking_mode,temperature,user_agent,error_detail,request_id,prompt_hash FROM proxy_requests WHERE %s ORDER BY %s %s LIMIT ? OFFSET ?",
 			strings.Join(where, " AND "), sortCol, sortDir,
 		)
 		args = append(args, limit, offset)
@@ -872,11 +1067,11 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 			var (
 				id, status, isErr, stream, inTok, outTok, cacheR, cacheC, durMs, toolsCnt int
 				costUSD                                                                    float64
-				ts, sessionID, model, stopReason, toolCalls, thinking, temp, ua, errD, reqID string
+				ts, sessionID, ccSessionID, model, stopReason, toolCalls, thinking, temp, ua, errD, reqID, promptHash string
 			)
-			rows.Scan(&id, &ts, &sessionID, &model, &status, &isErr, &stream, &inTok, &outTok, &cacheR, &cacheC, &costUSD, &durMs, &stopReason, &toolsCnt, &toolCalls, &thinking, &temp, &ua, &errD, &reqID)
+			rows.Scan(&id, &ts, &sessionID, &ccSessionID, &model, &status, &isErr, &stream, &inTok, &outTok, &cacheR, &cacheC, &costUSD, &durMs, &stopReason, &toolsCnt, &toolCalls, &thinking, &temp, &ua, &errD, &reqID, &promptHash)
 			records = append(records, map[string]any{
-				"id": id, "time": ts, "session_id": sessionID, "model": model, "status": status,
+				"id": id, "time": ts, "session_id": sessionID, "cc_session_id": ccSessionID, "model": model, "status": status,
 				"is_error": isErr == 1, "stream": stream == 1,
 				"input_tokens": inTok, "output_tokens": outTok,
 				"cache_read": cacheR, "cache_create": cacheC,
@@ -885,6 +1080,7 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 				"tools_count": toolsCnt, "tool_calls": toolCalls,
 				"thinking_mode": thinking, "temperature": temp,
 				"user_agent": ua, "error_detail": errD, "request_id": reqID,
+				"prompt_hash": promptHash,
 			})
 		}
 		if records == nil {
@@ -986,22 +1182,30 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 	}))
 
 	// GET /api/proxy/session-cost — aggregated cost for a session (or all sessions)
+	// Supports ?group_by=cc_session_id to aggregate across resume boundaries.
 	mux.HandleFunc("GET /api/proxy/session-cost", authMiddleware(token, func(w http.ResponseWriter, r *http.Request) {
 		if proxyDB == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "proxy db not initialized"})
 			return
 		}
-		sid := r.URL.Query().Get("session_id")
+		q := r.URL.Query()
+		sid := q.Get("session_id")
+		groupBy := q.Get("group_by") // "cc_session_id" to group by CC native session
+
 		if sid != "" {
-			// Single session cost
+			// Single session cost (by weiran session_id or cc_session_id)
+			col := "session_id"
+			if groupBy == "cc_session_id" {
+				col = "cc_session_id"
+			}
 			var cost float64
 			var requests, inTok, outTok, cacheR, cacheC int64
 			proxyDB.QueryRow(
-				"SELECT COALESCE(SUM(cost_usd),0), COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_create),0) FROM proxy_requests WHERE session_id=?",
+				fmt.Sprintf("SELECT COALESCE(SUM(cost_usd),0), COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_create),0) FROM proxy_requests WHERE %s=?", col),
 				sid,
 			).Scan(&cost, &requests, &inTok, &outTok, &cacheR, &cacheC)
 			writeJSON(w, http.StatusOK, map[string]any{
-				"session_id":    sid,
+				col:             sid,
 				"cost_usd":      cost,
 				"requests":      requests,
 				"input_tokens":  inTok,
@@ -1010,9 +1214,14 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 				"cache_create":  cacheC,
 			})
 		} else {
-			// All sessions with cost > 0
+			// All sessions — group by cc_session_id (cross-resume) or session_id (per-incarnation)
+			groupCol := "session_id"
+			if groupBy == "cc_session_id" {
+				groupCol = "cc_session_id"
+			}
 			rows, err := proxyDB.Query(
-				"SELECT session_id, SUM(cost_usd), COUNT(*), SUM(input_tokens), SUM(output_tokens) FROM proxy_requests WHERE session_id != '' GROUP BY session_id ORDER BY SUM(cost_usd) DESC LIMIT 200",
+				fmt.Sprintf("SELECT %s, SUM(cost_usd), COUNT(*), SUM(input_tokens), SUM(output_tokens) FROM proxy_requests WHERE %s != '' GROUP BY %s ORDER BY SUM(cost_usd) DESC LIMIT 200",
+					groupCol, groupCol, groupCol),
 			)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -1021,19 +1230,19 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 			defer rows.Close()
 			var sessions []map[string]any
 			for rows.Next() {
-				var sid string
+				var id string
 				var cost float64
 				var reqs, inTok, outTok int64
-				rows.Scan(&sid, &cost, &reqs, &inTok, &outTok)
+				rows.Scan(&id, &cost, &reqs, &inTok, &outTok)
 				sessions = append(sessions, map[string]any{
-					"session_id": sid, "cost_usd": cost, "requests": reqs,
+					groupCol: id, "cost_usd": cost, "requests": reqs,
 					"input_tokens": inTok, "output_tokens": outTok,
 				})
 			}
 			if sessions == nil {
 				sessions = []map[string]any{}
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+			writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions, "group_by": groupCol})
 		}
 	}))
 
@@ -1053,7 +1262,37 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 				models = append(models, m)
 			}
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"models": models})
+		sessionIDs := []map[string]string{}
+		rows2, err2 := proxyDB.Query("SELECT session_id FROM proxy_requests WHERE session_id != '' GROUP BY session_id ORDER BY MAX(id) DESC")
+		if err2 == nil {
+			defer rows2.Close()
+			for rows2.Next() {
+				var sid string
+				rows2.Scan(&sid)
+				sessionIDs = append(sessionIDs, map[string]string{"id": sid, "short": sid[:min(8, len(sid))]})
+			}
+		}
+		ccSessionIDs := []map[string]string{}
+		rows3, err3 := proxyDB.Query("SELECT cc_session_id FROM proxy_requests WHERE cc_session_id != '' GROUP BY cc_session_id ORDER BY MAX(id) DESC")
+		if err3 == nil {
+			defer rows3.Close()
+			for rows3.Next() {
+				var sid string
+				rows3.Scan(&sid)
+				ccSessionIDs = append(ccSessionIDs, map[string]string{"id": sid, "short": sid[:min(8, len(sid))]})
+			}
+		}
+		promptHashes := []string{}
+		rows4, err4 := proxyDB.Query("SELECT prompt_hash FROM proxy_requests WHERE prompt_hash != '' GROUP BY prompt_hash ORDER BY COUNT(*) DESC")
+		if err4 == nil {
+			defer rows4.Close()
+			for rows4.Next() {
+				var ph string
+				rows4.Scan(&ph)
+				promptHashes = append(promptHashes, ph)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"models": models, "sessions": sessionIDs, "cc_sessions": ccSessionIDs, "prompt_hashes": promptHashes})
 	}))
 
 	// GET /api/proxy/logs/export — CSV export
@@ -1092,7 +1331,7 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 		}
 
 		query := fmt.Sprintf(
-			"SELECT id,time,model,status,is_error,stream,input_tokens,output_tokens,cache_read,cache_create,cost_usd,duration_ms,stop_reason,tools_count,tool_calls,thinking_mode,temperature,user_agent,error_detail,request_id FROM proxy_requests WHERE %s ORDER BY id DESC LIMIT 10000",
+			"SELECT id,time,session_id,cc_session_id,model,status,is_error,stream,input_tokens,output_tokens,cache_read,cache_create,cost_usd,duration_ms,stop_reason,tools_count,tool_calls,thinking_mode,temperature,user_agent,error_detail,request_id,prompt_hash FROM proxy_requests WHERE %s ORDER BY id DESC LIMIT 10000",
 			strings.Join(where, " AND "),
 		)
 		rows, err := proxyDB.Query(query, args...)
@@ -1104,17 +1343,133 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", "attachment; filename=proxy-logs.csv")
-		fmt.Fprintln(w, "id,time,model,status,is_error,stream,input_tokens,output_tokens,cache_read,cache_create,cost_usd,duration_ms,stop_reason,tools_count,tool_calls,thinking_mode,temperature,user_agent,error_detail,request_id")
+		fmt.Fprintln(w, "id,time,session_id,cc_session_id,model,status,is_error,stream,input_tokens,output_tokens,cache_read,cache_create,cost_usd,duration_ms,stop_reason,tools_count,tool_calls,thinking_mode,temperature,user_agent,error_detail,request_id,prompt_hash")
 		for rows.Next() {
 			var (
 				id, status, isErr, stream, inTok, outTok, cacheR, cacheC, durMs, toolsCnt int
 				costUSD                                                                    float64
-				ts, model, stopReason, toolCalls, thinking, temp, ua, errD, reqID          string
+				ts, sessionID, ccSessionID, model, stopReason, toolCalls, thinking, temp, ua, errD, reqID, promptHash string
 			)
-			rows.Scan(&id, &ts, &model, &status, &isErr, &stream, &inTok, &outTok, &cacheR, &cacheC, &costUSD, &durMs, &stopReason, &toolsCnt, &toolCalls, &thinking, &temp, &ua, &errD, &reqID)
-			fmt.Fprintf(w, "%d,%s,%s,%d,%d,%d,%d,%d,%d,%d,%.6f,%d,%s,%d,\"%s\",%s,%s,\"%s\",\"%s\",%s\n",
-				id, ts, model, status, isErr, stream, inTok, outTok, cacheR, cacheC, costUSD, durMs, stopReason, toolsCnt, toolCalls, thinking, temp, ua, strings.ReplaceAll(errD, "\"", "'"), reqID)
+			rows.Scan(&id, &ts, &sessionID, &ccSessionID, &model, &status, &isErr, &stream, &inTok, &outTok, &cacheR, &cacheC, &costUSD, &durMs, &stopReason, &toolsCnt, &toolCalls, &thinking, &temp, &ua, &errD, &reqID, &promptHash)
+			fmt.Fprintf(w, "%d,%s,%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%.6f,%d,%s,%d,\"%s\",%s,%s,\"%s\",\"%s\",%s,%s\n",
+				id, ts, sessionID, ccSessionID, model, status, isErr, stream, inTok, outTok, cacheR, cacheC, costUSD, durMs, stopReason, toolsCnt, toolCalls, thinking, temp, ua, strings.ReplaceAll(errD, "\"", "'"), reqID, promptHash)
 		}
+	}))
+
+		// GET /api/proxy/telemetry — query telemetry events
+	mux.HandleFunc("GET /api/proxy/telemetry", authMiddleware(token, func(w http.ResponseWriter, r *http.Request) {
+		if proxyDB == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "proxy db not initialized"})
+			return
+		}
+		q := r.URL.Query()
+		limit := intParam(q, "limit", 100)
+		offset := intParam(q, "offset", 0)
+		if limit > 1000 {
+			limit = 1000
+		}
+
+		where := []string{"1=1"}
+		args := []any{}
+
+		if sid := q.Get("session_id"); sid != "" {
+			where = append(where, "session_id = ?")
+			args = append(args, sid)
+		}
+		if et := q.Get("event_type"); et != "" {
+			where = append(where, "event_type LIKE ?")
+			args = append(args, "%"+et+"%")
+		}
+		if since := q.Get("since"); since != "" {
+			where = append(where, "time >= ?")
+			args = append(args, since)
+		}
+		if until := q.Get("until"); until != "" {
+			where = append(where, "time <= ?")
+			args = append(args, until)
+		}
+		if q.Get("payload") != "" {
+			where = append(where, "payload LIKE ?")
+			args = append(args, "%"+q.Get("payload")+"%")
+		}
+
+		query := fmt.Sprintf(
+			"SELECT id, time, session_id, event_type, source, payload FROM telemetry_events WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?",
+			strings.Join(where, " AND "),
+		)
+		args = append(args, limit, offset)
+
+		rows, err := proxyDB.Query(query, args...)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		var records []map[string]any
+		for rows.Next() {
+			var id int
+			var ts, sessionID, eventType, source, payload string
+			rows.Scan(&id, &ts, &sessionID, &eventType, &source, &payload)
+			records = append(records, map[string]any{
+				"id": id, "time": ts, "session_id": sessionID,
+				"event_type": eventType, "source": source, "payload": payload,
+			})
+		}
+		if records == nil {
+			records = []map[string]any{}
+		}
+
+		// Total count
+		countArgs := args[:len(args)-2]
+		var total int
+		proxyDB.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM telemetry_events WHERE %s", strings.Join(where, " AND ")), countArgs...).Scan(&total)
+
+		// Event type breakdown
+		typeRows, err := proxyDB.Query(fmt.Sprintf("SELECT event_type, COUNT(*) as cnt FROM telemetry_events WHERE %s GROUP BY event_type ORDER BY cnt DESC LIMIT 20", strings.Join(where, " AND ")), countArgs...)
+		var typeBreakdown []map[string]any
+		if err == nil {
+			defer typeRows.Close()
+			for typeRows.Next() {
+				var et string
+				var cnt int
+				typeRows.Scan(&et, &cnt)
+				typeBreakdown = append(typeBreakdown, map[string]any{"type": et, "count": cnt})
+			}
+		}
+		if typeBreakdown == nil {
+			typeBreakdown = []map[string]any{}
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"records": records,
+			"total":   total,
+			"limit":   limit,
+			"offset":  offset,
+			"types":   typeBreakdown,
+		})
+	}))
+
+		// GET /api/proxy/telemetry/filters — available event types
+	mux.HandleFunc("GET /api/proxy/telemetry/filters", authMiddleware(token, func(w http.ResponseWriter, r *http.Request) {
+		if proxyDB == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "proxy db not initialized"})
+			return
+		}
+		var types []string
+		rows, err := proxyDB.Query("SELECT DISTINCT event_type FROM telemetry_events ORDER BY event_type")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var t string
+				rows.Scan(&t)
+				types = append(types, t)
+			}
+		}
+		if types == nil {
+			types = []string{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"event_types": types})
 	}))
 
 	// GET /api/glm/quota — Z.AI GLM usage quota (only if zai provider configured)
@@ -1247,6 +1602,9 @@ var (
 
 // oauthToken returns the cached CLAUDE_CODE_OAUTH_TOKEN.
 // Priority: env var > workspace/.oauth-token file > config.json server.oauthToken
+// If the token fails validation (expired / invalid), it is NOT cached so the
+// process falls back to its own auth (keychain-based OAuth). This prevents
+// a stale workspace file from breaking all spawned processes.
 func oauthToken() string {
 	oauthTokenOnce.Do(func() {
 		// 1. Environment variable
@@ -1255,12 +1613,16 @@ func oauthToken() string {
 			fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from env\n", appName)
 			return
 		}
-		// 2. File: workspace/.oauth-token (like .jira-token pattern)
+		// 2. File: workspace/.oauth-token
 		tokenFile := workspace + "/.oauth-token"
 		if data, err := os.ReadFile(tokenFile); err == nil {
-			if tok := strings.TrimSpace(string(data)); tok != "" {
-				cachedOAuthToken = tok
-				fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from %s\n", appName, tokenFile)
+			if t := strings.TrimSpace(string(data)); t != "" {
+				if !validateOAuthToken(t) {
+					fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from %s: INVALID/EXPIRED — skipping\n", appName, tokenFile)
+					return
+				}
+				cachedOAuthToken = t
+				fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from %s (validated)\n", appName, tokenFile)
 				return
 			}
 		}
@@ -1279,6 +1641,43 @@ func oauthToken() string {
 		}
 	})
 	return cachedOAuthToken
+}
+
+// validateOAuthToken does a quick round-trip to the Anthropic API to check
+// whether the given Bearer token is accepted. Checks both the HTTP status code
+// and the response body for auth errors. Returns true only if the token works;
+// false otherwise (expired, revoked, or invalid).
+func validateOAuthToken(tok string) bool {
+	req, err := http.NewRequest("GET", "https://api.anthropic.com/v1/models", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	// Short timeout — this is a connectivity check, not a stress test
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		// Network error — assume token might be fine (DNS/connectivity issue)
+		return true
+	}
+	defer resp.Body.Close()
+
+	// 401 = definitely invalid
+	if resp.StatusCode == 401 {
+		return false
+	}
+
+	// Any other status: check body for auth_error or invalid_token
+	if resp.StatusCode != 200 {
+		return true // non-200 non-401, assume ok
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if strings.Contains(string(body), `"type":"authentication_error"`) ||
+		strings.Contains(string(body), `"type":"invalid_request_error"`) {
+		return false
+	}
+	return true
 }
 
 func proxyEnv() string {
@@ -1339,7 +1738,7 @@ func injectProxyEnvWithModel(env []string, sessionID string, model string) []str
 	overrideEnv, providerApplied := injectProviderEnv(env, model)
 	if providerApplied {
 		env = overrideEnv
-	} else if e := proxyEnv(); e != "" {
+	} else if e := proxyEnv(); e != "" && oauthToken() != "" {
 		// If sessionID provided, append path prefix
 		if sessionID != "" {
 			// e is "ANTHROPIC_BASE_URL=http://127.0.0.1:9091"
