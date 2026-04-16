@@ -29,9 +29,9 @@ Multi-file Go program (package main, ~29,000 lines across 58 files) with one int
 | File | Lines | Responsibility |
 |------|-------|----------------|
 | **Server Core** | | |
-| `server.go` | 1,676 | HTTP server, 35+ REST endpoints, auth middleware, config loading, graceful shutdown |
-| `server_session.go` | 1,562 | Session lifecycle (create/destroy/rehydrate), TTL reaper, concurrent session limits, state machine |
-| `server_proxy.go` | 1,398 | Provider proxy (OpenAI/GLM/MiniMax), request logging, token tracking, S3 image upload |
+| `server.go` | 1,980 | HTTP server, 35+ REST endpoints, auth middleware, config loading, graceful shutdown |
+| `server_session.go` | 1,681 | Session lifecycle (create/destroy/rehydrate), TTL reaper, concurrent session limits, state machine |
+| `server_proxy.go` | 1,819 | Provider proxy (OpenAI/GLM/MiniMax), OAuth token validation, telemetry capture, CC session ID tracking, S3 image upload |
 | `server_telegram.go` | 1,323 | Telegram bot webhook, message relay, session↔chat association |
 | `server_process.go` | 623 | Claude process spawning, stderr capture, exit handling |
 | `server_rename.go` | 642 | Session auto-rename via AI, model selection |
@@ -68,6 +68,7 @@ Multi-file Go program (package main, ~29,000 lines across 58 files) with one int
 | `versions.go` | 270 | Version history, safe build (backup→build→verify→rollback) |
 | **Utilities** | | |
 | `provider_openai.go` | 832 | Codex protocol proxy: Anthropic ↔ OpenAI tool protocol translation |
+| `provider_ollama.go` | 616 | Anthropic→Ollama protocol proxy (Anthropic messages → OpenAI-compatible /v1/chat) |
 | `tui.go` | 473 | Bubbletea TUI session picker (resume mode) |
 | `resolve_secrets.go` | 97 | Vault reference resolution (vault://, env://) |
 | `safe.go` | 118 | Symlink protection, NFS-safe file locking |
