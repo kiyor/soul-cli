@@ -326,10 +326,13 @@ body{
 .model-badge:empty{opacity:0}
 .cost-badge{font-size:11px;color:var(--cost-color);background:var(--badge-bg);border:1px solid var(--border2);border-radius:6px;padding:2px 8px;backdrop-filter:blur(8px);transition:opacity .2s;font-family:var(--mono)}
 .cost-badge:empty{opacity:0}
-/* 本我 badge — replace-soul (--system-prompt-file) mode indicator */
+/* Session mode badge — visible only for non-default modes (本我, CC) */
 .soul-badge{flex-shrink:0;z-index:11;font-family:"Noto Serif SC","STKaiti","Songti SC",serif;font-size:11px;font-weight:600;letter-spacing:2px;color:#1a0a1a;background:linear-gradient(135deg,#ff6bcf 0%,#c084fc 100%);border:1px solid rgba(0,0,0,.45);border-radius:10px;padding:1px 8px;box-shadow:0 0 10px rgba(255,107,207,.5),inset 0 1px 0 rgba(255,255,255,.35);backdrop-filter:blur(8px);cursor:help;display:none;animation:soul-pulse 3s ease-in-out infinite;margin-right:6px}
 .soul-badge.on{display:inline-block}
+/* CC/bare mode badge — cooler cyan/blue palette */
+.soul-badge.cc{font-family:"JetBrains Mono","Fira Code",monospace;letter-spacing:1px;color:#071a24;background:linear-gradient(135deg,#7dd3fc 0%,#60a5fa 100%);box-shadow:0 0 10px rgba(96,165,250,.5),inset 0 1px 0 rgba(255,255,255,.35);animation:cc-pulse 3s ease-in-out infinite}
 @keyframes soul-pulse{0%,100%{box-shadow:0 0 10px rgba(255,107,207,.5),inset 0 1px 0 rgba(255,255,255,.35)}50%{box-shadow:0 0 16px rgba(255,107,207,.75),inset 0 1px 0 rgba(255,255,255,.5)}}
+@keyframes cc-pulse{0%,100%{box-shadow:0 0 10px rgba(96,165,250,.5),inset 0 1px 0 rgba(255,255,255,.35)}50%{box-shadow:0 0 16px rgba(96,165,250,.75),inset 0 1px 0 rgba(255,255,255,.5)}}
 .context-bar{position:absolute;top:30px;right:46px;z-index:10;display:flex;align-items:center;gap:6px;pointer-events:none;transition:opacity .3s}
 .context-bar.hidden{opacity:0}
 .context-track{width:60px;height:4px;border-radius:99px;background:var(--border);overflow:hidden}
@@ -1254,6 +1257,19 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 .sheet input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(var(--accent-rgb,.5),0.08)}
 .sheet .toggle{display:flex;align-items:center;gap:10px;margin-bottom:16px;font-size:13px;color:var(--muted)}
 .sheet .toggle input{width:auto;margin:0}
+/* 3-way session mode selector (weiran / benwo / cc) — segmented control */
+.mode-select{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+.mode-select>.mode-label{font-size:12px;color:var(--muted2);font-weight:600;letter-spacing:.5px}
+.mode-seg{display:flex;gap:4px;padding:3px;background:var(--bg2);border:1px solid var(--border2);border-radius:12px}
+.mode-seg input[type=radio]{display:none}
+.mode-seg label{flex:1;text-align:center;padding:9px 8px;border-radius:9px;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;transition:background .15s ease,color .15s ease;user-select:none}
+.mode-seg label:hover{color:var(--text)}
+.mode-seg input[type=radio]:checked+label{background:linear-gradient(135deg,rgba(var(--accent-r),.85),rgba(var(--pink-r),.7));color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+.mode-seg label .mode-hint{display:block;font-size:10px;font-weight:500;opacity:.65;margin-top:2px;letter-spacing:.3px}
+/* Compact variant for sidebar settings panel */
+.mode-seg.compact{padding:2px;gap:2px}
+.mode-seg.compact label{padding:5px 6px;font-size:11px;font-weight:600}
+.mode-seg.compact label .mode-hint{display:none}
 .sheet .actions{display:flex;gap:10px;margin-top:4px}
 .sheet .actions .btn{flex:1;padding:14px;border-radius:14px;border:none;font-size:14px;font-weight:700;cursor:pointer;min-height:48px}
 .sheet .actions .btn-cancel{background:var(--btn-bg);color:var(--muted)}
@@ -1602,9 +1618,16 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
         <span class="settings-label">Chrome <span style="font-size:11px;opacity:.55">(reloads)</span></span>
         <label class="toggle-switch"><input type="checkbox" id="toggle-chrome" onchange="applyChrome(this.checked)"><span class="toggle-track"></span></label>
       </div>
-      <div class="settings-row">
-        <span class="settings-label">本我 <span style="font-size:11px;opacity:.55">(replace, reloads)</span></span>
-        <label class="toggle-switch"><input type="checkbox" id="toggle-replace-soul" onchange="applyReplaceSoul(this.checked)"><span class="toggle-track"></span></label>
+      <div class="settings-row" style="align-items:center">
+        <span class="settings-label">Mode <span style="font-size:11px;opacity:.55">(reloads)</span></span>
+        <div class="mode-seg compact" role="radiogroup" aria-label="Session mode" style="flex:1;max-width:220px;margin-left:10px">
+          <input type="radio" name="sb-mode" id="sb-mode-weiran" value="weiran" onchange="applyMode('weiran')">
+          <label for="sb-mode-weiran">未然</label>
+          <input type="radio" name="sb-mode" id="sb-mode-benwo" value="benwo" onchange="applyMode('benwo')">
+          <label for="sb-mode-benwo">本我</label>
+          <input type="radio" name="sb-mode" id="sb-mode-cc" value="cc" onchange="applyMode('cc')">
+          <label for="sb-mode-cc">CC</label>
+        </div>
       </div>
       <div class="settings-row">
         <span class="settings-label">Show tools</span>
@@ -1696,13 +1719,16 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
       <option value="">— No GAL save —</option>
     </select>
   </div>
-  <div class="toggle">
-    <input type="checkbox" id="m-soul" checked>
-    <span>Enable soul files (personality, memory)</span>
-  </div>
-  <div class="toggle">
-    <input type="checkbox" id="m-replace-soul" {{.DefaultReplaceSoulChecked}}>
-    <span>本我模式 <span style="font-size:11px;color:var(--muted2)">(replace CC harness)</span></span>
+  <div class="mode-select">
+    <span class="mode-label">Session mode</span>
+    <div class="mode-seg" role="radiogroup" aria-label="Session mode">
+      <input type="radio" name="m-mode" id="m-mode-weiran" value="weiran" checked>
+      <label for="m-mode-weiran">未然<span class="mode-hint">CC harness + SOUL</span></label>
+      <input type="radio" name="m-mode" id="m-mode-benwo" value="benwo">
+      <label for="m-mode-benwo">本我<span class="mode-hint">SOUL replaces CC</span></label>
+      <input type="radio" name="m-mode" id="m-mode-cc" value="cc">
+      <label for="m-mode-cc">CC<span class="mode-hint">bare Claude Code</span></label>
+    </div>
   </div>
   <div class="actions">
     <button class="btn btn-cancel" onclick="closeNewSheet()">Cancel</button>
@@ -2698,13 +2724,12 @@ function handleSessionsUpdate(list){
   Object.keys(sessions).forEach(id=>{if(!newIds.has(id)){delete sessions[id];if(activeSessionId===id&&!resumeInProgress)selectSession(null)}});
   updateStatusBar();
 
-  // Re-sync 本我 badge + toggle if the active session's flag changed
+  // Re-sync session mode radio + badge if the active session's flags changed
   // (e.g. another tab toggled it, or a reload completed).
   if(activeSessionId&&sessions[activeSessionId]){
-    const rs=!!sessions[activeSessionId].replace_soul;
-    const tgl=document.getElementById('toggle-replace-soul');
-    if(tgl&&!replaceSoulReloading&&tgl.checked!==rs)tgl.checked=rs;
-    updateSoulBadge(rs);
+    const mode=sessionMode(sessions[activeSessionId]);
+    if(!modeReloading&&currentSidebarMode()!==mode)setSidebarMode(mode);
+    updateModeBadge(mode);
   }
 
   if(!list||list.length===0){
@@ -2731,9 +2756,16 @@ function handleSessionsUpdate(list){
     const rawCost=s.proxy_cost_usd||s.total_cost_usd||0;
     const cost=rawCost>0?fmtCost(rawCost):'';
     const modelDisplay=shortModelName(s.model);
-    const title=s.first_msg||s.name||shortId(s.id);
-    const sub=s.name||shortId(s.id);
-    el.innerHTML=`<div class="si-top"><span class="si-title" title="${esc(title)}">${esc(title)}</span><span class="si-dot ${s.status}">${s.status==='running'?'<span></span>':''}</span></div><div class="si-sub"><span class="sid-chip" onclick="event.stopPropagation();copySid(this,'${s.id}')" title="Click to copy ID">${shortId(s.id)}</span> · ${esc(sub)}</div><div class="si-meta"><span class="${modelClass(s.model)}">${modelDisplay}</span><span>${s.status}</span><span>${s.num_turns||0}t</span>${cost?'<span>'+cost+'</span>':''}</div><div class="si-actions"><button class="si-rename" onclick="event.stopPropagation();promptRename('${s.id}','${esc(s.name||'')}')">&#9998;</button><button class="si-del" onclick="openDestroySheet('${s.id}')">&times;</button></div>`;
+    // sid-chip: prefer cc id (the stable handle that works with `claude --resume <id>`
+    // and maps directly to ~/.claude/projects/*.jsonl). Fall back to weiran id when
+    // cc id not yet known (e.g. freshly created session before init message arrives).
+    const ccid=s.claude_session_id||'';
+    const chipPrimary=ccid||s.id;
+    const chipCopy=ccid||s.id;
+    const chipTitle=ccid?`CC: ${ccid}\nWeiran: ${s.id}\nClick to copy CC id`:`Weiran: ${s.id}\nClick to copy`;
+    const title=s.first_msg||s.name||shortId(chipPrimary);
+    const sub=s.name||shortId(chipPrimary);
+    el.innerHTML=`<div class="si-top"><span class="si-title" title="${esc(title)}">${esc(title)}</span><span class="si-dot ${s.status}">${s.status==='running'?'<span></span>':''}</span></div><div class="si-sub"><span class="sid-chip" onclick="event.stopPropagation();copySid(this,'${chipCopy}')" title="${esc(chipTitle)}">${shortId(chipPrimary)}</span> · ${esc(sub)}</div><div class="si-meta"><span class="${modelClass(s.model)}">${modelDisplay}</span><span>${s.status}</span><span>${s.num_turns||0}t</span>${cost?'<span>'+cost+'</span>':''}</div><div class="si-actions"><button class="si-rename" onclick="event.stopPropagation();promptRename('${s.id}','${esc(s.name||'')}')">&#9998;</button><button class="si-del" onclick="openDestroySheet('${s.id}')">&times;</button></div>`;
   });
   existing.forEach((el,id)=>{if(!newIds.has(id)){el.remove();_notifiedSessions.delete(id)}});
   _updateTitleBadge();
@@ -2838,7 +2870,7 @@ function selectSession(id){
   document.getElementById('context-bar').classList.add('hidden');
   setCwd('');
   currentModel='';contextMax=0;contextTokensPeak=0;
-  updateSoulBadge(false);
+  updateModeBadge('weiran');
   updateStatusBar();
   updateTodoDrawer([]);
   document.getElementById('todo-drawer').classList.remove('open');
@@ -2876,10 +2908,10 @@ function selectSession(id){
   updateStatusBar();
   // Restore chrome toggle state
   document.getElementById('toggle-chrome').checked=!!(s&&s.chrome_enabled);
-  // Restore 本我 toggle + badge
-  const replaceOn=!!(s&&s.replace_soul);
-  document.getElementById('toggle-replace-soul').checked=replaceOn;
-  updateSoulBadge(replaceOn);
+  // Restore session mode radio + badge
+  const mode=sessionMode(s);
+  setSidebarMode(mode);
+  updateModeBadge(mode);
   // Restore compact UI state
   syncCompactUI();
 
@@ -3763,6 +3795,8 @@ function openNewSheet(){
   document.getElementById('new-overlay').classList.add('show');
   requestAnimationFrame(()=>document.getElementById('new-sheet').classList.add('show'));
   if(isMobile)closeSidebar();
+  // Apply server-preferred default mode every open (in case it changed)
+  setNewSessionMode(SERVER_CONFIG.defaultReplaceSoul?'benwo':'weiran');
   // Fetch GAL saves only when gal skill is available (easter egg)
   const galWrap=document.getElementById('gal-resume-wrap');
   if(galWrap&&galWrap.style.display!=='none')fetchGalSaves();
@@ -3959,13 +3993,40 @@ function closeNewSheet(){
   });
 })();
 
+// Session mode helpers ─ keep frontend and backend agreed on the mapping
+function modeToFlags(mode){
+  switch(mode){
+    case 'weiran': return {soul_files:true,  replace_soul:false};
+    case 'benwo':  return {soul_files:true,  replace_soul:true };
+    case 'cc':     return {soul_files:false, replace_soul:false};
+  }
+  return {soul_files:true, replace_soul:false};
+}
+function flagsToMode(soul,replace){
+  if(!soul)return 'cc';
+  return replace?'benwo':'weiran';
+}
+function sessionMode(s){
+  if(!s)return 'weiran';
+  if(s.mode)return s.mode;
+  return flagsToMode(s.soul_enabled!==false, !!s.replace_soul);
+}
+function getNewSessionMode(){
+  const el=document.querySelector('input[name="m-mode"]:checked');
+  return el?el.value:'weiran';
+}
+function setNewSessionMode(mode){
+  const el=document.getElementById('m-mode-'+mode);
+  if(el)el.checked=true;
+}
+
 function createSession(){
   const name=document.getElementById('m-name').value.trim();
   const project=document.getElementById('m-project').value.trim();
   const model=document.getElementById('m-model').value.trim();
   const initial=document.getElementById('m-initial').value.trim();
-  const soul=document.getElementById('m-soul').checked;
-  const replaceSoul=document.getElementById('m-replace-soul').checked;
+  const mode=getNewSessionMode();
+  const flags=modeToFlags(mode);
   const galId=document.getElementById('m-gal').value;
   closeNewSheet();
   const msg={
@@ -3973,15 +4034,18 @@ function createSession(){
     name:name||undefined,
     project:project||undefined,
     model:model||undefined,
-    soul_files:soul,
-    replace_soul:replaceSoul,
+    mode:mode,
+    // dual-send legacy bools for older server builds / external consumers
+    soul_files:flags.soul_files,
+    replace_soul:flags.replace_soul,
     initial_message:initial||undefined
   };
   if(galId)msg.gal_id=galId;
   wsSend(msg);
   ['m-name','m-project','m-model','m-initial'].forEach(id=>document.getElementById(id).value='');
   document.getElementById('m-gal').value='';
-  document.getElementById('m-replace-soul').checked=SERVER_CONFIG.defaultReplaceSoul;
+  // Reset mode to server-preferred default for next open
+  setNewSessionMode(SERVER_CONFIG.defaultReplaceSoul?'benwo':'weiran');
 }
 
 function promptRename(id,currentName){
@@ -4030,7 +4094,7 @@ function doResume(sid,displayName,model){
   const m=document.getElementById('messages');m.style.display='flex';m.innerHTML='';
   document.getElementById('composer').classList.remove('disabled');
   document.getElementById('model-badge').textContent='';
-  updateSoulBadge(false);
+  updateModeBadge('weiran');
 
   // Load history messages first, then resume
   loadHistoryMessages(sid).then(msgs=>{
@@ -4586,47 +4650,82 @@ function applyChrome(on){
   });
 }
 
-let replaceSoulReloading=false;
-function applyReplaceSoul(on){
-  if(!activeSessionId||replaceSoulReloading)return;
-  replaceSoulReloading=true;
-  const tgl=document.getElementById('toggle-replace-soul');
-  tgl.disabled=true;
+let modeReloading=false;
+const MODE_LABELS={weiran:'未然',benwo:'本我',cc:'CC'};
+const MODE_MESSAGES={
+  weiran:'未然模式 ✓  (CC harness + SOUL appended)',
+  benwo:'本我模式 ✓  (CC harness stripped, only SOUL active)',
+  cc:'CC 模式 ✓  (bare Claude Code, 未然人格关闭)'
+};
+function setSidebarMode(mode){
+  const el=document.getElementById('sb-mode-'+mode);
+  if(el)el.checked=true;
+}
+function currentSidebarMode(){
+  const el=document.querySelector('input[name="sb-mode"]:checked');
+  return el?el.value:'weiran';
+}
+function applyMode(mode){
+  if(!activeSessionId||modeReloading)return;
+  const prevMode=sessionMode(sessions[activeSessionId]);
+  if(mode===prevMode)return;
+  modeReloading=true;
+  const radios=document.querySelectorAll('input[name="sb-mode"]');
+  radios.forEach(r=>r.disabled=true);
   const composer=document.getElementById('composer');
   composer.classList.add('disabled');
   document.getElementById('send-btn').disabled=true;
-  addSystemMsg(`本我模式 ${on?'on':'off'} — reloading session (identity may shift mid-session)...`);
-  fetch(`/api/sessions/${activeSessionId}/replace-soul`,{
+  const warn=(mode==='cc'||prevMode==='cc')?' (identity shifts strongly — SOUL toggles on/off)':' (identity may shift mid-session)';
+  addSystemMsg(`Switching to ${MODE_LABELS[mode]||mode} — reloading session${warn}...`);
+  fetch(`/api/sessions/${activeSessionId}/mode`,{
     method:'POST',
     headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},
-    body:JSON.stringify({enabled:on})
+    body:JSON.stringify({mode:mode})
   }).then(r=>r.json()).then(d=>{
-    if(d.error){addErrorMsg('本我 toggle failed: '+d.error);tgl.checked=!on;}
+    if(d.error){addErrorMsg('Mode switch failed: '+d.error);setSidebarMode(prevMode);}
     else{
       const s=sessions[activeSessionId];
-      if(s)s.replace_soul=on;
-      updateSoulBadge(on);
-      addSystemMsg(on?'本我模式 enabled ✓  (CC harness stripped, only SOUL active)':'本我模式 disabled ✓  (CC harness restored)');
+      if(s){
+        const flags=modeToFlags(mode);
+        s.soul_enabled=flags.soul_files;
+        s.replace_soul=flags.replace_soul;
+        s.mode=mode;
+      }
+      updateModeBadge(mode);
+      addSystemMsg(MODE_MESSAGES[mode]||('Mode: '+mode));
     }
   }).catch(e=>{
-    addErrorMsg('本我 toggle failed: '+e.message);
-    tgl.checked=!on;
+    addErrorMsg('Mode switch failed: '+e.message);
+    setSidebarMode(prevMode);
   }).finally(()=>{
     setTimeout(()=>{
-      replaceSoulReloading=false;
-      tgl.disabled=false;
+      modeReloading=false;
+      radios.forEach(r=>r.disabled=false);
       composer.classList.remove('disabled');
       document.getElementById('send-btn').disabled=!document.getElementById('input').value.trim();
     },2000);
   });
 }
+// Back-compat shim: some callers may still invoke applyReplaceSoul
+function applyReplaceSoul(on){ applyMode(on?'benwo':'weiran'); }
 
-function updateSoulBadge(on){
+function updateModeBadge(mode){
   const badge=document.getElementById('soul-badge');
   if(!badge)return;
-  if(on)badge.classList.add('on');
-  else badge.classList.remove('on');
+  badge.classList.remove('on','cc');
+  if(mode==='benwo'){
+    badge.textContent='本我';
+    badge.title='本我模式 — CC 原生 system prompt 已被替换，只剩灵魂';
+    badge.classList.add('on');
+  }else if(mode==='cc'){
+    badge.textContent='CC';
+    badge.title='CC 模式 — 纯 Claude Code，无未然人格';
+    badge.classList.add('on','cc');
+  }
+  // weiran (default): no badge
 }
+// Back-compat shim
+function updateSoulBadge(on){ updateModeBadge(on?'benwo':'weiran'); }
 
 function syncSettingsDropdowns(){
   // Sync theme selector
@@ -5249,7 +5348,7 @@ function showSniffPanel(title){
   document.getElementById('context-bar').classList.add('hidden');
   document.getElementById('model-badge').textContent='';
   document.getElementById('cwd-badge').textContent='';
-  updateSoulBadge(false);
+  updateModeBadge('weiran');
   if(isMobile)closeSidebar();
 }
 

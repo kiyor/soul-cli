@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ── Server Session DB (tracks rename state + user turns) ──
@@ -51,6 +53,11 @@ func openServerDB() (*sql.DB, error) {
 		// --system-prompt-file instead of --append-system-prompt-file, stripping
 		// the CC native harness and leaving only the soul prompt.
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN replace_soul INTEGER NOT NULL DEFAULT 0`)
+		// Migration: add soul_enabled — when false, session runs as pure CC (no
+		// soul prompt attached, equivalent to `weiran spawn --bare`). Default 1
+		// preserves historical semantics (sessions created before this column
+		// existed had soul enabled).
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN soul_enabled INTEGER NOT NULL DEFAULT 1`)
 		// Migration: add total_cost_usd — persisted from proxy log aggregation
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN total_cost_usd REAL NOT NULL DEFAULT 0`)
 
@@ -115,6 +122,49 @@ func setClaudeSessionID(sessionID, claudeSID string) {
 	}
 	db.Exec(`UPDATE server_sessions SET claude_session_id=?, updated_at=? WHERE session_id=?`,
 		claudeSID, time.Now().Format(time.RFC3339), sessionID)
+}
+
+// resolveResumeIDs disambiguates an input id into (weiranID, ccID).
+//
+// Callers of resumeSession historically passed a Claude Code session id as the
+// "sessionID" parameter. With weiran-id-stable-on-resume, the preferred input
+// is a weiran id. This helper accepts either and returns both so the caller
+// can reuse the weiran id (keeping UI bookmarks / IPC keys stable) while still
+// handing the correct cc id to `claude --resume`.
+//
+// Lookup order:
+//  1. input matches server_sessions.session_id  → weiran id known, cc id from row
+//  2. input matches server_sessions.claude_session_id → reverse lookup weiran id
+//  3. no match → treat input as cc id (legacy), mint a fresh weiran id
+//
+// When multiple weiran rows share the same cc id (normal case — every prior
+// resume generated a new weiran row with the same cc id), pick the most
+// recently updated one. That row is the "current" weiran identity for that
+// conversation.
+func resolveResumeIDs(input string) (weiranID, ccID string, isNew bool) {
+	if input == "" {
+		return "", "", true
+	}
+	db, err := openServerDB()
+	if err != nil {
+		return input, input, true
+	}
+	// Case 1: input is a weiran id
+	var cc string
+	err = db.QueryRow(`SELECT claude_session_id FROM server_sessions WHERE session_id=?`, input).Scan(&cc)
+	if err == nil {
+		return input, cc, false
+	}
+	// Case 2: input is a cc id — find the most recent weiran session pointing at it
+	var wid string
+	err = db.QueryRow(`SELECT session_id FROM server_sessions
+		WHERE claude_session_id=?
+		ORDER BY updated_at DESC LIMIT 1`, input).Scan(&wid)
+	if err == nil {
+		return wid, input, false
+	}
+	// Case 3: unknown — legacy path, generate new weiran id
+	return uuid.New().String(), input, true
 }
 
 // getSessionCategory returns the category for a session by its weiran session ID or Claude session ID.
@@ -333,6 +383,33 @@ func getReplaceSoulEnabled(sessionID string) bool {
 	}
 	var v int
 	db.QueryRow(`SELECT replace_soul FROM server_sessions WHERE session_id=? OR claude_session_id=?`, sessionID, sessionID).Scan(&v)
+	return v == 1
+}
+
+// setSoulEnabledDB persists the soul_enabled flag for a session (false → bare/CC mode).
+func setSoulEnabledDB(sessionID string, enabled bool) {
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	v := 0
+	if enabled {
+		v = 1
+	}
+	now := time.Now().Format(time.RFC3339)
+	db.Exec(`UPDATE server_sessions SET soul_enabled=?, updated_at=? WHERE session_id=?`,
+		v, now, sessionID)
+}
+
+// getSoulEnabledDB reads the soul_enabled flag. Defaults true if row missing
+// (preserves pre-migration semantics).
+func getSoulEnabledDB(sessionID string) bool {
+	db, err := openServerDB()
+	if err != nil {
+		return true
+	}
+	var v int = 1
+	db.QueryRow(`SELECT soul_enabled FROM server_sessions WHERE session_id=? OR claude_session_id=?`, sessionID, sessionID).Scan(&v)
 	return v == 1
 }
 
@@ -656,6 +733,7 @@ type rehydratableSession struct {
 	Category        string
 	Model           string
 	ReplaceSoul     bool
+	SoulEnabled     bool
 	RehydrateMsg    string
 	ChromeEnabled   bool
 	GalID           string
@@ -672,7 +750,7 @@ func getRehydratableSessions(maxAge time.Duration) ([]rehydratableSession, error
 	cutoff := time.Now().Add(-maxAge).Format(time.RFC3339)
 	rows, err := db.Query(`
 		SELECT session_id, claude_session_id, name, category, replace_soul,
-		       rehydrate_message, chrome_enabled, gal_id, model
+		       rehydrate_message, chrome_enabled, gal_id, model, soul_enabled
 		FROM server_sessions
 		WHERE status IN ('active', 'suspended')
 		  AND claude_session_id != ''
@@ -688,13 +766,14 @@ func getRehydratableSessions(maxAge time.Duration) ([]rehydratableSession, error
 	var result []rehydratableSession
 	for rows.Next() {
 		var s rehydratableSession
-		var replaceSoul, chrome int
+		var replaceSoul, chrome, soulEnabled int
 		if err := rows.Scan(&s.SessionID, &s.ClaudeSID, &s.Name, &s.Category,
-			&replaceSoul, &s.RehydrateMsg, &chrome, &s.GalID, &s.Model); err != nil {
+			&replaceSoul, &s.RehydrateMsg, &chrome, &s.GalID, &s.Model, &soulEnabled); err != nil {
 			continue
 		}
 		s.ReplaceSoul = replaceSoul == 1
 		s.ChromeEnabled = chrome == 1
+		s.SoulEnabled = soulEnabled == 1
 		result = append(result, s)
 	}
 	return result, nil

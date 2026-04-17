@@ -43,6 +43,43 @@ func isEphemeralCategory(cat string) bool {
 	return cat == CategoryHeartbeat || cat == CategoryCron || cat == CategoryEvolve
 }
 
+// Session "mode" is a UI-level enum over two orthogonal persistence flags:
+//   weiran (default) — soul=true,  replace=false → CC harness + SOUL appended
+//   benwo (本我)      — soul=true,  replace=true  → SOUL replaces CC harness
+//   cc    (bare)     — soul=false, replace=ignored → pure Claude Code, no SOUL
+//
+// The dead combo soul=false+replace=true is normalized to cc.
+const (
+	ModeWeiran = "weiran"
+	ModeBenwo  = "benwo"
+	ModeCC     = "cc"
+)
+
+// modeToFlags returns (soulEnabled, replaceSoul, ok). Unknown modes return ok=false
+// so callers can fall back to legacy bool fields.
+func modeToFlags(mode string) (bool, bool, bool) {
+	switch mode {
+	case ModeWeiran:
+		return true, false, true
+	case ModeBenwo:
+		return true, true, true
+	case ModeCC:
+		return false, false, true
+	}
+	return false, false, false
+}
+
+// flagsToMode is the inverse. Dead combo (soul=false,replace=true) → cc.
+func flagsToMode(soul, replace bool) string {
+	if !soul {
+		return ModeCC
+	}
+	if replace {
+		return ModeBenwo
+	}
+	return ModeWeiran
+}
+
 // serverSession represents one active Claude Code session.
 type serverSession struct {
 	ID            string    `json:"id"`
@@ -213,6 +250,7 @@ func (s *serverSession) snapshot() map[string]any {
 		"soul_enabled":      s.SoulEnabled,
 		"chrome_enabled":    s.ChromeEnabled,
 		"replace_soul":      s.ReplaceSoul,
+		"mode":              flagsToMode(s.SoulEnabled, s.ReplaceSoul),
 		"first_msg":         s.FirstMsg,
 		"spawned_by":        spawnedBy,
 	}
@@ -814,6 +852,11 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 	if opts.ReplaceSoul {
 		setReplaceSoulEnabled(id, true)
 	}
+	// Persist soul_enabled so rehydration can rebuild bare sessions correctly.
+	// Default column value is 1; only write when false to keep UPDATE traffic low.
+	if !opts.Soul {
+		setSoulEnabledDB(id, false)
+	}
 
 	// Attach stdout→SSE bridge, exit watcher, and stderr drain
 	attachProcessBridge(proc, sess, "server-create", true)
@@ -855,12 +898,18 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 		return nil // no-op
 	}
 	oldProc := sess.process
+	// Preserve conversation history across the reload. Without ResumeID the
+	// respawned claude process would start a fresh cc session, orphaning the
+	// existing jsonl and breaking the in-progress conversation.
+	resumeID := sess.ClaudeSID
 	opts := sessionOpts{
 		WorkDir:          sess.Project,
 		SystemPromptFile: sess.promptFile,
 		Model:            sess.Model,
 		MCPConfig:        sess.mcpConfig,
 		Chrome:           enabled,
+		ResumeID:         resumeID,
+		ReplaceSoul:      sess.ReplaceSoul,
 		ServerSessionID:  sess.ID,
 	}
 	sess.mu.Unlock()
@@ -907,36 +956,78 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 	return nil
 }
 
-// setReplaceSoul reloads a session's underlying claude process with
-// --system-prompt-file (本我模式) toggled on/off. The serverSession
-// (broadcaster, history, name, etc.) is preserved across the reload — only
-// the subprocess is swapped. Note: toggling mid-session causes the system
-// prompt to change, which means the model's "identity" shifts for the rest
-// of the conversation. The UI warns the user about this.
+// setReplaceSoul is a thin compatibility wrapper around setMode. Kept so the
+// legacy POST /api/sessions/{id}/replace-soul endpoint still works.
 func (sm *sessionManager) setReplaceSoul(id string, enabled bool) error {
+	if enabled {
+		return sm.setMode(id, ModeBenwo)
+	}
+	// Disabling replace on a bare session should stay bare; otherwise go back to weiran.
+	if sess := sm.getSession(id); sess != nil {
+		sess.mu.Lock()
+		soul := sess.SoulEnabled
+		sess.mu.Unlock()
+		if !soul {
+			return sm.setMode(id, ModeCC)
+		}
+	}
+	return sm.setMode(id, ModeWeiran)
+}
+
+// setMode reloads a session's underlying claude process under one of the three
+// session modes (weiran/benwo/cc). The serverSession (broadcaster, history,
+// name, etc.) is preserved across the reload — only the subprocess is swapped.
+// Switching modes mid-session shifts the model's identity for the rest of the
+// conversation; the UI surfaces a warning.
+func (sm *sessionManager) setMode(id, mode string) error {
+	soulEnabled, replaceSoul, ok := modeToFlags(mode)
+	if !ok {
+		return fmt.Errorf("unknown mode: %q (expected weiran/benwo/cc)", mode)
+	}
 	sess := sm.getSession(id)
 	if sess == nil {
 		return fmt.Errorf("session not found: %s", id)
 	}
 
 	sess.mu.Lock()
-	if sess.ReplaceSoul == enabled && sess.process != nil && sess.process.alive() {
+	// No-op if already in target mode and process alive
+	if sess.SoulEnabled == soulEnabled && sess.ReplaceSoul == replaceSoul &&
+		sess.process != nil && sess.process.alive() {
 		sess.mu.Unlock()
-		return nil // no-op
+		return nil
 	}
 	oldProc := sess.process
 	resumeID := sess.ClaudeSID // preserve conversation history across reload
+	existingPromptFile := sess.promptFile
+	workDir := sess.Project
+	model := sess.Model
+	mcpConfig := sess.mcpConfig
+	chrome := sess.ChromeEnabled
+	sess.mu.Unlock()
+
+	// Resolve prompt file for the new mode.
+	//   - cc mode → empty (no --*-system-prompt-file flag)
+	//   - weiran/benwo mode → rebuild if missing, else reuse existing
+	var promptFile string
+	if soulEnabled {
+		if existingPromptFile != "" {
+			promptFile = existingPromptFile
+		} else {
+			initSessionDir()
+			promptFile = writePromptForSession(id, buildPromptWithOverrides(promptOverrides{}))
+		}
+	}
+
 	opts := sessionOpts{
-		WorkDir:          sess.Project,
-		SystemPromptFile: sess.promptFile,
-		Model:            sess.Model,
-		MCPConfig:        sess.mcpConfig,
-		Chrome:           sess.ChromeEnabled,
-		ReplaceSoul:      enabled,
+		WorkDir:          workDir,
+		SystemPromptFile: promptFile,
+		Model:            model,
+		MCPConfig:        mcpConfig,
+		Chrome:           chrome,
+		ReplaceSoul:      replaceSoul,
 		ResumeID:         resumeID,
 		ServerSessionID:  sess.ID,
 	}
-	sess.mu.Unlock()
 
 	if oldProc != nil {
 		oldProc.suppressClose.Store(true)
@@ -958,11 +1049,14 @@ func (sm *sessionManager) setReplaceSoul(id string, enabled bool) error {
 
 	sess.mu.Lock()
 	sess.process = newProc
-	sess.ReplaceSoul = enabled
+	sess.SoulEnabled = soulEnabled
+	sess.ReplaceSoul = replaceSoul
+	sess.promptFile = promptFile
 	sess.ClaudeSID = ""
 	sess.mu.Unlock()
 
-	setReplaceSoulEnabled(id, enabled)
+	setReplaceSoulEnabled(id, replaceSoul)
+	setSoulEnabledDB(id, soulEnabled)
 	sess.setStatus("running")
 
 	attachProcessBridge(newProc, sess, "", false)
@@ -970,7 +1064,8 @@ func (sm *sessionManager) setReplaceSoul(id string, enabled bool) error {
 	if sm.hub != nil {
 		sm.hub.notifySessions()
 	}
-	fmt.Fprintf(os.Stderr, "[%s] server: session %s replace_soul=%v reloaded\n", appName, shortID(id), enabled)
+	fmt.Fprintf(os.Stderr, "[%s] server: session %s mode=%s (soul=%v replace=%v) reloaded\n",
+		appName, shortID(id), mode, soulEnabled, replaceSoul)
 	return nil
 }
 
@@ -1206,86 +1301,134 @@ func (sm *sessionManager) reap() {
 
 // ── Resume Session ──
 
-// resumeSession creates a new active session wrapping `claude --resume <sessionID>`.
-// If a session resuming the same Claude session ID is already active, return it.
-// replaceSoul: pointer — nil means "inherit from original session's persisted flag",
-// non-nil means "explicitly use this value".
-func (sm *sessionManager) resumeSession(sessionID, message, displayName, categoryOverride, model string, replaceSoul *bool) (*serverSession, error) {
-	id := uuid.New().String()
+// resumeSession reactivates a session wrapping `claude --resume <ccID>`.
+//
+// Identity model (post weiran-id-stable-on-resume):
+//   - The input `inputID` may be either a weiran session id or a Claude Code
+//     session id; resolveResumeIDs normalizes it to (weiranID, ccID).
+//   - The returned session reuses `weiranID` as its ID — stable across every
+//     resume / rehydrate cycle. Web UI bookmarks, IPC keys, and message /
+//     proxy_requests foreign keys all keep pointing at the same id.
+//   - `ccID` is only handed to `claude --resume` so the CC subprocess appends
+//     to the existing jsonl. CC itself preserves the cc id across --resume
+//     unless --fork-session is specified (verified against CC source).
+//
+// If a session with the same weiran id is already active, this is a no-op
+// and the existing session is returned.
+//
+// replaceSoul / soulEnabled pointers follow their historical contract:
+// nil means "inherit from persisted DB flag", non-nil means "use this value".
+func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryOverride, model string, replaceSoul *bool, soulEnabled *bool) (*serverSession, error) {
+	weiranID, ccID, _ := resolveResumeIDs(inputID)
+	id := weiranID
 	now := time.Now()
 
 	if displayName == "" {
-		displayName = "resume-" + shortID(sessionID)
+		// Short id from cc side — that's what users recognize from `claude -r` land.
+		displayName = "resume-" + shortID(ccID)
 	}
 
 	bc := newBroadcaster()
 	bc.hub = sm.hub
 	bc.sessionID = id
 
-	// Category priority: explicit override > inherited from original session > default
+	// Category priority: explicit override > DB record > default.
+	// getSessionCategory accepts either weiran or cc id (WHERE session_id=? OR claude_session_id=?).
 	resolvedCategory := categoryOverride
 	if resolvedCategory == "" {
-		resolvedCategory = getSessionCategory(sessionID)
+		resolvedCategory = getSessionCategory(id)
 	}
 	if resolvedCategory == "" {
 		resolvedCategory = CategoryInteractive
 	}
 
-	// Model priority: explicit arg > DB record > JSONL init message
+	// Model priority: explicit arg > DB record > JSONL init message.
+	// JSONL lookup MUST use cc id — the file on disk is named after cc id.
 	origModel := model
 	if model == "" {
-		model = getSessionModel(sessionID)
+		model = getSessionModel(id)
 	}
 	if model == "" {
-		model = getModelFromJSONL(sessionID)
+		model = getModelFromJSONL(ccID)
 	}
-	fmt.Fprintf(os.Stderr, "[%s] server: resumeSession model trace: arg=%q → resolved=%q (session %s → %s)\n",
-		appName, origModel, model, shortID(sessionID), shortID(id))
+	fmt.Fprintf(os.Stderr, "[%s] server: resumeSession model trace: arg=%q → resolved=%q (weiran=%s cc=%s)\n",
+		appName, origModel, model, shortID(id), shortID(ccID))
 
 	// Resolve replace_soul: explicit arg wins, else inherit from persisted DB flag
 	resolvedReplaceSoul := false
 	if replaceSoul != nil {
 		resolvedReplaceSoul = *replaceSoul
 	} else {
-		resolvedReplaceSoul = getReplaceSoulEnabled(sessionID)
+		resolvedReplaceSoul = getReplaceSoulEnabled(id)
 	}
 
-	// Inherit first_msg from original session
-	inheritedFirstMsg := getFirstMsgFromJSONL(sessionID)
+	// Resolve soul_enabled: explicit arg wins, else inherit (defaults true).
+	// A bare/CC-mode session resumes without attaching the soul prompt.
+	resolvedSoulEnabled := true
+	if soulEnabled != nil {
+		resolvedSoulEnabled = *soulEnabled
+	} else {
+		resolvedSoulEnabled = getSoulEnabledDB(id)
+	}
+	if !resolvedSoulEnabled {
+		// bare mode has no soul → replace_soul is meaningless, force to false
+		resolvedReplaceSoul = false
+	}
+
+	// Inherit first_msg from original session (jsonl lookup uses cc id).
+	inheritedFirstMsg := getFirstMsgFromJSONL(ccID)
 
 	sess := &serverSession{
-		ID:          id,
-		Name:        displayName,
-		FirstMsg:    inheritedFirstMsg,
-		ResumedFrom: sessionID,
+		ID:       id,
+		Name:     displayName,
+		FirstMsg: inheritedFirstMsg,
+		// ResumedFrom is no longer set on internal resume — the weiran id is
+		// stable, so there is no "from". Kept as a field for backward compat
+		// with persisted data and for future --fork-session support.
+		ResumedFrom: "",
+		ClaudeSID:   ccID, // pre-populate; init message will confirm (same value expected)
 		Project:     workspace,
 		Model:       model,
 		Status:      "starting",
 		Category:    resolvedCategory,
 		CreatedAt:   now,
 		LastActive:  now,
-		SoulEnabled: true,
+		SoulEnabled: resolvedSoulEnabled,
 		ReplaceSoul: resolvedReplaceSoul,
 		StreamURL:   fmt.Sprintf("/api/sessions/%s/stream", id),
 		broadcaster: bc,
 		hub:         sm.hub,
 	}
 
-	// Reserve slot atomically: dedup check + maxSessions check + register in one lock scope.
+	// Atomic slot reservation:
+	//   1. If an active session already holds this weiran id, return it (no-op).
+	//   2. If a dead session holds the slot, clear it so we can replace in-place.
+	//   3. If a different weiran session is currently wrapping the same cc id
+	//      (legacy data only — post-migration this is impossible), defer to it.
 	sm.mu.Lock()
-	// Dedup: check if already resumed (by ClaudeSID or ResumedFrom), only if alive
-	for _, s := range sm.sessions {
+	if existing, ok := sm.sessions[id]; ok {
+		existing.mu.Lock()
+		alive := existing.process != nil && existing.process.alive()
+		existing.mu.Unlock()
+		if alive {
+			sm.mu.Unlock()
+			return existing, nil
+		}
+		delete(sm.sessions, id)
+	}
+	for otherID, s := range sm.sessions {
+		if otherID == id {
+			continue
+		}
 		s.mu.Lock()
 		cid := s.ClaudeSID
-		rfrom := s.ResumedFrom
 		alive := s.process != nil && s.process.alive()
 		s.mu.Unlock()
-		if alive && (cid == sessionID || rfrom == sessionID) {
+		if alive && cid == ccID {
 			sm.mu.Unlock()
 			return s, nil
 		}
 	}
-	// Register placeholder to hold the slot
 	sm.sessions[id] = sess
 	sm.mu.Unlock()
 
@@ -1295,15 +1438,19 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 		sm.mu.Unlock()
 	}
 
-	// Build soul prompt — per-session file to avoid concurrent overwrites
-	promptFile := writePromptForSession(id, buildPromptWithOverrides(promptOverrides{}))
-	sess.promptFile = promptFile
+	// Build soul prompt — per-session file to avoid concurrent overwrites.
+	// Skip entirely when resuming a bare/CC-mode session (SystemPromptFile="").
+	var promptFile string
+	if resolvedSoulEnabled {
+		promptFile = writePromptForSession(id, buildPromptWithOverrides(promptOverrides{}))
+		sess.promptFile = promptFile
+	}
 
-	// Spawn Claude Code with --resume
+	// Spawn Claude Code with --resume <ccID>
 	proc, err := spawnClaude(sessionOpts{
 		SystemPromptFile: promptFile,
 		Model:            model,
-		ResumeID:         sessionID,
+		ResumeID:         ccID,
 		ReplaceSoul:      resolvedReplaceSoul,
 		ServerSessionID:  id,
 	})
@@ -1317,13 +1464,20 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 	sess.mu.Unlock()
 	sess.setStatus("running")
 
-	// Register in server DB
+	// Register / refresh in server DB.
+	// ensureServerSession is INSERT ... ON CONFLICT DO UPDATE, so this both
+	// revives a prior row for this weiran id and bumps updated_at.
 	ensureServerSession(id, sess.Name)
+	setClaudeSessionID(id, ccID)
+	updateSessionStatus(id, "active")
 	if model != "" {
 		setSessionModel(id, model)
 	}
 	if resolvedReplaceSoul {
 		setReplaceSoulEnabled(id, true)
+	}
+	if !resolvedSoulEnabled {
+		setSoulEnabledDB(id, false)
 	}
 
 	// Attach stdout bridge with full sync (agent recording + CC name sync + auto-rename)
@@ -1348,7 +1502,8 @@ func (sm *sessionManager) resumeSession(sessionID, message, displayName, categor
 		proc.sendMessage(message)
 	}
 
-	fmt.Fprintf(os.Stderr, "[%s] server: resumed session %s as %s\n", appName, shortID(sessionID), shortID(id))
+	fmt.Fprintf(os.Stderr, "[%s] server: resumed weiran=%s cc=%s\n",
+		appName, shortID(id), shortID(ccID))
 	return sess, nil
 }
 
@@ -1428,30 +1583,38 @@ func (sm *sessionManager) rehydrateSessions() {
 				"do NOT restart again — it already happened."
 		}
 
-		fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: restoring %s (model=%q, claude_sid=%s)\n",
-			appName, shortID(s.SessionID), s.Model, shortID(s.ClaudeSID))
+		fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: restoring weiran=%s cc=%s model=%q\n",
+			appName, shortID(s.SessionID), shortID(s.ClaudeSID), s.Model)
 		replaceSoul := s.ReplaceSoul
+		soulEnabled := s.SoulEnabled
+		// Pass the weiran id (not the cc id) so resumeSession reuses it —
+		// the weiran id stays stable across server restarts. resumeSession
+		// internally looks up the cc id and feeds it to `claude --resume`.
 		sess, err := sm.resumeSession(
-			s.ClaudeSID,        // sessionID to resume
-			resumeMsg,          // always send a message (context notice or wake command)
-			s.Name,             // display name
-			s.Category,         // category override
-			s.Model,            // model
-			&replaceSoul,       // replace soul flag
+			s.SessionID, // weiran id — stable across resume
+			resumeMsg,   // always send a message (context notice or wake command)
+			s.Name,      // display name
+			s.Category,  // category override
+			s.Model,     // model
+			&replaceSoul,
+			&soulEnabled,
 		)
-		// Always mark old record as ended (whether resume succeeded or not)
-		updateSessionStatus(s.SessionID, "ended")
+		// Clear one-shot rehydrate message regardless of outcome.
 		if s.RehydrateMsg != "" {
 			setRehydrateMessage(s.SessionID, "")
 		}
 
 		if err != nil {
+			// Mark the row ended only on hard failure — success path keeps
+			// the same weiran id and updates status to "active" internally.
+			updateSessionStatus(s.SessionID, "ended")
 			fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: failed %s: %v\n",
 				appName, shortID(s.SessionID), err)
 			continue
 		}
 
-		// Carry over chrome/gal state to new session
+		// Carry over chrome/gal state. With weiran-id-stable-on-resume,
+		// sess.ID == s.SessionID, so these writes refresh the same row.
 		if s.ChromeEnabled {
 			setChromeEnabled(sess.ID, true)
 		}
@@ -1463,8 +1626,8 @@ func (sm *sessionManager) rehydrateSessions() {
 		if s.RehydrateMsg != "" {
 			wakeNote = "wake"
 		}
-		fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: restored %s → %s (%s, %s)\n",
-			appName, shortID(s.SessionID), shortID(sess.ID), s.Category, wakeNote)
+		fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: restored weiran=%s cc=%s (%s, %s)\n",
+			appName, shortID(sess.ID), shortID(sess.ClaudeSID), s.Category, wakeNote)
 		restored++
 	}
 
