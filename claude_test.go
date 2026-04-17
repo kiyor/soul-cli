@@ -414,7 +414,7 @@ func TestResolveFuzzyModel(t *testing.T) {
 		wantErr  bool
 	}{
 		// Native aliases
-		{"opus", "claude-opus-4-6", false},
+		{"opus", "claude-opus-4-7", false},
 		{"haiku", "claude-haiku-4-5-20251001", false},
 		{"sonnet", "claude-sonnet-4-6", false},
 

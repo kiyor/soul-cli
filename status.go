@@ -878,8 +878,8 @@ func handleModels() {
 	// our provider injection. These work without the `provider/` prefix.
 	fmt.Println("── Native (Anthropic, upstream default) ──")
 	nativeAliases := [][2]string{
-		{"opus", "claude-opus-4-6"},
-		{"opus[1m]", "claude-opus-4-6[1m]"},
+		{"opus", "claude-opus-4-7"},
+		{"opus[1m]", "claude-opus-4-7[1m]"},
 		{"sonnet", "claude-sonnet-4-6"},
 		{"sonnet[1m]", "claude-sonnet-4-6[1m]"},
 		{"haiku", "claude-haiku-4-5-20251001"},

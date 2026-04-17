@@ -75,6 +75,13 @@ type serverSession struct {
 	hub         *wsHub        // for WS notifications on status change
 	waiters     []chan string  // notified when status becomes idle/stopped/error
 
+	// pendingAUQ tracks in-flight AskUserQuestion permission requests that the
+	// Web UI is rendering. Keyed by the control_request.request_id. The claude
+	// subprocess blocks waiting for a control_response (with the user's answers
+	// in updatedInput) until the /answer-question endpoint fires.
+	pendingAUQMu sync.Mutex
+	pendingAUQ   map[string]*pendingAUQEntry
+
 	// Model fallback for non-interactive modes (heartbeat/cron/evolve):
 	// when process exits with rate_limit, retry with next fallback model.
 	fallbackModels []string // remaining models to try
@@ -82,6 +89,38 @@ type serverSession struct {
 	sessionMgr     *sessionManager // back-reference for fallback retry
 
 	mu          sync.Mutex
+}
+
+// pendingAUQEntry remembers enough about an in-flight AskUserQuestion
+// control_request to answer it later with the user's choices.
+type pendingAUQEntry struct {
+	RequestID string          // control_request.request_id from claude
+	ToolUseID string          // tool_use_id from the can_use_tool payload (for UI dedupe)
+	Input     json.RawMessage // original input — must be echoed back in updatedInput
+	CreatedAt time.Time
+}
+
+// recordPendingAUQ stores a pending AskUserQuestion by request_id.
+func (s *serverSession) recordPendingAUQ(entry *pendingAUQEntry) {
+	s.pendingAUQMu.Lock()
+	defer s.pendingAUQMu.Unlock()
+	if s.pendingAUQ == nil {
+		s.pendingAUQ = make(map[string]*pendingAUQEntry)
+	}
+	s.pendingAUQ[entry.RequestID] = entry
+}
+
+// takePendingAUQ atomically removes and returns a pending AUQ entry.
+// Returns nil if no entry exists for the given request_id.
+func (s *serverSession) takePendingAUQ(requestID string) *pendingAUQEntry {
+	s.pendingAUQMu.Lock()
+	defer s.pendingAUQMu.Unlock()
+	entry, ok := s.pendingAUQ[requestID]
+	if !ok {
+		return nil
+	}
+	delete(s.pendingAUQ, requestID)
+	return entry
 }
 
 // touch updates LastActive timestamp.
@@ -292,10 +331,14 @@ func makeOnResult(sess *serverSession, fullSync bool) func(json.RawMessage) {
 
 				// Track user turns for auto-rename
 				if result.NumTurns > 0 {
-					turns, renamed := incrementUserTurns(sess.ID)
-					if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
-						go tryAutoRename(sess)
-					}
+					_, _ = incrementUserTurns(sess.ID)
+					// Auto-rename disabled 2026-04-16: removes the only automated
+					// Anthropic API call (haiku pool) when user runs on GLM/MiniMax
+					// defaults. Manual rename via POST /api/sessions/{id}/auto-rename
+					// still works if the user explicitly wants it.
+					// if !renamed && turns > 0 && turns%5 == 0 && !isAutoNamed(sess.ID) {
+					//     go tryAutoRename(sess)
+					// }
 				}
 			}
 		}
@@ -495,7 +538,7 @@ func attachProcessBridge(proc *claudeProcess, sess *serverSession, source string
 	go func() {
 		bridgeStdout(proc, sess.broadcaster, makeOnInit(sess, source), makeOnResult(sess, fullSync), func(todos json.RawMessage) {
 			sess.setTodos(todos)
-		}, makeOnMemoryAudit(sess))
+		}, makeOnMemoryAudit(sess), makeOnCanUseTool(sess))
 		close(doneCh)
 		// Clear bridgeDone if it still points to this generation's channel,
 		// so subsequent waitBridgeDone() won't return immediately on a stale close.
@@ -521,6 +564,54 @@ func makeOnMemoryAudit(sess *serverSession) func(*memoryAuditEntry) {
 		entry.SessionName = sess.Name
 		sess.mu.Unlock()
 		go logMemoryAudit(db, *entry)
+	}
+}
+
+// makeOnCanUseTool returns a callback that claims AskUserQuestion
+// can_use_tool control_requests for Web UI handling. For other tools that
+// unexpectedly reach this path (shouldn't happen in bypassPermissions mode
+// but belt-and-suspenders), returns false so bridgeStdout auto-allows.
+//
+// Claims AskUserQuestion by: (1) recording a pendingAUQEntry keyed by
+// request_id, (2) broadcasting an ask_user_question SSE event with the
+// input so the Web UI can render the choice panel. The subprocess stays
+// blocked until /api/sessions/{id}/answer-question fires and
+// sendPermissionDecision unblocks it.
+func makeOnCanUseTool(sess *serverSession) func(json.RawMessage) bool {
+	return func(raw json.RawMessage) bool {
+		var payload struct {
+			RequestID string `json:"request_id"`
+			Request   struct {
+				Subtype   string          `json:"subtype"`
+				ToolName  string          `json:"tool_name"`
+				ToolUseID string          `json:"tool_use_id"`
+				Input     json.RawMessage `json:"input"`
+			} `json:"request"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return false
+		}
+		if payload.Request.ToolName != "AskUserQuestion" {
+			return false
+		}
+
+		entry := &pendingAUQEntry{
+			RequestID: payload.RequestID,
+			ToolUseID: payload.Request.ToolUseID,
+			Input:     append(json.RawMessage(nil), payload.Request.Input...),
+			CreatedAt: time.Now(),
+		}
+		sess.recordPendingAUQ(entry)
+
+		// Broadcast as an SSE event so the Web UI can render the panel.
+		// The frontend listens for event type "ask_user_question".
+		evt, _ := json.Marshal(map[string]any{
+			"request_id":  payload.RequestID,
+			"tool_use_id": payload.Request.ToolUseID,
+			"input":       payload.Request.Input,
+		})
+		sess.broadcaster.broadcast(sseEvent{Event: "ask_user_question", Data: evt})
+		return true
 	}
 }
 

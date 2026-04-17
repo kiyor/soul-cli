@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
@@ -185,7 +186,15 @@ func serveSSE(w http.ResponseWriter, r *http.Request, broadcaster *sseBroadcaste
 // bridgeStdout reads Claude Code stdout and broadcasts as SSE events.
 // Also updates session status based on message types.
 // Blocks until the process stdout is closed.
-func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage), onMemoryAudit func(*memoryAuditEntry)) {
+//
+// onCanUseTool is invoked when the subprocess sends a control_request with
+// subtype=can_use_tool (triggered by --permission-prompt-tool stdio). The
+// callback is responsible for sending a matching control_response via the
+// process stdin — usually by recording a pending entry and waking up the
+// Web UI through an ask_user_question SSE event. If the callback is nil
+// or returns false, bridgeStdout auto-allows the tool (preserving prior
+// bypassPermissions behavior for tools that unexpectedly reach this path).
+func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage), onMemoryAudit func(*memoryAuditEntry), onCanUseTool func(json.RawMessage) bool) {
 	// Track pending memory tool_use ops waiting for their tool_result
 	pendingMemOps := make(map[string]*pendingMemoryOp)
 
@@ -193,6 +202,12 @@ func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(
 		// Route control_response to sync waiters
 		if msgType == "control_response" {
 			proc.deliverResponse(raw)
+		}
+
+		// Intercept can_use_tool permission requests and hand them to the
+		// session's AUQ handler. See the function doc for fallback rules.
+		if msgType == "control_request" {
+			handleCanUseTool(proc, raw, onCanUseTool)
 		}
 
 		event := mapEventType(msgType, raw)
@@ -249,6 +264,46 @@ func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(
 			Event: "close",
 			Data:  []byte(`{"reason":"process_exited"}`),
 		})
+	}
+}
+
+// handleCanUseTool inspects a control_request and, if it carries a
+// can_use_tool permission query, hands it to the session-scoped onCanUseTool
+// callback. If the callback claims the request (returns true) it is also
+// responsible for eventually writing the matching control_response. For
+// any other outcome (non-can_use_tool, unrecognized tool, callback absent
+// or returns false), auto-allow so bypassPermissions mode keeps working.
+func handleCanUseTool(proc *claudeProcess, raw json.RawMessage, onCanUseTool func(json.RawMessage) bool) {
+	var peek struct {
+		RequestID string `json:"request_id"`
+		Request   struct {
+			Subtype  string          `json:"subtype"`
+			ToolName string          `json:"tool_name"`
+			Input    json.RawMessage `json:"input"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal(raw, &peek); err != nil {
+		return
+	}
+	if peek.Request.Subtype != "can_use_tool" || peek.RequestID == "" {
+		return
+	}
+
+	if onCanUseTool != nil && onCanUseTool(raw) {
+		return
+	}
+
+	// Fallback: auto-allow with the original input. This keeps tools that
+	// slipped past bypassPermissions-auto-allow from deadlocking the turn.
+	decision := map[string]any{
+		"behavior":     "allow",
+		"updatedInput": json.RawMessage(peek.Request.Input),
+	}
+	if len(peek.Request.Input) == 0 {
+		decision["updatedInput"] = map[string]any{}
+	}
+	if err := proc.sendPermissionDecision(peek.RequestID, decision); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] auto-allow permission failed for %s: %v\n", appName, peek.RequestID, err)
 	}
 }
 

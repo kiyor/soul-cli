@@ -29,46 +29,46 @@ Multi-file Go program (package main, ~29,000 lines across 58 files) with one int
 | File | Lines | Responsibility |
 |------|-------|----------------|
 | **Server Core** | | |
-| `server.go` | 1,980 | HTTP server, 35+ REST endpoints, auth middleware, config loading, graceful shutdown |
-| `server_session.go` | 1,681 | Session lifecycle (create/destroy/rehydrate), TTL reaper, concurrent session limits, state machine |
-| `server_proxy.go` | 1,819 | Provider proxy (OpenAI/GLM/MiniMax), OAuth token validation, telemetry capture, CC session ID tracking, S3 image upload |
-| `server_telegram.go` | 1,323 | Telegram bot webhook, message relay, session↔chat association |
-| `server_process.go` | 623 | Claude process spawning, stderr capture, exit handling |
-| `server_rename.go` | 642 | Session auto-rename via AI, model selection |
+| `server.go` | 2,101 | HTTP server, 35+ REST endpoints, auth middleware, config loading, graceful shutdown |
+| `server_session.go` | 1,772 | Session lifecycle (create/destroy/rehydrate), TTL reaper, concurrent session limits, state machine |
+| `server_proxy.go` | 1,903 | Provider proxy (OpenAI/GLM/MiniMax), OAuth token validation, telemetry capture, CC session ID tracking, S3 image upload |
+| `server_telegram.go` | 1,331 | Telegram bot webhook, message relay, session↔chat association |
+| `server_process.go` | 675 | Claude process spawning, stderr capture, exit handling |
+| `server_rename.go` | 725 | Session auto-rename via AI, model selection |
 | `server_ws.go` | 423 | WebSocket hub, per-client read/write pumps, broadcast |
 | `server_stream.go` | 255 | SSE broadcaster for real-time session updates |
 | `server_ipc.go` | 294 | Server-side IPC listener for peer session communication |
 | `server_haiku_pool.go` | 213 | Lightweight Haiku model pool with idle reaper |
 | `server_linkpreview.go` | 165 | Open Graph link preview fetching |
 | **CLI Core** | | |
-| `main.go` | 1,131 | Entry point, CLI arg parsing, command dispatch, help text |
-| `claude.go` | 1,052 | Process locking (NFS-safe), `syscall.Exec`, `runClaude` subprocess, crash tracking |
+| `main.go` | 1,184 | Entry point, CLI arg parsing, command dispatch, help text |
+| `claude.go` | 1,104 | Process locking (NFS-safe), `syscall.Exec`, `runClaude` subprocess, crash tracking |
 | `init.go` | 625 | First-run setup wizard, archetype selection, workspace scaffolding |
 | **Prompt & Skills** | | |
-| `prompt.go` | 1,071 | Prompt assembly, token budgeting (100k limit), soul/memory/skill injection |
+| `prompt.go` | 1,096 | Prompt assembly, token budgeting (100k limit), soul/memory/skill injection |
 | `skills.go` | 346 | Skill/project index scanning, YAML frontmatter parsing |
 | **Database & Search** | | |
-| `db.go` | 912 | SQLite session tracking, hash-based change detection, pattern cultivation |
-| `fts.go` | 853 | FTS5 full-text search, three-table indexing (daily/session/content) |
+| `db.go` | 928 | SQLite session tracking, hash-based change detection, pattern cultivation |
+| `fts.go` | 866 | FTS5 full-text search, three-table indexing (daily/session/content) |
 | `fts_seg.go` | 128 | Chinese text segmentation (gse jieba-style) |
 | `sessions.go` | 595 | Session scanning, search, TUI entry point |
 | **Task Dispatch & Evolution** | | |
-| `spawn.go` | 850 | Agent spawning (async/sync), bare mode, agent discovery |
+| `spawn.go` | 992 | Agent spawning (async/sync), bare mode, agent discovery |
 | `probe.go` | 970 | Evolve-probe: feedback rule testing, BM25 scenario judging |
 | `tasks.go` | 478 | Cron/heartbeat/evolve task templates (text/template) |
 | **Communication** | | |
-| `ipc.go` | 399 | Local IPC client for delegating to running server |
+| `ipc.go` | 467 | Local IPC client for delegating to running server |
 | `telegram.go` | 167 | Telegram message/photo sending with token caching |
 | `pkg/im/telegram.go` | 508 | Telegram bot API client (Update/Message/Chat types, webhook) |
 | **Lifecycle & Config** | | |
 | `hooks.go` | 638 | Post-hooks after cron/heartbeat/evolve, safety checks, TG reporting |
-| `status.go` | 1,186 | Health checks, doctor diagnostics, config display, metrics anomaly detection |
+| `status.go` | 1,188 | Health checks, doctor diagnostics, config display, metrics anomaly detection |
 | `session_lifecycle.go` | 261 | Session reset policies (idle/daily/both), TG notifications |
 | `soul_session.go` | 293 | Persistent soul session compaction, interaction round limits |
 | `versions.go` | 270 | Version history, safe build (backup→build→verify→rollback) |
 | **Utilities** | | |
-| `provider_openai.go` | 832 | Codex protocol proxy: Anthropic ↔ OpenAI tool protocol translation |
-| `provider_ollama.go` | 616 | Anthropic→Ollama protocol proxy (Anthropic messages → OpenAI-compatible /v1/chat) |
+| `provider_openai.go` | 1,139 | Codex protocol proxy: Anthropic ↔ OpenAI tool protocol translation |
+| `provider_ollama.go` | 793 | Anthropic→Ollama protocol proxy (Anthropic messages → OpenAI-compatible /v1/chat) |
 | `tui.go` | 473 | Bubbletea TUI session picker (resume mode) |
 | `resolve_secrets.go` | 97 | Vault reference resolution (vault://, env://) |
 | `safe.go` | 118 | Symlink protection, NFS-safe file locking |

@@ -479,6 +479,71 @@ func codexRandomID() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// codexValidatedToolArgs returns validated JSON for a function_call's
+// accumulated arguments. Codex normally emits well-formed JSON, but malformed
+// output has been observed when `incomplete` or `content_filter` terminates the
+// stream mid-tool-call; wrap as {"raw": "..."} so the Anthropic client's JSON
+// parser does not choke.
+func codexValidatedToolArgs(arguments string) string {
+	if arguments == "" {
+		return "{}"
+	}
+	if json.Valid([]byte(arguments)) {
+		return arguments
+	}
+	b, _ := json.Marshal(map[string]string{"raw": arguments})
+	return string(b)
+}
+
+// mapCodexStopReason translates Codex completion state to Anthropic stop_reason.
+// Parameters:
+//
+//	finishReason     — legacy `choice.finish_reason` (rarely set on Responses API)
+//	incompleteReason — `response.incomplete.reason` (e.g. "max_output_tokens", "content_filter")
+//	hasToolUse       — whether any function_call was emitted
+//
+// Priority: explicit incomplete reason > finish_reason > tool_use heuristic > end_turn.
+func mapCodexStopReason(finishReason, incompleteReason string, hasToolUse bool) string {
+	switch incompleteReason {
+	case "max_output_tokens":
+		return "max_tokens"
+	case "content_filter":
+		return "stop_sequence"
+	}
+	switch finishReason {
+	case "tool_calls":
+		return "tool_use"
+	case "length":
+		return "max_tokens"
+	case "content_filter":
+		return "stop_sequence"
+	}
+	if hasToolUse {
+		return "tool_use"
+	}
+	return "end_turn"
+}
+
+// codexVerbosityFor picks a Responses API verbosity setting based on the
+// request's max_tokens. Previously hardcoded to "medium", which made GPT
+// verbose for short questions and terse for long ones. Mapping:
+//
+//	< 512       → low
+//	512 – 4096  → medium
+//	> 4096      → high
+func codexVerbosityFor(maxTokens int) string {
+	if maxTokens <= 0 {
+		return "medium"
+	}
+	if maxTokens < 512 {
+		return "low"
+	}
+	if maxTokens > 4096 {
+		return "high"
+	}
+	return "medium"
+}
+
 // ── Server proxy delegation ───────────────────────────────────────────────────
 
 // detectServerOpenAIProxy checks if the weiran server is running and asks it to
@@ -625,10 +690,16 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 	// Translate messages with tool_use/tool_result support
 	inputItems := codexTranslateMessages(areq.Messages)
 
-	// use model from request if gpt-prefixed, else fall back to endpoint default
+	// Pass the requested model through as-is. Previously a non-"gpt-" prefix
+	// silently rewrote to "gpt-4.1", which meant callers thought they were
+	// using (say) gpt-5.1-codex but were actually served by gpt-4.1 — the
+	// single biggest "GPT is a fool" symptom. Now the endpoint will reject
+	// unsupported model names and the error surfaces to the caller.
 	targetModel := areq.Model
 	if !strings.HasPrefix(targetModel, "gpt-") {
-		targetModel = "gpt-4.1" // safe default for codex endpoint
+		fmt.Fprintf(os.Stderr,
+			"[%s] codex proxy: model %q does not have gpt- prefix; codex endpoint may reject\n",
+			appName, targetModel)
 	}
 
 	creq := codexAPIRequest{
@@ -637,7 +708,7 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		Stream:            true,
 		Instructions:      instructions,
 		Input:             inputItems,
-		Text:              map[string]any{"verbosity": "medium"},
+		Text:              map[string]any{"verbosity": codexVerbosityFor(areq.MaxTokens)},
 		Tools:             codexTools,
 		ToolChoice:        "auto",
 		ParallelToolCalls: true,
@@ -706,11 +777,55 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	stopReason := "end_turn"
 	var outputTokens int
 	blockIndex := 0
 	textBlockStarted := false
-	hasToolUse := false
+
+	// item_id (Codex) → block index (Anthropic) for function_call streaming.
+	// Built on `response.output_item.added`, consumed by
+	// `response.function_call_arguments.delta` / `.done`.
+	toolItemBlockIdx := make(map[string]int)
+	toolItemArgs := make(map[string]string) // accumulated args per item_id
+	toolItemOrder := make([]string, 0)       // emit order for cleanup
+	toolItemClosed := make(map[string]bool)  // track which items already had block_stop
+
+	// Terminal signals from upstream (Codex only emits one of completed / failed / incomplete).
+	finishReason := ""
+	incompleteReason := ""
+	upstreamErrMsg := ""
+	upstreamFailed := false
+
+	// closeAllOpenBlocks flushes any open content blocks so message_delta/stop
+	// can be emitted cleanly. Called when the stream terminates (normally, or
+	// due to a failed/incomplete event).
+	closeAllOpenBlocks := func() {
+		if textBlockStarted {
+			codexWriteSSE(w, "content_block_stop", codexBlockStop{
+				Type: "content_block_stop", Index: blockIndex,
+			})
+			textBlockStarted = false
+			blockIndex++
+		}
+		for _, itemID := range toolItemOrder {
+			if toolItemClosed[itemID] {
+				continue
+			}
+			bIdx := toolItemBlockIdx[itemID]
+			args := codexValidatedToolArgs(toolItemArgs[itemID])
+			codexWriteSSE(w, "content_block_delta", codexBlockDelta{
+				Type:  "content_block_delta",
+				Index: bIdx,
+				Delta: map[string]any{
+					"type":         "input_json_delta",
+					"partial_json": args,
+				},
+			})
+			codexWriteSSE(w, "content_block_stop", codexBlockStop{
+				Type: "content_block_stop", Index: bIdx,
+			})
+			toolItemClosed[itemID] = true
+		}
+	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -751,67 +866,184 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 				}
 			}
 
-		case "response.output_item.done":
+		case "response.output_item.added":
+			// Start a new block as soon as the item is announced so that
+			// subsequent `function_call_arguments.delta` events can stream into
+			// it. Previously we only handled `.done`, which made every tool call
+			// non-streaming (bad UX for large argument payloads).
 			item, _ := event["item"].(map[string]any)
 			if item == nil {
 				continue
 			}
 			itemType, _ := item["type"].(string)
-
-			if itemType == "function_call" {
-				// Close any open text block first
-				if textBlockStarted {
-					codexWriteSSE(w, "content_block_stop", codexBlockStop{
-						Type: "content_block_stop", Index: blockIndex,
-					})
-					blockIndex++
-					textBlockStarted = false
-				}
-
-				hasToolUse = true
-				callID, _ := item["call_id"].(string)
-				name, _ := item["name"].(string)
-				arguments, _ := item["arguments"].(string)
-
-				// Generate Anthropic tool_use_id from call_id
-				toolUseID := "toolu_" + callID
-				if callID == "" {
-					toolUseID = "toolu_" + codexRandomID()
-				}
-
-				// Emit content_block_start for tool_use
-				codexWriteSSE(w, "content_block_start", codexBlockStart{
-					Type:  "content_block_start",
-					Index: blockIndex,
-					ContentBlock: codexAnthropicBlock{
-						Type:  "tool_use",
-						ID:    toolUseID,
-						Name:  name,
-						Input: json.RawMessage("{}"),
-					},
-				})
-
-				// Emit the full arguments as input_json_delta
-				if arguments != "" {
-					codexWriteSSE(w, "content_block_delta", codexBlockDelta{
-						Type:  "content_block_delta",
-						Index: blockIndex,
-						Delta: map[string]any{
-							"type":         "input_json_delta",
-							"partial_json": arguments,
-						},
-					})
-				}
-
-				// Close tool_use block
+			if itemType != "function_call" {
+				continue
+			}
+			itemID, _ := item["id"].(string)
+			if itemID == "" {
+				continue
+			}
+			if _, exists := toolItemBlockIdx[itemID]; exists {
+				continue // already started
+			}
+			// Close any open text block first
+			if textBlockStarted {
 				codexWriteSSE(w, "content_block_stop", codexBlockStop{
 					Type: "content_block_stop", Index: blockIndex,
 				})
 				blockIndex++
+				textBlockStarted = false
+			}
+			callID, _ := item["call_id"].(string)
+			name, _ := item["name"].(string)
+			toolUseID := "toolu_" + callID
+			if callID == "" {
+				toolUseID = "toolu_" + codexRandomID()
+			}
+			codexWriteSSE(w, "content_block_start", codexBlockStart{
+				Type:  "content_block_start",
+				Index: blockIndex,
+				ContentBlock: codexAnthropicBlock{
+					Type:  "tool_use",
+					ID:    toolUseID,
+					Name:  name,
+					Input: json.RawMessage("{}"),
+				},
+			})
+			toolItemBlockIdx[itemID] = blockIndex
+			toolItemOrder = append(toolItemOrder, itemID)
+			blockIndex++
+			if flusher != nil {
+				flusher.Flush()
+			}
 
-				if flusher != nil {
-					flusher.Flush()
+		case "response.function_call_arguments.delta":
+			itemID, _ := event["item_id"].(string)
+			delta, _ := event["delta"].(string)
+			if itemID == "" || delta == "" {
+				continue
+			}
+			// Accumulate; actual input_json_delta emit happens at block_stop
+			// so we can validate the final JSON.
+			toolItemArgs[itemID] += delta
+
+		case "response.function_call_arguments.done":
+			itemID, _ := event["item_id"].(string)
+			if itemID == "" {
+				continue
+			}
+			// Prefer the authoritative `arguments` field if present; fall back
+			// to accumulated deltas.
+			if args, ok := event["arguments"].(string); ok && args != "" {
+				toolItemArgs[itemID] = args
+			}
+			if toolItemClosed[itemID] {
+				continue
+			}
+			bIdx, ok := toolItemBlockIdx[itemID]
+			if !ok {
+				continue // added event was missed; output_item.done will handle it
+			}
+			args := codexValidatedToolArgs(toolItemArgs[itemID])
+			codexWriteSSE(w, "content_block_delta", codexBlockDelta{
+				Type:  "content_block_delta",
+				Index: bIdx,
+				Delta: map[string]any{
+					"type":         "input_json_delta",
+					"partial_json": args,
+				},
+			})
+			codexWriteSSE(w, "content_block_stop", codexBlockStop{
+				Type: "content_block_stop", Index: bIdx,
+			})
+			toolItemClosed[itemID] = true
+			if flusher != nil {
+				flusher.Flush()
+			}
+
+		case "response.output_item.done":
+			// Fallback path when upstream doesn't emit the streaming events
+			// above (older Codex backends). Handles function_call items that
+			// weren't previously started.
+			item, _ := event["item"].(map[string]any)
+			if item == nil {
+				continue
+			}
+			itemType, _ := item["type"].(string)
+			if itemType != "function_call" {
+				continue
+			}
+			itemID, _ := item["id"].(string)
+			if itemID != "" && toolItemClosed[itemID] {
+				continue // already handled via streaming path
+			}
+
+			// Close any open text block first
+			if textBlockStarted {
+				codexWriteSSE(w, "content_block_stop", codexBlockStop{
+					Type: "content_block_stop", Index: blockIndex,
+				})
+				blockIndex++
+				textBlockStarted = false
+			}
+
+			callID, _ := item["call_id"].(string)
+			name, _ := item["name"].(string)
+			arguments, _ := item["arguments"].(string)
+
+			toolUseID := "toolu_" + callID
+			if callID == "" {
+				toolUseID = "toolu_" + codexRandomID()
+			}
+
+			var bIdx int
+			if itemID != "" {
+				if existing, ok := toolItemBlockIdx[itemID]; ok {
+					bIdx = existing
+				} else {
+					bIdx = blockIndex
+					toolItemBlockIdx[itemID] = bIdx
+					toolItemOrder = append(toolItemOrder, itemID)
+					codexWriteSSE(w, "content_block_start", codexBlockStart{
+						Type:  "content_block_start",
+						Index: bIdx,
+						ContentBlock: codexAnthropicBlock{
+							Type: "tool_use", ID: toolUseID, Name: name,
+							Input: json.RawMessage("{}"),
+						},
+					})
+					blockIndex++
 				}
+			} else {
+				bIdx = blockIndex
+				codexWriteSSE(w, "content_block_start", codexBlockStart{
+					Type:  "content_block_start",
+					Index: bIdx,
+					ContentBlock: codexAnthropicBlock{
+						Type: "tool_use", ID: toolUseID, Name: name,
+						Input: json.RawMessage("{}"),
+					},
+				})
+				blockIndex++
+			}
+
+			args := codexValidatedToolArgs(arguments)
+			codexWriteSSE(w, "content_block_delta", codexBlockDelta{
+				Type:  "content_block_delta",
+				Index: bIdx,
+				Delta: map[string]any{
+					"type":         "input_json_delta",
+					"partial_json": args,
+				},
+			})
+			codexWriteSSE(w, "content_block_stop", codexBlockStop{
+				Type: "content_block_stop", Index: bIdx,
+			})
+			if itemID != "" {
+				toolItemClosed[itemID] = true
+			}
+			if flusher != nil {
+				flusher.Flush()
 			}
 
 		case "response.completed":
@@ -822,6 +1054,46 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 					}
 				}
 			}
+
+		case "response.incomplete":
+			// Upstream terminated early. Extract the authoritative reason so
+			// downstream can distinguish max_tokens truncation from content
+			// filter vs unknown. Previously fell through to end_turn,
+			// silently hiding truncation.
+			if respObj, ok := event["response"].(map[string]any); ok {
+				if details, ok := respObj["incomplete_details"].(map[string]any); ok {
+					if r, _ := details["reason"].(string); r != "" {
+						incompleteReason = r
+					}
+				}
+				if usage, ok := respObj["usage"].(map[string]any); ok {
+					if ot, ok := usage["output_tokens"].(float64); ok {
+						outputTokens = int(ot)
+					}
+				}
+			}
+
+		case "response.failed", "error":
+			// Upstream reported a hard failure. Capture the message so we can
+			// surface it as an Anthropic-format error event and stop cleanly.
+			upstreamFailed = true
+			if respObj, ok := event["response"].(map[string]any); ok {
+				if errObj, ok := respObj["error"].(map[string]any); ok {
+					if msg, _ := errObj["message"].(string); msg != "" {
+						upstreamErrMsg = msg
+					}
+				}
+			}
+			if upstreamErrMsg == "" {
+				if errObj, ok := event["error"].(map[string]any); ok {
+					if msg, _ := errObj["message"].(string); msg != "" {
+						upstreamErrMsg = msg
+					}
+				}
+			}
+			if upstreamErrMsg == "" {
+				upstreamErrMsg = "codex upstream failed"
+			}
 		}
 	}
 
@@ -829,17 +1101,33 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		fmt.Fprintf(os.Stderr, "[%s] codex SSE scanner error: %v\n", appName, err)
 	}
 
-	// Close any remaining open text block
-	if textBlockStarted {
-		codexWriteSSE(w, "content_block_stop", codexBlockStop{
-			Type: "content_block_stop", Index: blockIndex,
+	// Close any blocks that were left open (text, or tool_use blocks that
+	// never got a function_call_arguments.done). This is the single shared
+	// cleanup path so failure/truncation and normal completion both produce
+	// a well-formed SSE tail.
+	closeAllOpenBlocks()
+
+	hasToolUse := len(toolItemOrder) > 0
+
+	if upstreamFailed {
+		// Emit Anthropic-format error event. CC treats this as a turn-level
+		// failure and will not try to resume. We still send message_stop so
+		// any partial content just rendered gets flushed.
+		codexWriteSSE(w, "error", map[string]any{
+			"type": "error",
+			"error": map[string]string{
+				"type":    "api_error",
+				"message": upstreamErrMsg,
+			},
 		})
+		codexWriteSSE(w, "message_stop", codexMsgStop{Type: "message_stop"})
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
 	}
 
-	// Set stop reason based on whether tools were called
-	if hasToolUse {
-		stopReason = "tool_use"
-	}
+	stopReason := mapCodexStopReason(finishReason, incompleteReason, hasToolUse)
 
 	msgDelta := codexMsgDelta{Type: "message_delta", Usage: codexAnthropicUsage{OutputTokens: outputTokens}}
 	msgDelta.Delta.StopReason = stopReason

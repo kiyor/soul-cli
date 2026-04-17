@@ -83,6 +83,32 @@ type ollamaAnthropicUsage struct {
 	OutputTokens int `json:"output_tokens"`
 }
 
+type ollamaAnthropicResponse struct {
+	ID           string                 `json:"id"`
+	Type         string                 `json:"type"`
+	Role         string                 `json:"role"`
+	Content      []ollamaAnthropicBlock `json:"content"`
+	Model        string                 `json:"model"`
+	StopReason   string                 `json:"stop_reason"`
+	StopSequence *string                `json:"stop_sequence"`
+	Usage        ollamaAnthropicUsage   `json:"usage"`
+}
+
+type ollamaChatResponse struct {
+	Choices []struct {
+		Message struct {
+			Role      string           `json:"role"`
+			Content   string           `json:"content"`
+			ToolCalls []ollamaToolCall `json:"tool_calls"`
+		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func ollamaRandomID() string {
@@ -94,6 +120,98 @@ func ollamaRandomID() string {
 func ollamaWriteSSE(w http.ResponseWriter, event string, data any) {
 	b, _ := json.Marshal(data)
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(b))
+}
+
+func ollamaToolUseInput(arguments string) json.RawMessage {
+	if arguments == "" {
+		return json.RawMessage("{}")
+	}
+	if json.Valid([]byte(arguments)) {
+		return json.RawMessage(arguments)
+	}
+	b, _ := json.Marshal(map[string]string{"raw": arguments})
+	return json.RawMessage(b)
+}
+
+// ollamaValidatedToolArgs returns validated JSON for a tool_call's accumulated
+// arguments buffer. Small Ollama models often emit partial/malformed JSON; we
+// fall back to {"raw": "..."} so the Anthropic client can always parse
+// input_json_delta. Empty string returns "{}".
+func ollamaValidatedToolArgs(arguments string) string {
+	if arguments == "" {
+		return "{}"
+	}
+	if json.Valid([]byte(arguments)) {
+		return arguments
+	}
+	b, _ := json.Marshal(map[string]string{"raw": arguments})
+	return string(b)
+}
+
+// mapOllamaFinishReason translates Ollama/OpenAI finish_reason to Anthropic
+// stop_reason. Previously only "stop" and "tool_calls" were handled; "length"
+// (truncation) and "content_filter" fell through to "end_turn", making CC
+// believe the response completed normally.
+//
+//	tool_calls     → tool_use
+//	length         → max_tokens
+//	content_filter → stop_sequence (closest semantic; Anthropic has no exact)
+//	stop/""        → tool_use if hasToolUse else end_turn
+func mapOllamaFinishReason(fr string, hasToolUse bool) string {
+	switch fr {
+	case "tool_calls":
+		return "tool_use"
+	case "length":
+		return "max_tokens"
+	case "content_filter":
+		return "stop_sequence"
+	}
+	if hasToolUse {
+		return "tool_use"
+	}
+	return "end_turn"
+}
+
+func ollamaTranslateChoiceToAnthropic(model string, choice struct {
+	Message struct {
+		Role      string           `json:"role"`
+		Content   string           `json:"content"`
+		ToolCalls []ollamaToolCall `json:"tool_calls"`
+	} `json:"message"`
+	FinishReason string `json:"finish_reason"`
+}, usage ollamaAnthropicUsage) ollamaAnthropicResponse {
+	content := make([]ollamaAnthropicBlock, 0, 1+len(choice.Message.ToolCalls))
+	if choice.Message.Content != "" {
+		content = append(content, ollamaAnthropicBlock{
+			Type: "text",
+			Text: choice.Message.Content,
+		})
+	}
+	for _, tc := range choice.Message.ToolCalls {
+		toolUseID := "toolu_" + tc.ID
+		if tc.ID == "" {
+			toolUseID = "toolu_" + ollamaRandomID()
+		}
+		content = append(content, ollamaAnthropicBlock{
+			Type:  "tool_use",
+			ID:    toolUseID,
+			Name:  tc.Function.Name,
+			Input: ollamaToolUseInput(tc.Function.Arguments),
+		})
+	}
+
+	stopReason := mapOllamaFinishReason(choice.FinishReason, len(choice.Message.ToolCalls) > 0)
+
+	return ollamaAnthropicResponse{
+		ID:           "msg_" + ollamaRandomID(),
+		Type:         "message",
+		Role:         "assistant",
+		Content:      content,
+		Model:        model,
+		StopReason:   stopReason,
+		StopSequence: nil,
+		Usage:        usage,
+	}
 }
 
 // ollamaExtractSystemText extracts system prompt from Anthropic format.
@@ -195,7 +313,23 @@ func ollamaTranslateMessages(messages []ollamaAnthropicMsg) []ollamaChatMessage 
 						outputText = c
 					case []any:
 						for _, ci := range c {
-							if co, ok := ci.(map[string]any); ok {
+							co, ok := ci.(map[string]any)
+							if !ok {
+								continue
+							}
+							typ, _ := co["type"].(string)
+							switch typ {
+							case "text":
+								if t, _ := co["text"].(string); t != "" {
+									outputText += t
+								}
+							case "image":
+								// Ollama OpenAI-compatible endpoint does not accept image
+								// blocks in tool role messages. Emit a text placeholder so
+								// the model at least knows an image was returned.
+								outputText += "[image omitted: ollama provider does not support multimodal tool results]\n"
+							default:
+								// Unknown block type — try text fallback for forward compat.
 								if t, _ := co["text"].(string); t != "" {
 									outputText += t
 								}
@@ -375,7 +509,7 @@ func handleOllamaMessages(w http.ResponseWriter, r *http.Request, chatURL string
 		Model:     modelName,
 		Messages:  chatMsgs,
 		Tools:     ollamaTools,
-		Stream:    true,
+		Stream:    areq.Stream,
 		MaxTokens: maxTokens,
 	}
 
@@ -391,7 +525,11 @@ func handleOllamaMessages(w http.ResponseWriter, r *http.Request, chatURL string
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
+	if areq.Stream {
+		req.Header.Set("Accept", "text/event-stream")
+	} else {
+		req.Header.Set("Accept", "application/json")
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -409,6 +547,37 @@ func handleOllamaMessages(w http.ResponseWriter, r *http.Request, chatURL string
 			"error": map[string]string{"type": "api_error", "message": string(upBody)},
 		})
 		w.Write(errMsg)
+		return
+	}
+
+	if !areq.Stream {
+		var upstream ollamaChatResponse
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			http.Error(w, "ollama upstream read: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		if err := json.Unmarshal(body, &upstream); err != nil {
+			http.Error(w, "ollama upstream decode: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		choice := struct {
+			Message struct {
+				Role      string           `json:"role"`
+				Content   string           `json:"content"`
+				ToolCalls []ollamaToolCall `json:"tool_calls"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		}{}
+		if len(upstream.Choices) > 0 {
+			choice = upstream.Choices[0]
+		}
+
+		writeJSON(w, http.StatusOK, ollamaTranslateChoiceToAnthropic(areq.Model, choice, ollamaAnthropicUsage{
+			InputTokens:  upstream.Usage.PromptTokens,
+			OutputTokens: upstream.Usage.CompletionTokens,
+		}))
 		return
 	}
 
@@ -440,12 +609,18 @@ func handleOllamaMessages(w http.ResponseWriter, r *http.Request, chatURL string
 
 	blockIndex := 0
 	textBlockStarted := false
-	stopReason := "end_turn"
+	finishReason := ""
 	var outputTokens int
 
 	// Track tool_use blocks: map from OpenAI tool_call index → Anthropic block index
 	toolBlockMap := make(map[int]int) // ollama tc index → our block index
 	toolBlockStarted := make(map[int]bool)
+	// Accumulate tool_call arguments across streaming chunks. We buffer instead
+	// of forwarding partial_json live because small Ollama models routinely
+	// produce malformed JSON mid-stream; emitting a single validated delta at
+	// block close keeps the Anthropic client's JSON parser happy.
+	toolBlockArgs := make(map[int]string)
+	toolBlockOrder := make([]int, 0) // preserve emit order: block indices in arrival order
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -478,13 +653,12 @@ func handleOllamaMessages(w http.ResponseWriter, r *http.Request, chatURL string
 			continue
 		}
 
-		// Finish reason
+		// Finish reason — captured here, translated to stop_reason at stream end
+		// so all possible values (stop / tool_calls / length / content_filter)
+		// get mapped via mapOllamaFinishReason instead of silently dropping to
+		// "end_turn".
 		if fr, _ := choice["finish_reason"].(string); fr != "" && fr != "null" {
-			if fr == "tool_calls" {
-				stopReason = "tool_use"
-			} else if fr == "stop" {
-				stopReason = "end_turn"
-			}
+			finishReason = fr
 		}
 
 		delta, _ := choice["delta"].(map[string]any)
@@ -556,19 +730,15 @@ func handleOllamaMessages(w http.ResponseWriter, r *http.Request, chatURL string
 					})
 					toolBlockMap[tcIdx] = blockIndex
 					toolBlockStarted[tcIdx] = true
+					toolBlockOrder = append(toolBlockOrder, blockIndex)
 					blockIndex++
 				}
 
-				// Arguments delta
+				// Accumulate arguments; defer emit until block_stop so we can
+				// validate the final JSON and fall back to {"raw":...} if the
+				// upstream model produced malformed output.
 				if funcArgs != "" {
-					bIdx := toolBlockMap[tcIdx]
-					ollamaWriteSSE(w, "content_block_delta", map[string]any{
-						"type": "content_block_delta", "index": bIdx,
-						"delta": map[string]any{
-							"type":         "input_json_delta",
-							"partial_json": funcArgs,
-						},
-					})
+					toolBlockArgs[toolBlockMap[tcIdx]] += funcArgs
 				}
 
 				if flusher != nil {
@@ -590,16 +760,23 @@ func handleOllamaMessages(w http.ResponseWriter, r *http.Request, chatURL string
 		blockIndex++
 	}
 
-	// Close tool_use blocks
-	for _, bIdx := range toolBlockMap {
+	// Flush accumulated tool_use arguments with JSON validation, in arrival order.
+	for _, bIdx := range toolBlockOrder {
+		args := ollamaValidatedToolArgs(toolBlockArgs[bIdx])
+		ollamaWriteSSE(w, "content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": bIdx,
+			"delta": map[string]any{
+				"type":         "input_json_delta",
+				"partial_json": args,
+			},
+		})
 		ollamaWriteSSE(w, "content_block_stop", map[string]any{
 			"type": "content_block_stop", "index": bIdx,
 		})
 	}
 
-	if len(toolBlockStarted) > 0 {
-		stopReason = "tool_use"
-	}
+	hasToolUse := len(toolBlockOrder) > 0
+	stopReason := mapOllamaFinishReason(finishReason, hasToolUse)
 
 	// message_delta + message_stop
 	ollamaWriteSSE(w, "message_delta", map[string]any{

@@ -310,18 +310,18 @@ type providerConfig struct {
 	BaseURL        string   `json:"baseUrl"`
 	APIKey         string   `json:"apiKey"`
 	AuthEnv        string   `json:"authEnv"`        // env var name for the key, default "ANTHROPIC_AUTH_TOKEN"; use "ANTHROPIC_API_KEY" for MiniMax etc.
-	Models         []string `json:"models"`          // available model names for this provider
-	Type           string   `json:"type"`            // "" or "anthropic" (default, passthrough) or "openai" (needs embedded translation proxy)
-	ChatURL        string   `json:"chatUrl"`         // OpenAI-compatible chat completions endpoint (used when Type=="openai")
-	AuthFile       string   `json:"authFile"`        // path to auth JSON (e.g. ~/.codex/auth.json, used when Type=="openai")
-	SmallFastModel string   `json:"smallFastModel"`  // override ANTHROPIC_SMALL_FAST_MODEL for this provider (e.g. "glm-5-turbo")
+	Models         []string `json:"models"`         // available model names for this provider
+	Type           string   `json:"type"`           // "" or "anthropic" (default, passthrough) or "openai" (needs embedded translation proxy)
+	ChatURL        string   `json:"chatUrl"`        // OpenAI-compatible chat completions endpoint (used when Type=="openai")
+	AuthFile       string   `json:"authFile"`       // path to auth JSON (e.g. ~/.codex/auth.json, used when Type=="openai")
+	SmallFastModel string   `json:"smallFastModel"` // override ANTHROPIC_SMALL_FAST_MODEL for this provider (e.g. "glm-5-turbo")
 }
 
 // resolveProvider looks up a provider's endpoint config from config.json "providers" section.
 // config.json is soul-cli's own config (in data/config.json).
 func resolveProvider(providerName string) *providerConfig {
 	all, _ := loadAllProviders()
-	if prov, ok := all[providerName]; ok && (prov.BaseURL != "" || prov.Type == "openai") {
+	if prov, ok := all[providerName]; ok && (prov.BaseURL != "" || prov.Type == "openai" || prov.Type == "ollama") {
 		return &prov
 	}
 	return nil
@@ -541,11 +541,11 @@ func isProviderModel(model string) bool {
 // nativeModelAliases maps short names to full Anthropic model IDs.
 // These are handled by Claude Code directly (no provider injection needed).
 var nativeModelAliases = map[string]string{
-	"opus":      "claude-opus-4-6",
-	"opus[1m]":  "claude-opus-4-6[1m]",
-	"sonnet":    "claude-sonnet-4-6",
+	"opus":       "claude-opus-4-7",
+	"opus[1m]":   "claude-opus-4-7[1m]",
+	"sonnet":     "claude-sonnet-4-6",
 	"sonnet[1m]": "claude-sonnet-4-6[1m]",
-	"haiku":     "claude-haiku-4-5-20251001",
+	"haiku":      "claude-haiku-4-5-20251001",
 }
 
 // resolveFuzzyModel takes a user-supplied --model value and resolves it to a
@@ -554,8 +554,8 @@ var nativeModelAliases = map[string]string{
 //   - Exact match: "zai/glm-5.1", "minimax/MiniMax-M2.7-highspeed", "opus"
 //   - Provider-only: "minimax" → first model under that provider
 //   - Fuzzy substring: "highspeed" → "minimax/MiniMax-M2.7-highspeed"
-//                       "glm" → "zai/glm-5.1"
-//                       "M2.7" → "minimax/MiniMax-M2.7-highspeed"
+//     "glm" → "zai/glm-5.1"
+//     "M2.7" → "minimax/MiniMax-M2.7-highspeed"
 //
 // Returns ("", nil) if no match found.
 func resolveFuzzyModel(input string) (string, error) {
@@ -585,9 +585,9 @@ func resolveFuzzyModel(input string) (string, error) {
 	// 4. Build candidate list from all providers + their models
 	allProviders, _ := loadAllProviders()
 	type candidate struct {
-		full    string // "provider/model"
-		prov    string // provider name
-		model   string // model name under provider
+		full  string // "provider/model"
+		prov  string // provider name
+		model string // model name under provider
 	}
 	var candidates []candidate
 

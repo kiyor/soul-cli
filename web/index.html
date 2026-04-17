@@ -558,10 +558,44 @@ body{
 .choices-confirm:hover{background:rgba(var(--accent-r),.2);border-color:rgba(var(--accent-r),.5)}
 .choices-confirm:active{transform:scale(.97)}
 .choices-confirm:disabled{opacity:.3;pointer-events:none}
+/* Enabled state for confirm — stronger visual than opacity alone so users
+   see a clear "ready to submit" transition. */
+.choices-confirm:not(:disabled){
+  background:var(--accent2);color:#fff;border-color:var(--accent2);
+  box-shadow:0 2px 12px rgba(var(--accent-r),.35);
+}
+.choices-confirm:not(:disabled):hover{background:var(--accent2);filter:brightness(1.1);transform:translateY(-1px)}
 @media(max-width:768px){
   .choice-card{padding:10px 12px}
   .choice-card:hover{transform:none}
 }
+
+/* AskUserQuestion: multi-question interactive panel */
+.auq-container{
+  border:1px solid rgba(var(--accent-r),.22);border-radius:var(--radius2);
+  padding:12px;background:rgba(var(--accent-r),.04);margin:10px 0;
+}
+.auq-container.submitted{opacity:.6}
+.auq-question{margin-bottom:14px}
+.auq-question:last-of-type{margin-bottom:8px}
+.auq-header{
+  display:inline-block;padding:2px 8px;border-radius:6px;
+  background:rgba(var(--accent-r),.15);color:var(--accent2);
+  font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;
+  margin-bottom:6px;
+}
+.auq-text{font-size:13px;color:var(--text);margin-bottom:8px;line-height:1.5;font-weight:500}
+.auq-hint{font-size:11px;color:var(--muted2);margin-top:4px;margin-bottom:8px;font-style:italic}
+.auq-footer{display:flex;gap:8px;align-items:center;margin-top:10px}
+.auq-footer .choices-confirm{margin:0;flex:1}
+.auq-cancel{
+  padding:8px 14px;border-radius:var(--radius2);cursor:pointer;
+  border:1px solid rgba(255,255,255,.1);background:transparent;
+  color:var(--muted2);font-size:12px;font-family:var(--sans);
+  transition:all .15s var(--spring);
+}
+.auq-cancel:hover{color:var(--text);border-color:rgba(255,255,255,.2)}
+.auq-cancel:disabled{opacity:.3;pointer-events:none}
 
 /* Quick reply chips */
 .chips-container{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
@@ -1546,8 +1580,8 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
         <span class="settings-label">Model</span>
         <select class="settings-select" id="select-model" onchange="applyModel(this.value)">
           <option value="">—</option>
-          <option value="opus">Opus 4.6</option>
-          <option value="opus[1m]">Opus 4.6 (1M)</option>
+          <option value="opus">Opus 4.7</option>
+          <option value="opus[1m]">Opus 4.7 (1M)</option>
           <option value="sonnet">Sonnet 4.6</option>
           <option value="sonnet[1m]">Sonnet 4.6 (1M)</option>
           <option value="haiku">Haiku 4.5</option>
@@ -1648,8 +1682,8 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   <label>Model</label>
   <select id="m-model" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font-size:14px;font-family:var(--sans);margin-bottom:14px;outline:none">
     <option value="">— Default ({{.DefaultInteractiveModel}}) —</option>
-    <option value="opus">Opus 4.6</option>
-    <option value="opus[1m]">Opus 4.6 (1M)</option>
+    <option value="opus">Opus 4.7</option>
+    <option value="opus[1m]">Opus 4.7 (1M)</option>
     <option value="sonnet">Sonnet 4.6</option>
     <option value="sonnet[1m]">Sonnet 4.6 (1M)</option>
     <option value="haiku">Haiku 4.5</option>
@@ -2748,6 +2782,9 @@ function handleSessionEvent(event,data){
     case 'control_response':
       handleControlResponse(data);
       break;
+    case 'ask_user_question':
+      handleAskUserQuestion(data);
+      break;
     case 'system':
       if(data.subtype==='compact_boundary'){
         const sid=data.session_id||activeSessionId;
@@ -2950,6 +2987,10 @@ function handleToolUse(data){
   finalizeStream();const msg=data.message;if(!msg||!msg.content)return;
   msg.content.forEach(b=>{
     if(b.type==='tool_use'){
+      // AskUserQuestion's answered tool_use (fired after the user submits)
+      // is uninteresting — it just echoes the questions. The actual UI is
+      // rendered off the ask_user_question SSE event, not this tool_use.
+      if(b.name==='AskUserQuestion') return;
       addToolUseMsg(b.name,b.input);
       // Track cwd changes from Bash cd commands
       if(b.name==='Bash'&&b.input&&typeof b.input.command==='string'){
@@ -2965,9 +3006,142 @@ function handleToolUse(data){
   if(!showToolsMode){
     setThinking(true);
     let lastTool=null;
-    msg.content.forEach(b=>{if(b.type==='tool_use')lastTool=b});
+    msg.content.forEach(b=>{if(b.type==='tool_use'&&b.name!=='AskUserQuestion')lastTool=b});
     if(lastTool)setTicker(lastTool.name,lastTool.input);
   }
+}
+
+// ── AskUserQuestion ──
+// Backend wiring:
+//   claude subprocess runs with --permission-prompt-tool stdio. When it calls
+//   AskUserQuestion, it emits a can_use_tool control_request on stdout. Our
+//   server intercepts that, stores it as pendingAUQ, and broadcasts an
+//   ask_user_question SSE event with the input. The subprocess blocks until
+//   POST /api/sessions/{id}/answer-question sends a control_response.
+function handleAskUserQuestion(data){
+  if(!data||!data.request_id||!data.input||!Array.isArray(data.input.questions))return;
+  renderAskUserQuestion(data.request_id, data.tool_use_id||'', data.input.questions);
+  // Pause the model's "thinking" spinner — we're waiting on the user now.
+  setThinking(false);clearTicker();
+}
+
+// Renders Claude's AskUserQuestion as an inline choice panel. Pane is keyed
+// by request_id so SSE history replay is deduplicated.
+function renderAskUserQuestion(requestId, toolUseId, questions){
+  if(!requestId) return;
+  if(document.querySelector(`.auq-container[data-request-id="${CSS.escape(requestId)}"]`)) return;
+  const el=document.createElement('div');el.className='msg ai';
+  const frag=[];
+  frag.push(`<div class="body"><div class="md"><div class="auq-container" data-request-id="${esc(requestId)}" data-tool-use-id="${esc(toolUseId)}">`);
+  questions.forEach((q,qi)=>{
+    const multi=!!q.multiSelect;
+    frag.push(`<div class="auq-question" data-qidx="${qi}" data-question-text="${esc(q.question||'')}" data-multi="${multi?'1':'0'}">`);
+    if(q.header)frag.push(`<span class="auq-header">${esc(q.header)}</span>`);
+    frag.push(`<div class="auq-text">${esc(q.question||'')}</div>`);
+    if(multi)frag.push(`<div class="auq-hint">可多选</div>`);
+    frag.push(`<div class="choices-container" data-choices-type="${multi?'multi':'single'}">`);
+    (q.options||[]).forEach((opt,oi)=>{
+      const oid=String.fromCharCode(65+oi);
+      const descHtml=opt.description?`<div class="choice-desc">${esc(opt.description)}</div>`:'';
+      frag.push(`<div class="choice-card" data-choice-id="${esc(oid)}" data-choice-label="${esc(opt.label||'')}" onclick="handleAUQChoiceClick(this)">`);
+      frag.push(`<div class="choice-id">${esc(oid)}</div>`);
+      frag.push(`<div class="choice-body"><div class="choice-label">${esc(opt.label||'')}</div>${descHtml}</div>`);
+      frag.push(`</div>`);
+    });
+    frag.push(`</div></div>`);
+  });
+  frag.push(`<div class="auq-footer">`);
+  frag.push(`<button class="choices-confirm" disabled onclick="submitAUQ(this)">提交</button>`);
+  frag.push(`<button class="auq-cancel" onclick="cancelAUQ(this)">跳过</button>`);
+  frag.push(`</div></div></div></div>`);
+  el.innerHTML=frag.join('');
+  document.getElementById('messages').appendChild(el);
+  scrollBottomSmooth();
+}
+
+function handleAUQChoiceClick(el){
+  const question=el.closest('.auq-question');
+  if(!question||question.classList.contains('disabled'))return;
+  const multi=question.dataset.multi==='1';
+  if(multi){
+    el.classList.toggle('selected');
+  }else{
+    question.querySelectorAll('.choice-card').forEach(c=>c.classList.remove('selected'));
+    el.classList.add('selected');
+  }
+  refreshAUQConfirm(el);
+}
+
+function refreshAUQConfirm(el){
+  const container=el.closest('.auq-container');
+  if(!container)return;
+  const questions=container.querySelectorAll('.auq-question');
+  let allAnswered=true;
+  questions.forEach(q=>{
+    if(!q.querySelector('.choice-card.selected'))allAnswered=false;
+  });
+  const btn=container.querySelector('.choices-confirm');
+  if(btn)btn.disabled=!allAnswered;
+}
+
+async function submitAUQ(btn){
+  const container=btn.closest('.auq-container');
+  if(!container||!activeSessionId)return;
+  const requestId=container.dataset.requestId;
+  const answers=[];
+  container.querySelectorAll('.auq-question').forEach(q=>{
+    const qText=q.dataset.questionText||'';
+    const selected=q.querySelectorAll('.choice-card.selected');
+    const multi=q.dataset.multi==='1';
+    let ans='';
+    if(multi){
+      ans=Array.from(selected).map(c=>`${c.dataset.choiceId}. ${c.dataset.choiceLabel}`).join(', ');
+    }else if(selected[0]){
+      const sel=selected[0];
+      ans=`${sel.dataset.choiceId}. ${sel.dataset.choiceLabel}`;
+    }
+    answers.push({question:qText, answer:ans});
+  });
+  lockAUQ(container,'已提交');
+  try{
+    const resp=await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/answer-question`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},
+      body:JSON.stringify({request_id:requestId, answers}),
+    });
+    if(!resp.ok){
+      const txt=await resp.text();
+      console.error('answer-question failed:',resp.status,txt);
+      btn.textContent='提交失败';
+    }
+  }catch(e){
+    console.error('answer-question error:',e);
+    btn.textContent='提交失败';
+  }
+}
+
+async function cancelAUQ(btn){
+  const container=btn.closest('.auq-container');
+  if(!container||!activeSessionId)return;
+  const requestId=container.dataset.requestId;
+  if(!confirm('跳过这些问题？未然会收到一个"用户拒绝回答"的结果继续。')) return;
+  lockAUQ(container,'已跳过');
+  try{
+    await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/answer-question`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},
+      body:JSON.stringify({request_id:requestId, cancelled:true}),
+    });
+  }catch(e){console.error('cancel-auq error:',e)}
+}
+
+function lockAUQ(container, confirmText){
+  container.classList.add('submitted');
+  container.querySelectorAll('.choice-card').forEach(c=>c.classList.add('disabled'));
+  const btn=container.querySelector('.choices-confirm');
+  if(btn){btn.disabled=true;btn.textContent=confirmText}
+  const cancel=container.querySelector('.auq-cancel');
+  if(cancel){cancel.disabled=true}
 }
 
 function handleToolResult(data){
@@ -4315,8 +4489,8 @@ function applyTheme(id){
 })();
 
 const MODEL_MAP={
-  'opus':'claude-opus-4-6',
-  'opus[1m]':'claude-opus-4-6[1m]',
+  'opus':'claude-opus-4-7',
+  'opus[1m]':'claude-opus-4-7[1m]',
   'sonnet':'claude-sonnet-4-6',
   'sonnet[1m]':'claude-sonnet-4-6[1m]',
   'haiku':'claude-haiku-4-5-20251001'

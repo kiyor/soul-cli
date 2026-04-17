@@ -253,7 +253,7 @@ Optional config file at `$WEIRAN_HOME/workspace/config.json`:
     "port": 9847
   },
   "defaultReplaceSoul": true,
-  "defaultInteractiveModel": "claude-opus-4-6[1m]"
+  "defaultInteractiveModel": "claude-opus-4-7[1m]"
 }
 ```
 

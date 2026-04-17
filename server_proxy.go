@@ -403,11 +403,13 @@ func extractUsageFromSSE(body []byte) (model string, input, output, cacheRead, c
 // Synced from claude-pool main.go — keep in sync when Anthropic updates pricing.
 // MiniMax: CNY ÷ 7. GLM (Z.AI): already USD. Source dates: 2026-04-10.
 var modelPricing = map[string][2]float64{
-	// Claude 4.5/4.6 (short names used by Claude Code)
+	// Claude 4.5/4.6/4.7 (short names used by Claude Code)
 	"claude-opus-4-5":            {5.0, 25.0},
 	"claude-opus-4-6":            {5.0, 25.0},
+	"claude-opus-4-7":            {5.0, 25.0},
 	"opus-4-5":                   {5.0, 25.0},
 	"opus-4-6":                   {5.0, 25.0},
+	"opus-4-7":                   {5.0, 25.0},
 	"claude-sonnet-4-5":          {3.0, 15.0},
 	"claude-sonnet-4-6":          {3.0, 15.0},
 	"sonnet-4-5":                 {3.0, 15.0},
@@ -632,9 +634,16 @@ func startProxyServer(cfg proxyConfig) {
 
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			// Force no compression so we can parse SSE as plaintext.
-			// Must set explicitly — Go's Transport adds "gzip" if header is absent.
-			req.Header.Set("Accept-Encoding", "identity")
+			// Suppress httputil.ReverseProxy's automatic X-Forwarded-For injection.
+			// A nil slice (not empty string) is the documented opt-out — otherwise
+			// upstream sees "X-Forwarded-For: 127.0.0.1" and knows we're a reverse
+			// proxy. Must run before ReverseProxy's post-Director XFF logic.
+			req.Header["X-Forwarded-For"] = nil
+
+			// Accept-Encoding is left untouched — whatever the client sent (gzip
+			// for Claude Code) passes through. Parsing paths below detect gzip
+			// via Content-Encoding / magic bytes and decompress for extraction
+			// while keeping the original body intact for the client.
 
 			// Extract session ID from path prefix: /s/{session_id}/v1/messages → /v1/messages
 			if strings.HasPrefix(req.URL.Path, "/s/") {
@@ -733,7 +742,19 @@ func startProxyServer(cfg proxyConfig) {
 				body, err := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				if err == nil {
-					model, in, out, cr, cc, stopReason, toolCalls, errDetail := extractUsageFromBody(body)
+					// Body may be gzip-encoded (client sent Accept-Encoding: gzip).
+					// Decompress for parsing only — pass the original compressed
+					// bytes back to the client so Content-Encoding stays consistent.
+					parseBody := body
+					if len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
+						if gr, gzErr := gzip.NewReader(bytes.NewReader(body)); gzErr == nil {
+							if decoded, readErr := io.ReadAll(gr); readErr == nil {
+								parseBody = decoded
+							}
+							gr.Close()
+						}
+					}
+					model, in, out, cr, cc, stopReason, toolCalls, errDetail := extractUsageFromBody(parseBody)
 					if in > 0 || out > 0 {
 						pState.addTokens(model, in, out, cr, cc)
 					}
@@ -1602,9 +1623,15 @@ var (
 
 // oauthToken returns the cached CLAUDE_CODE_OAUTH_TOKEN.
 // Priority: env var > workspace/.oauth-token file > config.json server.oauthToken
+//           > local weiran server /api/oauth/token (CLI mode only)
 // If the token fails validation (expired / invalid), it is NOT cached so the
 // process falls back to its own auth (keychain-based OAuth). This prevents
 // a stale workspace file from breaking all spawned processes.
+//
+// The server-IPC fallback only runs when `isServerMode == false` — i.e. we're
+// a CLI invocation like `weiran -p "..."` or `weiran token`. The server itself
+// runs under launchd and has native keychain access, so it shouldn't IPC to
+// itself (would loop and is redundant anyway).
 func oauthToken() string {
 	oauthTokenOnce.Do(func() {
 		// 1. Environment variable
@@ -1619,11 +1646,11 @@ func oauthToken() string {
 			if t := strings.TrimSpace(string(data)); t != "" {
 				if !validateOAuthToken(t) {
 					fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from %s: INVALID/EXPIRED — skipping\n", appName, tokenFile)
+				} else {
+					cachedOAuthToken = t
+					fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from %s (validated)\n", appName, tokenFile)
 					return
 				}
-				cachedOAuthToken = t
-				fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from %s (validated)\n", appName, tokenFile)
-				return
 			}
 		}
 		// 3. config.json server.oauthToken
@@ -1637,10 +1664,53 @@ func oauthToken() string {
 			if json.Unmarshal(data, &c) == nil && c.Server.OAuthToken != "" {
 				cachedOAuthToken = c.Server.OAuthToken
 				fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from config.json\n", appName)
+				return
+			}
+		}
+		// 4. Local weiran server /api/oauth/token (CLI mode only — prevents self-loop).
+		// This is the SSH path: the server (launchd) reads keychain on our behalf.
+		if !isServerMode {
+			if tok := fetchTokenFromLocalServer(); tok != "" {
+				cachedOAuthToken = tok
+				fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from local server\n", appName)
+				return
 			}
 		}
 	})
 	return cachedOAuthToken
+}
+
+// fetchTokenFromLocalServer is the server-internal IPC helper used by
+// oauthToken(). It mirrors the logic in token.go's fetchTokenFromServer() but
+// lives here so server_proxy.go doesn't depend on the CLI subcommand file.
+// Returns "" on any failure (server down, auth mismatch, non-200).
+func fetchTokenFromLocalServer() string {
+	cfg := loadServerConfig()
+	if cfg.Token == "" {
+		return ""
+	}
+	addr := fmt.Sprintf("http://127.0.0.1:%d/api/oauth/token", cfg.Port)
+	req, err := http.NewRequest("GET", addr, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var body struct {
+		AccessToken string `json:"accessToken"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(body.AccessToken)
 }
 
 // validateOAuthToken does a quick round-trip to the Anthropic API to check
@@ -1739,6 +1809,9 @@ func injectProxyEnvWithModel(env []string, sessionID string, model string) []str
 	if providerApplied {
 		env = overrideEnv
 	} else if e := proxyEnv(); e != "" && oauthToken() != "" {
+		// Route through local monitoring proxy only when we hold a valid OAuth token.
+		// Without a token the proxy returns 401 (it requires auth); let the subprocess
+		// use its own keychain auth instead. See creds.go for token warming.
 		// If sessionID provided, append path prefix
 		if sessionID != "" {
 			// e is "ANTHROPIC_BASE_URL=http://127.0.0.1:9091"

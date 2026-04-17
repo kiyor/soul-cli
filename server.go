@@ -912,6 +912,94 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 	}))
 
+	// Answer an in-flight AskUserQuestion permission request from the Web UI.
+	// Body: {"request_id": "req_...", "answers": [{"question": "...", "answer": "A. label"}, ...]}
+	// The server merges the user's answers into the original updatedInput and
+	// sends a control_response with behavior=allow, which unblocks the claude
+	// subprocess (it was waiting on stdin for a can_use_tool decision).
+	//
+	// For cancellation, set "cancelled": true — server replies with
+	// behavior=deny so claude marks the tool_use as user-rejected.
+	mux.HandleFunc("POST /api/sessions/{id}/answer-question", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		if !rl.allow() {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+			return
+		}
+		sess := sm.getSession(r.PathValue("id"))
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+		var req struct {
+			RequestID string `json:"request_id"`
+			Answers   []struct {
+				Question string `json:"question"`
+				Answer   string `json:"answer"`
+			} `json:"answers"`
+			Cancelled bool `json:"cancelled,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body: " + err.Error()})
+			return
+		}
+		if req.RequestID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request_id is required"})
+			return
+		}
+		if !sess.process.alive() {
+			writeJSON(w, http.StatusGone, map[string]string{"error": "session process has exited"})
+			return
+		}
+
+		entry := sess.takePendingAUQ(req.RequestID)
+		if entry == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no pending question for that request_id (already answered or expired)"})
+			return
+		}
+
+		sess.touch()
+		sess.setStatus("running")
+
+		var decision map[string]any
+		if req.Cancelled {
+			decision = map[string]any{
+				"behavior": "deny",
+				"message":  "User cancelled the questions.",
+			}
+		} else {
+			// Convert the answers list into AskUserQuestion's expected shape:
+			// `answers` is a Record<questionText, answerString>. Multi-select
+			// answers are already comma-joined by the frontend.
+			answersMap := make(map[string]string, len(req.Answers))
+			for _, a := range req.Answers {
+				if a.Question == "" {
+					continue
+				}
+				answersMap[a.Question] = a.Answer
+			}
+			// Merge answers into the original input (preserve questions + any
+			// other fields the model supplied).
+			merged := map[string]any{}
+			if len(entry.Input) > 0 {
+				if err := json.Unmarshal(entry.Input, &merged); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "corrupt pending input: " + err.Error()})
+					return
+				}
+			}
+			merged["answers"] = answersMap
+			decision = map[string]any{
+				"behavior":     "allow",
+				"updatedInput": merged,
+			}
+		}
+
+		if err := sess.process.sendPermissionDecision(req.RequestID, decision); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+	}))
+
 	// IPC: send message from one session to another
 	mux.HandleFunc("POST /api/sessions/{id}/message-from", authMiddleware(cfg.Token,
 		handleIPCMessageFrom(sm, hub, cfg.MaxInteractionRounds)))
@@ -1729,6 +1817,39 @@ func handleServer(args []string) {
 			"status":           "prepared",
 			"session_id":       req.SessionID,
 			"claude_session_id": claudeSID,
+		})
+	}))
+
+	// ── OAuth Token Bridge ──
+	// GET /api/oauth/token returns the current Claude Code OAuth access_token,
+	// refreshing proactively if near expiry. Intended for SSH-launched CLI
+	// clients (`weiran token`, shell-aliased `claude`) that cannot reach the
+	// macOS login keychain directly. The server process itself runs under
+	// launchd and *does* have keychain access, so it acts as a bridge.
+	//
+	// Response: {"accessToken":"sk-ant-oat01-...","expiresAt":<unix-ms>}
+	// 503 if keychain is unreachable or empty (user hasn't run `claude login`).
+	mux.HandleFunc("GET /api/oauth/token", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		creds := readClaudeKeychainCreds()
+		if creds == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"error": "keychain unreachable or empty; run `claude login` in a GUI session",
+			})
+			return
+		}
+		// Warm proactively if we're within the refresh threshold. ensureFreshClaudeCreds
+		// is idempotent / debounced and takes ~3-5s max. Re-read keychain after warm
+		// so we return the post-refresh token rather than the stale one.
+		remaining := time.UnixMilli(creds.ExpiresAt).Sub(time.Now())
+		if remaining < warmThreshold {
+			ensureFreshClaudeCreds()
+			if fresh := readClaudeKeychainCreds(); fresh != nil {
+				creds = fresh
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"accessToken": creds.AccessToken,
+			"expiresAt":   creds.ExpiresAt,
 		})
 	}))
 

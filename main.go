@@ -527,6 +527,7 @@ Subcommands:
   {{NAME}} server --port 8080    custom port (default 9090)
   {{NAME}} server --host 0.0.0.0 expose to network (default 127.0.0.1)
   {{NAME}} server --token SECRET  set auth token (or use WEIRAN_SERVER_TOKEN env / config.json)
+  {{NAME}} token                 print fresh Claude OAuth access_token (for SSH shells; IPCs to server)
   {{NAME}} clean                 clean old session temp directories under /tmp
   {{NAME}} sessions [keyword]    search sessions (fuzzy match on title/content/project)
   {{NAME}} ss [keyword]          same as above (shorthand)
@@ -724,6 +725,9 @@ func main() {
 		return
 	case "server":
 		handleServer(extra)
+		return
+	case "token":
+		handleToken(extra)
 		return
 	}
 
@@ -1130,6 +1134,10 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			return
 		case "server":
 			mode = "server"
+			extra = args[i+1:]
+			return
+		case "token":
+			mode = "token"
 			extra = args[i+1:]
 			return
 		case "--cron":

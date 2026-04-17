@@ -165,6 +165,17 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 		"--output-format", "stream-json",
 		"--verbose",
 		"--permission-mode", "bypassPermissions",
+		// Route any `ask`-behavior permission checks (currently only
+		// AskUserQuestion in bypassPermissions mode) through stdio
+		// control_request/can_use_tool. Without this flag, AskUserQuestion
+		// tool_use arrives on stdout but the subprocess auto-synthesizes
+		// an is_error tool_result "Answer questions?" because no UI can
+		// render the prompt. With it, claude waits on a control_response
+		// carrying the allow/deny decision AND the user's answers in
+		// updatedInput, which the Web UI produces via the answer-question
+		// endpoint. Other tools stay auto-allowed by bypassPermissions,
+		// so they never reach this stdio hop.
+		"--permission-prompt-tool", "stdio",
 	}
 
 	if opts.SystemPromptFile != "" {
@@ -314,6 +325,35 @@ func (p *claudeProcess) sendMessage(content string) error {
 		"message":            map[string]any{"role": "user", "content": msgContent},
 		"parent_tool_use_id": nil,
 		"session_id":         "default",
+	})
+	_, err := p.stdin.Write(append(payload, '\n'))
+	return err
+}
+
+// sendPermissionDecision writes a control_response answering an inbound
+// can_use_tool control_request. Used when claude runs with
+// --permission-prompt-tool stdio: a tool with ask-behavior permission
+// (e.g. AskUserQuestion) triggers a control_request on stdout, and the
+// subprocess blocks until we reply. For 'allow', pass updatedInput
+// (already merged with the answers the user picked). For 'deny', pass
+// a reason in message and leave updatedInput as nil.
+func (p *claudeProcess) sendPermissionDecision(requestID string, decision map[string]any) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	select {
+	case <-p.done:
+		return fmt.Errorf("process already exited")
+	default:
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "success",
+			"request_id": requestID,
+			"response":   decision,
+		},
 	})
 	_, err := p.stdin.Write(append(payload, '\n'))
 	return err
