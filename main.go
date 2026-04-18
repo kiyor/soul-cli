@@ -730,6 +730,9 @@ func main() {
 	case "token":
 		handleToken(extra)
 		return
+	case "tool-hook":
+		handleToolHook(extra)
+		return
 	}
 
 	initSessionDir()
@@ -1139,6 +1142,10 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			return
 		case "token":
 			mode = "token"
+			extra = args[i+1:]
+			return
+		case "tool-hook":
+			mode = "tool-hook"
 			extra = args[i+1:]
 			return
 		case "--cron":

@@ -90,6 +90,28 @@ func openDB() (*sql.DB, error) {
 		`CREATE INDEX IF NOT EXISTS idx_maudit_ts ON memory_audit(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_maudit_op ON memory_audit(operation)`,
 		`CREATE INDEX IF NOT EXISTS idx_maudit_sess ON memory_audit(session_id)`,
+		// tool_hook_audit: every PreToolUse hook invocation (Read/Edit/Write/Grep/...).
+		// One row per hook call. Acts simultaneously as audit log and dedup state
+		// (per_session/per_file dedup implemented via WHERE injected=1 lookups here).
+		`CREATE TABLE IF NOT EXISTS tool_hook_audit (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp       TEXT NOT NULL,
+			session_id      TEXT NOT NULL DEFAULT '',
+			cwd             TEXT NOT NULL DEFAULT '',
+			tool_name       TEXT NOT NULL DEFAULT '',
+			path            TEXT NOT NULL DEFAULT '',
+			rule_id         TEXT NOT NULL DEFAULT '',
+			injected        BOOLEAN NOT NULL DEFAULT 0,
+			skip_reason     TEXT NOT NULL DEFAULT '',
+			injection_size  INTEGER NOT NULL DEFAULT 0,
+			budget_used     INTEGER NOT NULL DEFAULT 0,
+			latency_ms      INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_thook_ts ON tool_hook_audit(timestamp)`,
+		`CREATE INDEX IF NOT EXISTS idx_thook_sess ON tool_hook_audit(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_thook_rule ON tool_hook_audit(rule_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_thook_path ON tool_hook_audit(path)`,
+		`CREATE INDEX IF NOT EXISTS idx_thook_tool ON tool_hook_audit(tool_name)`,
 	}
 	for _, s := range schemas {
 		if _, err := db.Exec(s); err != nil {
