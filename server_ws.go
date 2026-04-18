@@ -240,6 +240,7 @@ func (c *wsClient) handleMessage(raw []byte) {
 		SkipReplay  bool   `json:"skip_replay"`
 		GalID       string `json:"gal_id"`
 		ReplaceSoul *bool  `json:"replace_soul"` // 本我模式; nil → default true for create, inherit-from-DB for resume
+		Mode        string `json:"mode"`         // "weiran"/"benwo"/"cc"; overrides SoulFiles+ReplaceSoul when set
 	}
 	if json.Unmarshal(raw, &msg) != nil {
 		c.sendJSON(map[string]string{"type": "error", "error": "invalid JSON"})
@@ -344,6 +345,13 @@ func (c *wsClient) handleMessage(raw []byte) {
 		if msg.ReplaceSoul != nil {
 			replaceSoul = *msg.ReplaceSoul
 		}
+		// Mode enum overrides the legacy bools when provided
+		if msg.Mode != "" {
+			if s, r, ok := modeToFlags(msg.Mode); ok {
+				soul = s
+				replaceSoul = r
+			}
+		}
 		model := msg.Model
 		if model == "" {
 			model = c.hub.defaultInteractiveModel
@@ -423,7 +431,7 @@ func (c *wsClient) handleMessage(raw []byte) {
 		}
 		// Don't pass frontend model on resume — it may be stale/stripped (missing [1m] suffix).
 		// Let resumeSession resolve model from DB which preserves the correct value.
-		sess, err := c.hub.sm.resumeSession(msg.SID, msg.Message, msg.Name, "", "", msg.ReplaceSoul)
+		sess, err := c.hub.sm.resumeSession(msg.SID, msg.Message, msg.Name, "", "", msg.ReplaceSoul, msg.SoulFiles)
 		if err != nil {
 			c.sendJSON(map[string]string{"type": "error", "error": err.Error()})
 			return

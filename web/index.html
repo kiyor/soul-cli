@@ -2641,8 +2641,11 @@ function handleWSMessage(msg){
         toast('Session resumed','success');
         resumeInProgress=false;
         activeSessionId=msg.session.id;
-        // Sync URL
-        const ru=new URL(location);ru.searchParams.set('sid',msg.session.id);history.replaceState(null,'',ru);
+        // Sync URL — prefer cc id (stable user-visible handle); fall back to weiran id
+        const ru=new URL(location);
+        const urlSid=msg.session.claude_session_id||msg.session.id;
+        ru.searchParams.set('sid',urlSid);
+        history.replaceState(null,'',ru);
         wsSend({type:'subscribe',sid:msg.session.id});
         updateSidebarActive();
         document.getElementById('send-btn').disabled=!document.getElementById('input').value.trim();
@@ -2695,13 +2698,20 @@ function handleSessionsUpdate(list){
   const emptyEl=document.getElementById('empty-hint');
   document.getElementById('session-count').textContent=(list||[]).length+' active';
 
-  // One-shot: restore session from ?sid= on page load
+  // One-shot: restore session from ?sid= on page load.
+  // URL carries cc id (the stable, user-visible handle). Fall back to
+  // matching weiran id so old bookmarks keep working.
   if(!_sidRestored){
     _sidRestored=true;
     const qs=new URLSearchParams(location.search).get('sid');
-    if(qs&&(list||[]).some(s=>s.id===qs)){
-      // defer so sidebar renders first
-      setTimeout(()=>selectSession(qs),0);
+    if(qs){
+      const byCc=(list||[]).find(s=>s.claude_session_id===qs);
+      const byWeiran=(list||[]).find(s=>s.id===qs);
+      const target=byCc||byWeiran;
+      if(target){
+        // defer so sidebar renders first
+        setTimeout(()=>selectSession(target.id),0);
+      }
     }
   }
 
@@ -2878,9 +2888,16 @@ function selectSession(id){
   // Render subagent drawer for newly selected session (state is preserved per-session)
   renderSubagentDrawer();
 
-  // Sync URL query string
+  // Sync URL query string — prefer cc id (stable user-visible handle);
+  // fall back to weiran id if cc id not yet known (e.g. freshly created session).
   const u=new URL(location);
-  if(id){u.searchParams.set('sid',id)}else{u.searchParams.delete('sid')}
+  if(id){
+    const s=sessions[id];
+    const urlSid=(s&&s.claude_session_id)||id;
+    u.searchParams.set('sid',urlSid);
+  }else{
+    u.searchParams.delete('sid');
+  }
   history.replaceState(null,'',u);
 
   const w=document.getElementById('welcome'),m=document.getElementById('messages'),c=document.getElementById('composer');
@@ -4817,7 +4834,7 @@ function renderUsage(r){
   if(pu){
     const rl=pu.rate_limit;
     if(rl&&(rl.five_hour_utilization>0||rl.seven_day_utilization>0)){
-      lines.push('','**Subscription Quota:**');
+      lines.push('','**Claude Subscription Quota:**');
       if(rl.five_hour_utilization>0){
         const p5=(rl.five_hour_utilization*100).toFixed(1);
         const r5=rl.five_hour_resets_at?fmtReset(rl.five_hour_resets_at):'';
@@ -5403,7 +5420,7 @@ async function showSniffUsage(){
     // Rate limit card
     const rl=usage.rate_limit;
     if(rl&&(rl.five_hour_utilization>0||rl.seven_day_utilization>0||rl.status)){
-      html+=`<div class="sniff-card"><h3>Subscription Quota</h3>`;
+      html+=`<div class="sniff-card"><h3>Claude Subscription Quota</h3>`;
       if(rl.five_hour_utilization>0||rl.five_hour_resets_at){
         const p5=(rl.five_hour_utilization*100).toFixed(1);
         const remainMs5=rl.five_hour_resets_at?rl.five_hour_resets_at*1000-Date.now():0;

@@ -667,12 +667,13 @@ func handleServer(args []string) {
 			Model          string   `json:"model"`
 			InitialMessage string   `json:"initial_message"`
 			Message        string   `json:"message"` // alias for initial_message
-			SoulFiles      bool     `json:"soul_files"`
+			SoulFiles      *bool    `json:"soul_files"`
 			MCPConfig      string   `json:"mcp_config"`
 			GalID          string   `json:"gal_id"`
 			Category       string   `json:"category"`
 			Tags           []string `json:"tags"`
 			ReplaceSoul    *bool    `json:"replace_soul"` // nil → use config default
+			Mode           string   `json:"mode"`         // "weiran"|"benwo"|"cc"; overrides legacy bools when set
 			SpawnedBy      string   `json:"spawned_by"`   // parent session ID
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -691,9 +692,24 @@ func handleServer(args []string) {
 			req.Project = workspace
 		}
 
+		// Resolve soul/replace_soul from mode enum if provided, else fall back
+		// to legacy bool fields (default soul=true, replace=cfg default).
+		soulFiles := true
+		if req.SoulFiles != nil {
+			soulFiles = *req.SoulFiles
+		}
 		replaceSoul := cfg.DefaultReplaceSoul
 		if req.ReplaceSoul != nil {
 			replaceSoul = *req.ReplaceSoul
+		}
+		if req.Mode != "" {
+			if s, rp, ok := modeToFlags(req.Mode); ok {
+				soulFiles = s
+				replaceSoul = rp
+			} else {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unknown mode %q", req.Mode)})
+				return
+			}
 		}
 
 		model := req.Model
@@ -705,7 +721,7 @@ func handleServer(args []string) {
 			Name:        req.Name,
 			Project:     req.Project,
 			Model:       model,
-			Soul:        req.SoulFiles,
+			Soul:        soulFiles,
 			MCP:         req.MCPConfig,
 			GalID:       req.GalID,
 			Category:    req.Category,
@@ -1248,6 +1264,33 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "replace_soul": req.Enabled})
 	}))
 
+	// Switch session mode — reloads the underlying claude proc in one of
+	//   weiran (default): --append-system-prompt-file <soul> (CC harness + SOUL)
+	//   benwo (本我):     --system-prompt-file <soul>         (SOUL replaces CC)
+	//   cc (bare):        no soul prompt at all               (pure Claude Code)
+	// Session state (conversation history via resume, name, chrome, todos) is
+	// preserved across the reload. Switching to/from cc shifts identity much
+	// more than append↔replace, so the UI should warn.
+	mux.HandleFunc("POST /api/sessions/{id}/mode", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		sess := sm.getSession(r.PathValue("id"))
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+		var req struct {
+			Mode string `json:"mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Mode == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mode is required (weiran|benwo|cc)"})
+			return
+		}
+		if err := sm.setMode(sess.ID, req.Mode); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "mode": req.Mode})
+	}))
+
 	// Switch model — respawns the claude process with a new model while
 	// preserving session state (conversation history, replace_soul, chrome).
 	mux.HandleFunc("POST /api/sessions/{id}/set-model", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
@@ -1424,13 +1467,22 @@ func handleServer(args []string) {
 			Category    string `json:"category"`
 			Model       string `json:"model"`
 			ReplaceSoul *bool  `json:"replace_soul"` // nil → inherit persisted DB flag
+			SoulFiles   *bool  `json:"soul_files"`   // nil → inherit persisted DB flag
+			Mode        string `json:"mode"`         // optional: "weiran"/"benwo"/"cc" — overrides above
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id is required"})
 			return
 		}
+		// Mode takes precedence if provided
+		if req.Mode != "" {
+			if soulFlag, replaceFlag, ok := modeToFlags(req.Mode); ok {
+				req.SoulFiles = &soulFlag
+				req.ReplaceSoul = &replaceFlag
+			}
+		}
 
-		sess, err := sm.resumeSession(req.SessionID, req.Message, req.Name, req.Category, req.Model, req.ReplaceSoul)
+		sess, err := sm.resumeSession(req.SessionID, req.Message, req.Name, req.Category, req.Model, req.ReplaceSoul, req.SoulFiles)
 		if err != nil {
 			status := http.StatusInternalServerError
 			if strings.Contains(err.Error(), "max sessions") {
