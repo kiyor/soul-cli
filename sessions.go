@@ -221,9 +221,24 @@ func scanAllSessions() []sessionInfo {
 	// load active session names from ~/.claude/sessions/
 	nameMap := loadSessionNames()
 
-	entries, err := os.ReadDir(claudeProjects)
+	// scan active claude config dir
+	scanProjectDir(claudeProjects, nameMap, summaryMap, &sessions, false)
+
+	// scan archive sources
+	for _, archiveDir := range archiveProjectsDirs() {
+		scanProjectDir(archiveDir, nil, summaryMap, &sessions, true)
+	}
+
+	return sessions
+}
+
+// scanProjectDir reads a projects/ directory (like ~/.claude/projects/) and
+// appends sessionInfo entries. When isArchive is true, session names are skipped
+// (archives don't have active session metadata).
+func scanProjectDir(projectsDir string, nameMap, summaryMap map[string]string, sessions *[]sessionInfo, isArchive bool) {
+	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
-		return sessions
+		return
 	}
 
 	for _, projEntry := range entries {
@@ -231,7 +246,7 @@ func scanAllSessions() []sessionInfo {
 			continue
 		}
 		projName := decodeProjectName(projEntry.Name())
-		projDir := filepath.Join(claudeProjects, projEntry.Name())
+		projDir := filepath.Join(projectsDir, projEntry.Name())
 
 		files, err := os.ReadDir(projDir)
 		if err != nil {
@@ -256,9 +271,11 @@ func scanAllSessions() []sessionInfo {
 				Path:    fpath,
 			}
 
-			// name from active sessions
-			if n, ok := nameMap[sessionID]; ok {
-				s.Name = n
+			// name from active sessions (archives don't have these)
+			if !isArchive {
+				if n, ok := nameMap[sessionID]; ok {
+					s.Name = n
+				}
 			}
 
 			// summary from weiran DB
@@ -269,10 +286,9 @@ func scanAllSessions() []sessionInfo {
 			// parse JSONL head for title, first message, model, message count
 			parseSessionHead(&s)
 
-			sessions = append(sessions, s)
+			*sessions = append(*sessions, s)
 		}
 	}
-	return sessions
 }
 
 func parseSessionHead(s *sessionInfo) {
@@ -513,6 +529,19 @@ func recentSessions(limit int) []sessionFile {
 				continue
 			}
 			collect(&all, sessDir, "oc-"+e.Name(), cutoff)
+		}
+	}
+
+	// Archive sources (old .claude backups)
+	for _, archiveDir := range archiveProjectsDirs() {
+		if entries, err := os.ReadDir(archiveDir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				dir := filepath.Join(archiveDir, e.Name())
+				collect(&all, dir, "archive", cutoff)
+			}
 		}
 	}
 

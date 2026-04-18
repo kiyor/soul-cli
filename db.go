@@ -233,6 +233,91 @@ func saveSummary(db *sql.DB, path, hash string, size int64, summary string) erro
 	return err
 }
 
+// ── Session source management ──
+
+// sessionSourcesFile is the path to the JSON file listing archive directories.
+// Archives are old .claude backups (e.g. ~/.claude.bak1) whose sessions should
+// still be searchable. Each archive is treated like claudeConfigDir — the code
+// auto-discovers the projects/ subdirectory within it.
+var sessionSourcesFile string // initialized in initSessionSources()
+
+// loadSessionSources reads the list of archive directories.
+// Returns nil (not error) if the file doesn't exist.
+func loadSessionSources() []string {
+	data, err := os.ReadFile(sessionSourcesFile)
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	if json.Unmarshal(data, &dirs) != nil {
+		return nil
+	}
+	// Expand ~ and filter to existing directories
+	var valid []string
+	for _, d := range dirs {
+		d = expandHomeStr(d)
+		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
+			valid = append(valid, d)
+		}
+	}
+	return valid
+}
+
+// saveSessionSources writes the archive directory list.
+func saveSessionSources(dirs []string) error {
+	// Normalize paths — store with ~ prefix when under home
+	var normalized []string
+	homePrefix := home + "/"
+	for _, d := range dirs {
+		d = expandHomeStr(d)
+		if strings.HasPrefix(d, homePrefix) {
+			d = "~" + d[len(home):]
+		}
+		normalized = append(normalized, d)
+	}
+	data, _ := json.MarshalIndent(normalized, "", "  ")
+	return os.WriteFile(sessionSourcesFile, data, 0644)
+}
+
+// archiveProjectsDirs returns the list of <archive>/projects/ directories
+// that actually exist on disk, across all registered archive sources.
+func archiveProjectsDirs() []string {
+	archives := loadSessionSources()
+	var dirs []string
+	for _, a := range archives {
+		pDir := filepath.Join(a, "projects")
+		if fi, err := os.Stat(pDir); err == nil && fi.IsDir() {
+			dirs = append(dirs, pDir)
+		}
+	}
+	return dirs
+}
+
+// isArchivePath checks whether a file path falls under any registered archive directory.
+func isArchivePath(path string) bool {
+	for _, a := range loadSessionSources() {
+		if strings.HasPrefix(path, a+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// expandHomeStr replaces ~ with the user's home directory (swallowing errors).
+func expandHomeStr(path string) string {
+	p, err := expandHome(path)
+	if err != nil {
+		return path
+	}
+	return p
+}
+
+// initSessionSources sets the session sources file path.
+// Called from initWorkspace or early startup.
+func initSessionSources() {
+	sessionSourcesFile = filepath.Join(appDir, "session-sources.json")
+}
+
 // ── DB subcommands ──
 
 func handleDB(args []string) {
@@ -402,30 +487,74 @@ func handleDB(args []string) {
 		fmt.Println(string(out))
 
 	case "gc":
-		// weiran db gc — clean up DB records for sessions no longer on disk
+		// weiran db gc — clean up DB records for sessions no longer on disk.
+		// If the session file has been moved into a registered archive (same
+		// basename under <archive>/projects/**), relocate the DB path instead
+		// of deleting the record.
 		rows, err := db.Query("SELECT path FROM sessions")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "query failed: %v\n", err)
 			os.Exit(1)
 		}
 		var stale []string
+		relocated := map[string]string{} // old → new
+		archives := archiveProjectsDirs()
 		for rows.Next() {
 			var path string
 			rows.Scan(&path)
 			if _, err := os.Stat(path); os.IsNotExist(err) {
-				stale = append(stale, path)
+				base := filepath.Base(path)
+				found := ""
+				for _, archDir := range archives {
+					if entries, err := os.ReadDir(archDir); err == nil {
+						for _, e := range entries {
+							if !e.IsDir() {
+								continue
+							}
+							cand := filepath.Join(archDir, e.Name(), base)
+							if _, err := os.Stat(cand); err == nil {
+								found = cand
+								break
+							}
+						}
+					}
+					if found != "" {
+						break
+					}
+				}
+				if found != "" {
+					relocated[path] = found
+				} else {
+					stale = append(stale, path)
+				}
 			}
 		}
 		rows.Close()
+		for oldPath, newPath := range relocated {
+			if _, err := db.Exec("UPDATE sessions SET path = ? WHERE path = ?", newPath, oldPath); err != nil {
+				fmt.Fprintf(os.Stderr, "  relocate failed %s: %v\n", filepath.Base(oldPath), err)
+				continue
+			}
+			db.Exec("UPDATE session_content SET path = ? WHERE path = ?", newPath, oldPath)
+			fmt.Printf("  relocated: %s → archive\n", filepath.Base(oldPath))
+		}
 		if len(stale) == 0 {
-			fmt.Println("nothing to clean, all DB records have matching files")
+			if len(relocated) > 0 {
+				fmt.Printf("relocated %d records to archive, no stale records\n", len(relocated))
+			} else {
+				fmt.Println("nothing to clean, all DB records have matching files")
+			}
 			return
 		}
 		for _, p := range stale {
 			db.Exec("DELETE FROM sessions WHERE path = ?", p)
 			fmt.Printf("  removed: %s\n", filepath.Base(p))
 		}
-		fmt.Printf("cleanup done: removed %d stale records\n", len(stale))
+		fmt.Printf("cleanup done: removed %d stale records", len(stale))
+		if len(relocated) > 0 {
+			fmt.Printf(", relocated %d to archive", len(relocated))
+		}
+		fmt.Println()
 
 	case "search":
 		// weiran db search <keyword> — search session summaries
@@ -570,8 +699,159 @@ func handleDB(args []string) {
 		// weiran db events [--since=24h] [--mode=cron] [--type=timeout] [--notify]
 		handleEventLog(args[1:])
 
+	case "add-source":
+		// weiran db add-source <dir> — register an archive directory
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: "+appName+" db add-source <dir>")
+			fmt.Fprintln(os.Stderr, "  Registers a .claude backup directory for session search.")
+			fmt.Fprintln(os.Stderr, "  Auto-discovers projects/ subdirectory within it.")
+			os.Exit(1)
+		}
+		dir := expandHomeStr(args[1])
+		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+			fmt.Fprintf(os.Stderr, "directory not found: %s\n", dir)
+			os.Exit(1)
+		}
+		dirs := loadSessionSources()
+		abs, _ := filepath.Abs(dir)
+		for _, d := range dirs {
+			if d == abs {
+				fmt.Printf("already registered: %s\n", abs)
+				return
+			}
+		}
+		dirs = append(dirs, abs)
+		if err := saveSessionSources(dirs); err != nil {
+			fmt.Fprintf(os.Stderr, "save failed: %v\n", err)
+			os.Exit(1)
+		}
+		// Check if projects/ subdir exists and count sessions
+		projDir := filepath.Join(abs, "projects")
+		sessionCount := 0
+		if fi, err := os.Stat(projDir); err == nil && fi.IsDir() {
+			if entries, err := os.ReadDir(projDir); err == nil {
+				for _, e := range entries {
+					if e.IsDir() {
+						if files, err := os.ReadDir(filepath.Join(projDir, e.Name())); err == nil {
+							for _, f := range files {
+								if !f.IsDir() && strings.HasSuffix(f.Name(), ".jsonl") {
+									sessionCount++
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		fmt.Printf("added: %s (found %d sessions in projects/)\n", abs, sessionCount)
+		fmt.Printf("run `%s db fts-index-sessions` to index archived sessions\n", appName)
+
+	case "remove-source":
+		// weiran db remove-source <dir>
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: "+appName+" db remove-source <dir>")
+			os.Exit(1)
+		}
+		target := expandHomeStr(args[1])
+		target, _ = filepath.Abs(target)
+		dirs := loadSessionSources()
+		var filtered []string
+		for _, d := range dirs {
+			if d != target {
+				filtered = append(filtered, d)
+			}
+		}
+		if len(filtered) == len(dirs) {
+			fmt.Fprintf(os.Stderr, "not found: %s\n", target)
+			os.Exit(1)
+		}
+		if err := saveSessionSources(filtered); err != nil {
+			fmt.Fprintf(os.Stderr, "save failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("removed: %s\n", target)
+
+	case "migrate-session", "migrate-sessions":
+		// weiran db migrate-session <src> [--to <dir>] [--dry-run]
+		// Scrub API fingerprints (requestId, message.id) and regenerate
+		// sessionId + uuid tree, writing to claudeConfigDir (env-aware)
+		// or --to <dir>.
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: "+appName+" db migrate-session <src-file-or-dir> [--to <dir>] [--dry-run] [--keep-source]")
+			fmt.Fprintln(os.Stderr, "  Scrubs Anthropic requestId/msg_id, regenerates sessionId + UUID tree,")
+			fmt.Fprintln(os.Stderr, "  writes to $CLAUDE_CONFIG_DIR (or --to), updates weiran DB paths.")
+			fmt.Fprintln(os.Stderr, "  Source files are deleted after successful migration (use --keep-source to preserve).")
+			os.Exit(1)
+		}
+		srcArg := expandHomeStr(args[1])
+		destDir := ""
+		dryRun := false
+		keepSource := false
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--to":
+				if i+1 < len(args) {
+					destDir = expandHomeStr(args[i+1])
+					i++
+				}
+			case "--dry-run":
+				dryRun = true
+			case "--keep-source":
+				keepSource = true
+			default:
+				if strings.HasPrefix(args[i], "--to=") {
+					destDir = expandHomeStr(strings.TrimPrefix(args[i], "--to="))
+				}
+			}
+		}
+		migrated, err := migrateSessions(srcArg, destDir, dryRun, keepSource)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "migrate failed: %v\n", err)
+			os.Exit(1)
+		}
+		// Auto-trigger fts-index-sessions so the just-migrated files land in
+		// the content-search index immediately — otherwise the user has to
+		// remember a second command. Skip on dry-run (nothing changed on disk)
+		// and when nothing actually moved (no DB/index work to do).
+		if !dryRun && migrated > 0 {
+			start := time.Now()
+			added, skipped, ierr := indexSessionContent()
+			if ierr != nil {
+				fmt.Fprintf(os.Stderr, "  warn: auto fts-index-sessions failed: %v (run `%s db fts-index-sessions` manually)\n", ierr, appName)
+			} else {
+				fmt.Printf("fts-index-sessions (auto): %d added/updated, %d skipped (%.2fs)\n", added, skipped, time.Since(start).Seconds())
+			}
+		}
+
+	case "list-sources":
+		// weiran db list-sources — show registered archives
+		dirs := loadSessionSources()
+		if len(dirs) == 0 {
+			fmt.Println("no archive sources registered")
+			return
+		}
+		fmt.Println("archive sources:")
+		for _, d := range dirs {
+			projDir := filepath.Join(d, "projects")
+			count := 0
+			if entries, err := os.ReadDir(projDir); err == nil {
+				for _, e := range entries {
+					if e.IsDir() {
+						if files, err := os.ReadDir(filepath.Join(projDir, e.Name())); err == nil {
+							for _, f := range files {
+								if !f.IsDir() && strings.HasSuffix(f.Name(), ".jsonl") {
+									count++
+								}
+							}
+						}
+					}
+				}
+			}
+			fmt.Printf("  %s (%d sessions)\n", d, count)
+		}
+
 	default:
-		fmt.Printf("unknown subcommand: %s\nusage: %s db <recall|pending|summarized|save|save-batch|list|stats|search|search-fts|fts-index|fts-index-sessions|fts-rebuild|gc|patterns|pattern-save|pattern-save-batch|feedback|cultivate|pattern-reject|events>\n", args[0], appName)
+		fmt.Printf("unknown subcommand: %s\nusage: %s db <recall|pending|summarized|save|save-batch|list|stats|search|search-fts|fts-index|fts-index-sessions|fts-rebuild|gc|add-source|remove-source|list-sources|migrate-session|patterns|pattern-save|pattern-save-batch|feedback|cultivate|pattern-reject|events>\n", args[0], appName)
 	}
 }
 

@@ -573,6 +573,28 @@ func indexSessionContent() (int, int, error) {
 		}
 	}
 
+	// Archive sources — old .claude backups registered via `db add-source`
+	for _, archDir := range archiveProjectsDirs() {
+		if entries, err := os.ReadDir(archDir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					if strings.HasSuffix(e.Name(), ".jsonl") {
+						jsonlFiles = append(jsonlFiles, filepath.Join(archDir, e.Name()))
+					}
+					continue
+				}
+				dir := filepath.Join(archDir, e.Name())
+				if subentries, err := os.ReadDir(dir); err == nil {
+					for _, se := range subentries {
+						if !se.IsDir() && strings.HasSuffix(se.Name(), ".jsonl") {
+							jsonlFiles = append(jsonlFiles, filepath.Join(dir, se.Name()))
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if len(jsonlFiles) == 0 {
 		return 0, 0, nil
 	}

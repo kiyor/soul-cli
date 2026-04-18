@@ -16,13 +16,15 @@ import (
 // handleSessionIPC dispatches `weiran session <subcommand>` CLI commands.
 func handleSessionIPC(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "usage: %s session <list|send|read|search|close|wait>\n", appName)
+		fmt.Fprintf(os.Stderr, "usage: %s session <list|recent|send|read|search|close|wait>\n", appName)
 		os.Exit(1)
 	}
 
 	switch args[0] {
 	case "list":
 		ipcList()
+	case "recent":
+		sessionRecent(args[1:])
 	case "send":
 		if len(args) < 3 {
 			fmt.Fprintf(os.Stderr, "usage: %s session send <target_id> \"message\"\n", appName)
@@ -32,10 +34,29 @@ func handleSessionIPC(args []string) {
 		ipcSend(args[1], msg)
 	case "read":
 		if len(args) < 2 {
-			fmt.Fprintf(os.Stderr, "usage: %s session read <target_id>\n", appName)
+			fmt.Fprintf(os.Stderr, "usage: %s session read <target_id> [--verbose|-v] [--ts]\n", appName)
 			os.Exit(1)
 		}
-		ipcRead(args[1])
+		verbose := false
+		showTS := false
+		var targetID string
+		for _, a := range args[1:] {
+			switch a {
+			case "--verbose", "-v":
+				verbose = true
+			case "--ts":
+				showTS = true
+			default:
+				if targetID == "" {
+					targetID = a
+				}
+			}
+		}
+		if targetID == "" {
+			fmt.Fprintf(os.Stderr, "usage: %s session read <target_id> [--verbose|-v] [--ts]\n", appName)
+			os.Exit(1)
+		}
+		ipcRead(targetID, verbose, showTS)
 	case "search":
 		if len(args) < 3 {
 			fmt.Fprintf(os.Stderr, "usage: %s session search <target_id> \"keyword\"\n", appName)
@@ -64,7 +85,7 @@ func handleSessionIPC(args []string) {
 		ipcPrepareRestart(msg)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown session subcommand: %s\n", args[0])
-		fmt.Fprintf(os.Stderr, "usage: %s session <list|send|read|search|close|wait|prepare-restart>\n", appName)
+		fmt.Fprintf(os.Stderr, "usage: %s session <list|recent|send|read|search|close|wait|prepare-restart>\n", appName)
 		os.Exit(1)
 	}
 }
@@ -177,10 +198,12 @@ func ipcSend(targetID, message string) {
 }
 
 // ipcRead reads full message history of a target session.
-func ipcRead(targetID string) {
+// verbose=true shows full tool inputs/results; otherwise tool inputs are summarized.
+// showTS=true prefixes each non-tool line with a short timestamp (HH:MM:SS).
+func ipcRead(targetID string, verbose, showTS bool) {
 	targetID = resolveSessionID(targetID)
 
-	resp, err := ipcRequest("GET", "/api/history/"+targetID+"/messages?limit=100", nil)
+	resp, err := ipcRequest("GET", "/api/history/"+targetID+"/messages?limit=200", nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -197,16 +220,141 @@ func ipcRead(targetID string) {
 
 	for _, m := range messages {
 		role := fmt.Sprintf("%v", m["role"])
-		content := fmt.Sprintf("%v", m["content"])
+		content, _ := m["content"].(string)
+		ts := ""
+		if showTS {
+			if v, ok := m["timestamp"].(string); ok && len(v) >= 19 {
+				// ISO-8601 → HH:MM:SS
+				ts = v[11:19] + " "
+			}
+		}
+
 		switch role {
 		case "user":
-			fmt.Printf("🧑 %s\n\n", content)
+			fmt.Printf("%s🧑 %s\n\n", ts, content)
 		case "assistant":
-			fmt.Printf("🤖 %s\n\n", content)
+			fmt.Printf("%s🤖 %s\n\n", ts, content)
+		case "tool_use":
+			toolName, _ := m["tool_name"].(string)
+			toolInput, _ := m["tool_input"].(string)
+			if verbose {
+				fmt.Printf("  🔧 %s\n", toolName)
+				if toolInput != "" {
+					fmt.Printf("%s\n", indent(toolInput, "     "))
+				}
+			} else {
+				fmt.Printf("  🔧 %s(%s)\n", toolName, summarizeToolInput(toolName, toolInput))
+			}
+		case "tool_result":
+			if content == "" {
+				continue
+			}
+			if verbose {
+				fmt.Printf("  ↪ %s\n\n", indent(content, "    "))
+			} else {
+				fmt.Printf("  ↪ %s\n\n", truncateOneLine(content, 160))
+			}
+		case "image":
+			imgs, _ := m["images"].([]any)
+			fmt.Printf("  🖼  [%d image(s)]\n\n", len(imgs))
+		case "compact_boundary":
+			// Content format: "compact_boundary|<trigger>|<tokens>"
+			fmt.Printf("%s── compact boundary (%s) ──\n\n", ts, content)
+		case "system":
+			// skip silent system events
 		default:
 			fmt.Printf("[%s] %s\n\n", role, content)
 		}
 	}
+}
+
+// summarizeToolInput returns a short one-line summary of a tool's JSON input,
+// highlighting the 1-2 most useful fields per tool.
+func summarizeToolInput(toolName, rawInput string) string {
+	if rawInput == "" {
+		return ""
+	}
+	var in map[string]any
+	if err := json.Unmarshal([]byte(rawInput), &in); err != nil {
+		return truncateOneLine(rawInput, 120)
+	}
+
+	// Per-tool key picking for the most useful summary.
+	pick := func(keys ...string) string {
+		var parts []string
+		for _, k := range keys {
+			v, ok := in[k]
+			if !ok || v == nil {
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%s=%s", k, truncateOneLine(fmt.Sprintf("%v", v), 80)))
+		}
+		return strings.Join(parts, ", ")
+	}
+
+	switch toolName {
+	case "Bash":
+		if desc, _ := in["description"].(string); desc != "" {
+			if cmd, _ := in["command"].(string); cmd != "" {
+				return fmt.Sprintf("%q → %s", truncateOneLine(cmd, 60), desc)
+			}
+		}
+		return pick("command")
+	case "Read":
+		return pick("file_path", "offset", "limit")
+	case "Edit", "MultiEdit", "NotebookEdit":
+		return pick("file_path", "notebook_path")
+	case "Write":
+		return pick("file_path")
+	case "Grep":
+		return pick("pattern", "path", "glob", "type")
+	case "Glob":
+		return pick("pattern", "path")
+	case "WebFetch":
+		return pick("url")
+	case "WebSearch":
+		return pick("query")
+	case "TodoWrite":
+		if todos, ok := in["todos"].([]any); ok {
+			return fmt.Sprintf("%d todo(s)", len(todos))
+		}
+	case "Task", "Agent":
+		return pick("description", "subagent_type")
+	case "Skill":
+		return pick("skill", "args")
+	}
+
+	// Fallback: dump first key=value we can stringify.
+	for k, v := range in {
+		return fmt.Sprintf("%s=%s", k, truncateOneLine(fmt.Sprintf("%v", v), 100))
+	}
+	return ""
+}
+
+// truncateOneLine collapses whitespace and truncates to max runes.
+func truncateOneLine(s string, max int) string {
+	s = strings.TrimSpace(s)
+	// collapse internal newlines/tabs into spaces
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	// squeeze consecutive spaces
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
+}
+
+// indent prefixes every line of s with prefix.
+func indent(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+	return strings.Join(lines, "\n")
 }
 
 // ipcSearch searches a target session's history using FTS.

@@ -266,6 +266,7 @@ func initWorkspace() {
 	// Initialize derived paths
 	dbPath = filepath.Join(appDir, "sessions.db")
 	versionsDir = filepath.Join(appDir, ".versions")
+	initSessionSources()
 	skillDirs = []string{
 		filepath.Join(appHome, "skills"),
 		filepath.Join(workspace, "skills"),
