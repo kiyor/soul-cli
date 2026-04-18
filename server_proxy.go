@@ -1808,11 +1808,7 @@ func injectProxyEnvWithModel(env []string, sessionID string, model string) []str
 	overrideEnv, providerApplied := injectProviderEnv(env, model)
 	if providerApplied {
 		env = overrideEnv
-	} else if e := proxyEnv(); e != "" && oauthToken() != "" {
-		// Route through local monitoring proxy only when we hold a valid OAuth token.
-		// Without a token the proxy returns 401 (it requires auth); let the subprocess
-		// use its own keychain auth instead. See creds.go for token warming.
-		// If sessionID provided, append path prefix
+	} else if e := proxyEnv(); e != "" {
 		if sessionID != "" {
 			// e is "ANTHROPIC_BASE_URL=http://127.0.0.1:9091"
 			e = e + "/s/" + sessionID
