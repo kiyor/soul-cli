@@ -31,6 +31,12 @@ import (
 // rare and worst-case is a duplicate log line. Cleared on process restart.
 var codexSeenEventTypes map[string]bool
 
+// codexSeenToolTypes tracks unique Anthropic tool `type` values observed on
+// incoming requests. Same contract as codexSeenEventTypes — diagnostic only,
+// no mutex. Lets us learn what CC actually sends (e.g. web_search_20250305,
+// bash_20250124, text_editor_*, custom function tools with no `type` field).
+var codexSeenToolTypes map[string]bool
+
 const (
 	codexEndpoint = "https://chatgpt.com/backend-api/codex/responses"
 	codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -251,6 +257,17 @@ type codexAnthropicRequest struct {
 	System    any                     `json:"system,omitempty"`
 	Messages  []codexAnthropicMessage `json:"messages"`
 	Stream    bool                    `json:"stream"`
+	Thinking  *codexAnthropicThinking `json:"thinking,omitempty"`
+}
+
+// codexAnthropicThinking is the top-level `thinking` field on /v1/messages.
+// Claude Code sends one of:
+//   - {type: "adaptive"}                               (Opus/Sonnet 4.6+ default)
+//   - {type: "enabled", budget_tokens: N}              (older models or explicit)
+//   - {type: "disabled"}                               (or field absent)
+type codexAnthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
 type codexAnthropicMessage struct {
@@ -341,10 +358,49 @@ type codexAPIRequest struct {
 // codexReasoningConfig requests reasoning summary emission. Without
 // summary="auto", GPT-5 / o-series still reason internally but do NOT emit
 // any response.reasoning_summary_text.delta events, so CC sees zero thinking
-// blocks. Effort is left empty so the upstream uses its model default.
+// blocks. Effort controls how much capacity the upstream spends reasoning.
 type codexReasoningConfig struct {
 	Summary string `json:"summary,omitempty"`
 	Effort  string `json:"effort,omitempty"`
+}
+
+// anthropicThinkingToCodexReasoning maps Anthropic's top-level `thinking`
+// field to Codex's reasoning config.
+//
+// Anthropic has three thinking types:
+//   - "adaptive":  let the model decide (Opus/Sonnet 4.6+ default) → effort:"high"
+//   - "enabled":   explicit budget N in tokens → bucket into low/medium/high
+//   - "disabled":  or field absent → effort:"minimal" with no summary
+//
+// Rationale for summary="auto" even at minimal effort: CC's JSONL still
+// records thinking blocks when upstream emits them; losing them silently is
+// worse than a few extra tokens of summary. Only when Anthropic explicitly
+// says "disabled" do we fully suppress.
+//
+// Budget bucket thresholds match Anthropic's own internal guidance: <2048 is
+// a light reasoning pass (formatting, short plans); 2048-9999 is medium
+// (multi-step reasoning); 10000+ is deep/ultrathink territory.
+func anthropicThinkingToCodexReasoning(th *codexAnthropicThinking) *codexReasoningConfig {
+	if th == nil || th.Type == "" || th.Type == "disabled" {
+		return &codexReasoningConfig{Effort: "minimal"}
+	}
+	if th.Type == "adaptive" {
+		return &codexReasoningConfig{Summary: "auto", Effort: "high"}
+	}
+	// type == "enabled" (or anything else we don't recognize → treat as enabled)
+	effort := "medium"
+	switch {
+	case th.BudgetTokens <= 0:
+		// No budget specified on "enabled" — keep prior behaviour (upstream default).
+		effort = ""
+	case th.BudgetTokens < 2048:
+		effort = "low"
+	case th.BudgetTokens < 10000:
+		effort = "medium"
+	default:
+		effort = "high"
+	}
+	return &codexReasoningConfig{Summary: "auto", Effort: effort}
 }
 
 // codexToolSpec is a Codex function tool definition (OpenAI Responses API format).
@@ -435,7 +491,19 @@ func codexExtractContentText(content any) string {
 }
 
 // codexTranslateTools converts Anthropic tool definitions to Codex function tool specs.
+//
+// Anthropic distinguishes two tool classes:
+//   - Client tools: {type: "custom", name, input_schema} — CC executes locally.
+//     These translate cleanly to OpenAI function tools.
+//   - Server tools: {type: "web_search_20250305", ...} / {type: "bash_20250124", ...} /
+//     {type: "text_editor_*", ...} / {type: "computer_*", ...} — executed by
+//     Anthropic's backend, not by the client. When proxying to OpenAI Codex
+//     these have no equivalent; upstream cannot execute them. We strip them
+//     to avoid malformed function tools with empty parameter schemas.
 func codexTranslateTools(tools []any) []codexToolSpec {
+	if codexSeenToolTypes == nil {
+		codexSeenToolTypes = map[string]bool{}
+	}
 	var out []codexToolSpec
 	for _, t := range tools {
 		obj, ok := t.(map[string]any)
@@ -444,9 +512,36 @@ func codexTranslateTools(tools []any) []codexToolSpec {
 		}
 		name, _ := obj["name"].(string)
 		desc, _ := obj["description"].(string)
+		typ, _ := obj["type"].(string)
 		params, _ := obj["input_schema"].(map[string]any)
+
+		// Diagnostic: log each distinct tool type once per proxy lifetime.
+		// Key is type|name so we see both server tools (type=X) and client
+		// tools (type="" or type="custom" + unique name).
+		diagKey := typ + "|" + name
+		if !codexSeenToolTypes[diagKey] {
+			codexSeenToolTypes[diagKey] = true
+			fmt.Fprintf(os.Stderr, "[%s] codex tool seen: type=%q name=%q has_schema=%v\n",
+				appName, typ, name, params != nil)
+		}
+
 		if name == "" {
 			continue
+		}
+		// Strip Anthropic server tools — upstream OpenAI can't execute them.
+		// Heuristic: any `type` that isn't "custom" or empty is a server tool.
+		// Common patterns: web_search_YYYYMMDD, bash_YYYYMMDD, text_editor_*,
+		// computer_*. If Anthropic adds more, they'll match here too.
+		if typ != "" && typ != "custom" && typ != "function" {
+			fmt.Fprintf(os.Stderr, "[%s] codex: stripping Anthropic server tool type=%q name=%q (no upstream equivalent)\n",
+				appName, typ, name)
+			continue
+		}
+		// Client tools must have a schema — Codex requires `parameters` to
+		// be a valid JSON schema object. Empty `{}` is acceptable (zero-arg
+		// function); nil is not.
+		if params == nil {
+			params = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
 		out = append(out, codexToolSpec{
 			Type:        "function",
@@ -809,11 +904,12 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		Tools:             codexTools,
 		ToolChoice:        "auto",
 		ParallelToolCalls: true,
-		// Always opt into reasoning summaries so GPT-5/o-series emit
-		// response.reasoning_summary_text.delta events. Without this the
-		// upstream still reasons internally but never surfaces a summary,
-		// so CC's jsonl ends up with zero thinking blocks.
-		Reasoning: &codexReasoningConfig{Summary: "auto"},
+		// Map Anthropic's thinking config onto Codex's reasoning config so
+		// user intent (adaptive / enabled:N / disabled) actually reaches the
+		// upstream. Previously every request was hardcoded to summary:"auto"
+		// with empty effort, which overbought reasoning for small budgets and
+		// under-instrumented for large ones.
+		Reasoning: anthropicThinkingToCodexReasoning(areq.Thinking),
 	}
 
 	reqBody, err := json.Marshal(creq)

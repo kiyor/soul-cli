@@ -392,6 +392,125 @@ func TestGeminiTranslateTools_SkipsUnnamed(t *testing.T) {
 	}
 }
 
+// TestGeminiTranslateTools_StripsAnthropicServerTools verifies we don't forward
+// Anthropic server-side tool definitions (web_search_*, bash_*, text_editor_*,
+// computer_*) to Gemini — upstream cannot execute them and an empty-params
+// function declaration pollutes the tool list.
+func TestGeminiTranslateTools_StripsAnthropicServerTools(t *testing.T) {
+	in := []any{
+		// Server tools — should all be stripped.
+		map[string]any{"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+		map[string]any{"type": "bash_20250124", "name": "bash"},
+		map[string]any{"type": "text_editor_20250124", "name": "str_replace_editor"},
+		map[string]any{"type": "computer_20250124", "name": "computer", "display_width_px": 1024, "display_height_px": 768},
+		// Client tool — should survive.
+		map[string]any{"type": "custom", "name": "CustomTool", "description": "does X",
+			"input_schema": map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string"}}}},
+		// Type-less tool (legacy client shape) — should also survive.
+		map[string]any{"name": "LegacyTool", "description": "old",
+			"input_schema": map[string]any{"type": "object", "properties": map[string]any{}}},
+	}
+	out := geminiTranslateTools(in)
+	if len(out) != 1 {
+		t.Fatalf("want 1 Tool entry, got %d", len(out))
+	}
+	decls := out[0].FunctionDeclarations
+	if len(decls) != 2 {
+		t.Fatalf("want 2 surviving function declarations (CustomTool + LegacyTool), got %d: %+v", len(decls), decls)
+	}
+	got := map[string]bool{decls[0].Name: true, decls[1].Name: true}
+	for _, want := range []string{"CustomTool", "LegacyTool"} {
+		if !got[want] {
+			t.Errorf("missing surviving tool %q; got %+v", want, got)
+		}
+	}
+	for _, decl := range decls {
+		if decl.Parameters == nil {
+			t.Errorf("tool %q has nil Parameters (Gemini will reject)", decl.Name)
+		}
+	}
+}
+
+// TestAnthropicThinkingToGeminiConfig covers the Anthropic thinking → Gemini
+// thinkingConfig mapping across both G2.5 (budget) and G3 (level) families.
+func TestAnthropicThinkingToGeminiConfig(t *testing.T) {
+	intPtr := func(n int) *int { return &n }
+
+	cases := []struct {
+		name           string
+		in             *geminiAnthropicThinking
+		model          string
+		wantNil        bool
+		wantInclude    bool
+		wantLevel      string
+		wantBudgetPtr  *int
+	}{
+		// G2.5 family
+		{"G2.5 nil → budget:0", nil, "gemini-2.5-pro", false, false, "", intPtr(0)},
+		{"G2.5 disabled → budget:0", &geminiAnthropicThinking{Type: "disabled"}, "gemini-2.5-flash", false, false, "", intPtr(0)},
+		{"G2.5 adaptive → dynamic budget", &geminiAnthropicThinking{Type: "adaptive"}, "gemini-2.5-pro", false, true, "", intPtr(-1)},
+		{"G2.5 enabled no budget → default 8192", &geminiAnthropicThinking{Type: "enabled"}, "gemini-2.5-flash", false, true, "", intPtr(8192)},
+		{"G2.5 enabled budget=4096 → pass-through", &geminiAnthropicThinking{Type: "enabled", BudgetTokens: 4096}, "gemini-2.5-pro", false, true, "", intPtr(4096)},
+		{"G2.5 enabled budget=31999 → pass-through", &geminiAnthropicThinking{Type: "enabled", BudgetTokens: 31999}, "gemini-2.5-pro", false, true, "", intPtr(31999)},
+
+		// G3 family
+		{"G3 nil → nil config (no way to disable)", nil, "gemini-3-pro-preview", true, false, "", nil},
+		{"G3 disabled → nil config", &geminiAnthropicThinking{Type: "disabled"}, "gemini-3-flash-preview", true, false, "", nil},
+		{"G3 adaptive → HIGH", &geminiAnthropicThinking{Type: "adaptive"}, "gemini-3-pro-preview", false, true, "HIGH", nil},
+		{"G3 enabled no budget → HIGH fallback", &geminiAnthropicThinking{Type: "enabled"}, "gemini-3-pro-preview", false, true, "HIGH", nil},
+		{"G3 enabled budget=1024 → LOW", &geminiAnthropicThinking{Type: "enabled", BudgetTokens: 1024}, "gemini-3-pro-preview", false, true, "LOW", nil},
+		{"G3 enabled budget=2048 → MEDIUM (edge)", &geminiAnthropicThinking{Type: "enabled", BudgetTokens: 2048}, "gemini-3-pro-preview", false, true, "MEDIUM", nil},
+		{"G3 enabled budget=9999 → MEDIUM (edge)", &geminiAnthropicThinking{Type: "enabled", BudgetTokens: 9999}, "gemini-3-pro-preview", false, true, "MEDIUM", nil},
+		{"G3 enabled budget=10000 → HIGH (edge)", &geminiAnthropicThinking{Type: "enabled", BudgetTokens: 10000}, "gemini-3-pro-preview", false, true, "HIGH", nil},
+		{"G3 enabled budget=31999 → HIGH", &geminiAnthropicThinking{Type: "enabled", BudgetTokens: 31999}, "gemini-3-pro-preview", false, true, "HIGH", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := anthropicThinkingToGeminiConfig(tc.in, tc.model)
+			if tc.wantNil {
+				if got != nil {
+					t.Fatalf("want nil, got %+v", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("got nil config")
+			}
+			if got.IncludeThoughts != tc.wantInclude {
+				t.Errorf("IncludeThoughts = %v, want %v", got.IncludeThoughts, tc.wantInclude)
+			}
+			if got.ThinkingLevel != tc.wantLevel {
+				t.Errorf("ThinkingLevel = %q, want %q", got.ThinkingLevel, tc.wantLevel)
+			}
+			if (got.ThinkingBudget == nil) != (tc.wantBudgetPtr == nil) {
+				t.Errorf("ThinkingBudget nil-ness mismatch: got=%v want=%v", got.ThinkingBudget, tc.wantBudgetPtr)
+			} else if got.ThinkingBudget != nil && *got.ThinkingBudget != *tc.wantBudgetPtr {
+				t.Errorf("ThinkingBudget = %d, want %d", *got.ThinkingBudget, *tc.wantBudgetPtr)
+			}
+		})
+	}
+}
+
+// TestGeminiTranslateTools_BackfillsEmptyParams ensures tools with no
+// input_schema get a valid empty-object schema instead of nil, since Gemini
+// requires Parameters to be a valid JSON schema object.
+func TestGeminiTranslateTools_BackfillsEmptyParams(t *testing.T) {
+	in := []any{
+		map[string]any{"name": "NoSchema", "description": "zero-arg"},
+	}
+	out := geminiTranslateTools(in)
+	if len(out) != 1 || len(out[0].FunctionDeclarations) != 1 {
+		t.Fatalf("want 1 declaration, got %+v", out)
+	}
+	params := out[0].FunctionDeclarations[0].Parameters
+	if params == nil {
+		t.Fatalf("Parameters is nil; want backfilled {type:object, properties:{}}")
+	}
+	if typ, _ := params["type"].(string); typ != "object" {
+		t.Errorf("Parameters.type = %v, want \"object\"", params["type"])
+	}
+}
+
 // ── JSON marshalling of request envelope ────────────────────────────────────
 
 func TestGeminiCARequest_CreditTypesOmittedByDefault(t *testing.T) {

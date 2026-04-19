@@ -430,6 +430,14 @@ type geminiAnthropicRequest struct {
 	System        any                      `json:"system,omitempty"`
 	Messages      []geminiAnthropicMessage `json:"messages"`
 	Stream        bool                     `json:"stream"`
+	Thinking      *geminiAnthropicThinking `json:"thinking,omitempty"`
+}
+
+// geminiAnthropicThinking mirrors codexAnthropicThinking — see that type's
+// docstring for the three shapes CC emits.
+type geminiAnthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
 type geminiAnthropicMessage struct {
@@ -569,6 +577,69 @@ type geminiThinkingConfig struct {
 	ThinkingBudget  *int   `json:"thinkingBudget,omitempty"`
 }
 
+// anthropicThinkingToGeminiConfig maps Anthropic's top-level `thinking` field
+// to Gemini's thinkingConfig. Same thresholds as the Codex mapping for
+// consistency — see anthropicThinkingToCodexReasoning.
+//
+// Model-family routing:
+//   - gemini-3-*: uses thinkingLevel enum (LOW/MEDIUM/HIGH). Setting
+//     thinkingBudget on Gemini 3 is rejected with 400 INVALID_ARGUMENT.
+//   - gemini-2.5-*: uses thinkingBudget (integer). -1 means dynamic (Google
+//     decides), 0 means thinking off (flash-lite only), positive values cap.
+//
+// IncludeThoughts stays true whenever thinking isn't "disabled" so reasoning
+// summaries actually stream back — otherwise CC sees zero thinking blocks.
+func anthropicThinkingToGeminiConfig(th *geminiAnthropicThinking, model string) *geminiThinkingConfig {
+	isG3 := strings.HasPrefix(model, "gemini-3")
+
+	// Disabled / absent → no thinking. On G2.5 this is thinkingBudget:0; on
+	// G3 we just omit thinkingLevel so the model falls back to its default
+	// (Gemini 3 cannot truly disable thinking via the config).
+	if th == nil || th.Type == "" || th.Type == "disabled" {
+		if isG3 {
+			// No way to force-disable on G3; return nil so we don't send config.
+			return nil
+		}
+		zero := 0
+		return &geminiThinkingConfig{ThinkingBudget: &zero}
+	}
+
+	tc := &geminiThinkingConfig{IncludeThoughts: true}
+
+	if th.Type == "adaptive" {
+		if isG3 {
+			tc.ThinkingLevel = "HIGH"
+		} else {
+			dynamic := -1
+			tc.ThinkingBudget = &dynamic
+		}
+		return tc
+	}
+
+	// type == "enabled" (or unknown → treat as enabled)
+	if isG3 {
+		switch {
+		case th.BudgetTokens <= 0:
+			tc.ThinkingLevel = "HIGH" // fallback when budget unknown
+		case th.BudgetTokens < 2048:
+			tc.ThinkingLevel = "LOW"
+		case th.BudgetTokens < 10000:
+			tc.ThinkingLevel = "MEDIUM"
+		default:
+			tc.ThinkingLevel = "HIGH"
+		}
+		return tc
+	}
+	// Gemini 2.5: pass raw budget through. If unspecified, use the gemini-cli
+	// default (8192 tokens).
+	budget := th.BudgetTokens
+	if budget <= 0 {
+		budget = 8192
+	}
+	tc.ThinkingBudget = &budget
+	return tc
+}
+
 type geminiVertexRequest struct {
 	Contents          []geminiContent         `json:"contents"`
 	SystemInstruction *geminiContent          `json:"systemInstruction,omitempty"`
@@ -618,8 +689,18 @@ func geminiExtractSystemText(system any) string {
 	return ""
 }
 
+// geminiSeenToolTypes tracks unique Anthropic tool `type` values observed on
+// incoming requests. Same pattern as codexSeenToolTypes — diagnostic only.
+var geminiSeenToolTypes = map[string]bool{}
+
 // geminiTranslateTools converts Anthropic tool definitions to a single Gemini
 // Tool entry with many function declarations (Gemini's preferred shape).
+//
+// Like the Codex path, strips Anthropic server tools (web_search_*, bash_*,
+// text_editor_*, computer_*) that upstream Gemini cannot execute. Gemini has
+// its own built-in tools (google_search, code_execution) but they use a
+// different wire shape — we do NOT auto-map web_search_20250305 → google_search
+// because CC doesn't know how to consume Gemini's groundingMetadata format.
 func geminiTranslateTools(tools []any) []geminiTool {
 	var decls []geminiFunctionDeclaration
 	for _, t := range tools {
@@ -629,16 +710,35 @@ func geminiTranslateTools(tools []any) []geminiTool {
 		}
 		name, _ := obj["name"].(string)
 		desc, _ := obj["description"].(string)
+		typ, _ := obj["type"].(string)
 		params, _ := obj["input_schema"].(map[string]any)
+
+		diagKey := typ + "|" + name
+		if !geminiSeenToolTypes[diagKey] {
+			geminiSeenToolTypes[diagKey] = true
+			fmt.Fprintf(os.Stderr, "[%s] gemini tool seen: type=%q name=%q has_schema=%v\n",
+				appName, typ, name, params != nil)
+		}
+
 		if name == "" {
+			continue
+		}
+		// Strip Anthropic server tools — no upstream equivalent we can wire up.
+		if typ != "" && typ != "custom" && typ != "function" {
+			fmt.Fprintf(os.Stderr, "[%s] gemini: stripping Anthropic server tool type=%q name=%q (no upstream equivalent)\n",
+				appName, typ, name)
 			continue
 		}
 		// Gemini rejects extra keys like "$schema", "additionalProperties" on
 		// some schemas. Copy the input_schema as-is; Gemini 2.5 is tolerant.
+		sanitized := geminiSanitizeSchema(params)
+		if sanitized == nil {
+			sanitized = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
 		decls = append(decls, geminiFunctionDeclaration{
 			Name:        name,
 			Description: desc,
-			Parameters:  geminiSanitizeSchema(params),
+			Parameters:  sanitized,
 		})
 	}
 	if len(decls) == 0 {
@@ -1216,16 +1316,11 @@ func handleGeminiMessages(w http.ResponseWriter, r *http.Request, sess *geminiSe
 	if len(areq.StopSequences) > 0 {
 		genConfig.StopSequences = areq.StopSequences
 	}
-	// Always request thought summaries. The Gemini API ignores thinkingConfig
-	// for non-thinking models, so this is safe across the board. For Gemini 3
-	// we also pin thinkingLevel=HIGH (matches gemini-cli's "chat-base-3"
-	// preset). Without this CC sees zero thinking blocks even though the
-	// upstream is reasoning internally.
-	tc := &geminiThinkingConfig{IncludeThoughts: true}
-	if strings.HasPrefix(areq.Model, "gemini-3") {
-		tc.ThinkingLevel = "HIGH"
-	}
-	genConfig.ThinkingConfig = tc
+	// Map Anthropic's thinking config onto Gemini's thinkingConfig. Gemini
+	// ignores thinkingConfig for non-thinking models, so this is safe across
+	// the board. Gemini 3 uses thinkingLevel (LOW/MEDIUM/HIGH enum); Gemini
+	// 2.5 uses thinkingBudget (integer token count, 0=off, -1=dynamic).
+	genConfig.ThinkingConfig = anthropicThinkingToGeminiConfig(areq.Thinking, areq.Model)
 
 	vertexReq := geminiVertexRequest{
 		Contents:         contents,

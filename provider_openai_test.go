@@ -311,3 +311,146 @@ func TestHandleCodexMessages_FallbackOutputItemDoneStillWorks(t *testing.T) {
 		t.Fatalf("block start/stop mismatch; body=%s", out)
 	}
 }
+
+// TestCodexTranslateTools_StripsAnthropicServerTools verifies we don't forward
+// Anthropic server-side tools to Codex — upstream can't execute them and an
+// empty-params function spec triggers a 400 on /codex/responses.
+func TestCodexTranslateTools_StripsAnthropicServerTools(t *testing.T) {
+	in := []any{
+		map[string]any{"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+		map[string]any{"type": "bash_20250124", "name": "bash"},
+		map[string]any{"type": "text_editor_20250124", "name": "str_replace_editor"},
+		map[string]any{"type": "computer_20250124", "name": "computer", "display_width_px": 1024},
+		// Client tools — should survive.
+		map[string]any{"type": "custom", "name": "CustomA", "description": "a",
+			"input_schema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		map[string]any{"name": "LegacyB", "description": "old",
+			"input_schema": map[string]any{"type": "object"}},
+	}
+	out := codexTranslateTools(in)
+	if len(out) != 2 {
+		t.Fatalf("want 2 surviving tools, got %d: %+v", len(out), out)
+	}
+	got := map[string]bool{}
+	for _, spec := range out {
+		got[spec.Name] = true
+		if spec.Type != "function" {
+			t.Errorf("tool %q type=%q, want \"function\"", spec.Name, spec.Type)
+		}
+		if spec.Parameters == nil {
+			t.Errorf("tool %q has nil Parameters (Codex will 400)", spec.Name)
+		}
+	}
+	for _, want := range []string{"CustomA", "LegacyB"} {
+		if !got[want] {
+			t.Errorf("missing surviving tool %q", want)
+		}
+	}
+}
+
+// TestHandleCodexMessages_ReasoningSummaryTranslatedToThinking verifies the
+// reasoning translation path: a `response.reasoning_summary_text.delta` event
+// upstream should surface as a thinking content block in the Anthropic-shape
+// response stream. This is the diagnostic the daily notes tracked as
+// "❌ thinking/reasoning block 丢失" — before the fix, summary deltas were
+// dropped and CC saw zero thinking content.
+func TestHandleCodexMessages_ReasoningSummaryTranslatedToThinking(t *testing.T) {
+	events := []string{
+		`{"type":"response.output_item.added","item":{"id":"item_r1","type":"reasoning"}}`,
+		`{"type":"response.reasoning_summary_part.added","item_id":"item_r1","summary_index":0}`,
+		`{"type":"response.reasoning_summary_text.delta","item_id":"item_r1","delta":"Thinking about the question."}`,
+		`{"type":"response.reasoning_summary_text.delta","item_id":"item_r1","delta":" Next, I will plan."}`,
+		`{"type":"response.reasoning_summary_text.done","item_id":"item_r1","text":"Thinking about the question. Next, I will plan."}`,
+		`{"type":"response.output_text.delta","delta":"Hello"}`,
+		`{"type":"response.completed","response":{"usage":{"output_tokens":5}}}`,
+	}
+	upstream := startMockCodexUpstream(t, events)
+	defer upstream.Close()
+
+	body := `{"model":"gpt-5.4","stream":true,"max_tokens":256,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handleCodexMessages(rec, req, fakeCodexSession(), upstream.URL, "")
+
+	out := rec.Body.String()
+	// A thinking content_block_start must appear before the text block.
+	thinkingIdx := strings.Index(out, `"type":"thinking"`)
+	textIdx := strings.Index(out, `"type":"text"`)
+	if thinkingIdx < 0 {
+		t.Fatalf("no thinking block emitted; body=%s", out)
+	}
+	if textIdx < 0 {
+		t.Fatalf("no text block emitted; body=%s", out)
+	}
+	if thinkingIdx >= textIdx {
+		t.Fatalf("thinking block must precede text (thinking@%d text@%d); body=%s", thinkingIdx, textIdx, out)
+	}
+	// At least one thinking_delta must contain our reasoning text.
+	if !strings.Contains(out, `"thinking_delta"`) {
+		t.Fatalf("no thinking_delta in stream; body=%s", out)
+	}
+	if !strings.Contains(out, "Thinking about the question.") {
+		t.Fatalf("reasoning text lost; body=%s", out)
+	}
+	// All blocks should be balanced.
+	if a, b := strings.Count(out, `"type":"content_block_start"`), strings.Count(out, `"type":"content_block_stop"`); a != b {
+		t.Fatalf("block start/stop mismatch start=%d stop=%d; body=%s", a, b, out)
+	}
+}
+
+// TestAnthropicThinkingToCodexReasoning covers the thinking→effort mapping.
+// Keep these thresholds in sync with anthropicThinkingToGeminiConfig — the two
+// helpers share bucket boundaries and drift between them confuses users.
+func TestAnthropicThinkingToCodexReasoning(t *testing.T) {
+	cases := []struct {
+		name       string
+		in         *codexAnthropicThinking
+		wantEffort string
+		wantSumm   string
+	}{
+		{"nil → minimal, no summary", nil, "minimal", ""},
+		{"disabled → minimal, no summary", &codexAnthropicThinking{Type: "disabled"}, "minimal", ""},
+		{"empty type → minimal (defensive)", &codexAnthropicThinking{}, "minimal", ""},
+		{"adaptive → high + auto", &codexAnthropicThinking{Type: "adaptive"}, "high", "auto"},
+		{"enabled no budget → empty effort + auto", &codexAnthropicThinking{Type: "enabled"}, "", "auto"},
+		{"enabled budget=1 → low", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 1}, "low", "auto"},
+		{"enabled budget=2047 → low (edge)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 2047}, "low", "auto"},
+		{"enabled budget=2048 → medium (edge)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 2048}, "medium", "auto"},
+		{"enabled budget=7999 → medium (CC haiku)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 7999}, "medium", "auto"},
+		{"enabled budget=9999 → medium (edge)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 9999}, "medium", "auto"},
+		{"enabled budget=10000 → high (edge)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 10000}, "high", "auto"},
+		{"enabled budget=31999 → high (CC haiku)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 31999}, "high", "auto"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := anthropicThinkingToCodexReasoning(tc.in)
+			if got == nil {
+				t.Fatalf("nil config")
+			}
+			if got.Effort != tc.wantEffort {
+				t.Errorf("Effort = %q, want %q", got.Effort, tc.wantEffort)
+			}
+			if got.Summary != tc.wantSumm {
+				t.Errorf("Summary = %q, want %q", got.Summary, tc.wantSumm)
+			}
+		})
+	}
+}
+
+// TestCodexTranslateTools_BackfillsEmptyParams ensures tools missing an
+// input_schema get a valid empty-object schema so Codex accepts them.
+func TestCodexTranslateTools_BackfillsEmptyParams(t *testing.T) {
+	in := []any{
+		map[string]any{"name": "NoSchema", "description": "zero-arg"},
+	}
+	out := codexTranslateTools(in)
+	if len(out) != 1 {
+		t.Fatalf("want 1 tool, got %d", len(out))
+	}
+	if out[0].Parameters == nil {
+		t.Fatalf("Parameters is nil; want backfilled schema")
+	}
+	if typ, _ := out[0].Parameters["type"].(string); typ != "object" {
+		t.Errorf("Parameters.type = %v, want \"object\"", out[0].Parameters["type"])
+	}
+}
