@@ -514,7 +514,7 @@ func buildTelegramContext(tokenBudget int) (string, string) {
 	var msgs []chatMsg
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB line buffer
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024) // up to 64 MB per line (base64 images / HTML)
 	firstLine := isTailed                              // need to skip first line (may be truncated from seek)
 	for scanner.Scan() {
 		if firstLine {
@@ -831,7 +831,7 @@ func extractCCSessionUserPrompts(path string, _ int) (string, []string) {
 	var prompts []string
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 512*1024), 512*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	for scanner.Scan() {
 		var ev struct {
 			Type        string `json:"type"`

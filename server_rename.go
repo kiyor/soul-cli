@@ -672,7 +672,7 @@ func getModelFromJSONL(sessionID string) string {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	for i := 0; i < 50 && scanner.Scan(); i++ {
 		var ev struct {
 			Type    string `json:"type"`
@@ -699,7 +699,7 @@ func getFirstMsgFromJSONL(sessionID string) string {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	for scanner.Scan() {
 		var ev struct {
 			Type    string `json:"type"`

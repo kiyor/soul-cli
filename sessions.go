@@ -299,7 +299,9 @@ func parseSessionHead(s *sessionInfo) {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 512*1024), 512*1024)
+	// JSONL lines can include large base64 images / HTML payloads; 64 MB max
+	// keeps us from aborting mid-file when a single line is oversized.
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	msgCount := 0
 	linesRead := 0
 	bytesRead := int64(0)
