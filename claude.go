@@ -321,7 +321,7 @@ type providerConfig struct {
 // config.json is soul-cli's own config (in data/config.json).
 func resolveProvider(providerName string) *providerConfig {
 	all, _ := loadAllProviders()
-	if prov, ok := all[providerName]; ok && (prov.BaseURL != "" || prov.Type == "openai" || prov.Type == "ollama") {
+	if prov, ok := all[providerName]; ok && (prov.BaseURL != "" || prov.Type == "openai" || prov.Type == "ollama" || prov.Type == "gemini") {
 		return &prov
 	}
 	return nil
@@ -464,6 +464,23 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 				return env, false
 			}
 			fmt.Fprintf(os.Stderr, "[%s] using provider %q → embedded ollama proxy http://127.0.0.1:%d\n", appName, providerName, port)
+		}
+		filtered = append(filtered, fmt.Sprintf("ANTHROPIC_BASE_URL=http://127.0.0.1:%d", port))
+		filtered = append(filtered, "ANTHROPIC_AUTH_TOKEN=dummy")
+	} else if provider.Type == "gemini" {
+		// Gemini: start embedded proxy that translates Anthropic → Gemini Code Assist.
+		var port int
+		if serverPort := detectServerGeminiProxy(providerName); serverPort > 0 {
+			port = serverPort
+			fmt.Fprintf(os.Stderr, "[%s] using provider %q → server gemini proxy http://127.0.0.1:%d\n", appName, providerName, port)
+		} else {
+			var err error
+			port, err = startGeminiProxy(*provider)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] failed to start gemini proxy: %v\n", appName, err)
+				return env, false
+			}
+			fmt.Fprintf(os.Stderr, "[%s] using provider %q → embedded gemini proxy http://127.0.0.1:%d\n", appName, providerName, port)
 		}
 		filtered = append(filtered, fmt.Sprintf("ANTHROPIC_BASE_URL=http://127.0.0.1:%d", port))
 		filtered = append(filtered, "ANTHROPIC_AUTH_TOKEN=dummy")
