@@ -26,6 +26,11 @@ import (
 	"time"
 )
 
+// codexSeenEventTypes tracks unique SSE event types observed across all
+// requests. Lazily-initialised diagnostic map; no mutex because writes are
+// rare and worst-case is a duplicate log line. Cleared on process restart.
+var codexSeenEventTypes map[string]bool
+
 const (
 	codexEndpoint = "https://chatgpt.com/backend-api/codex/responses"
 	codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -110,7 +115,70 @@ type codexTokenResponse struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-func refreshCodexToken(sess *codexSession) error {
+// reloadCodexAuthFromDisk re-reads auth.json and updates the in-memory session
+// if disk has a newer token. This handles the case where codex-cli itself
+// refreshed the token out-of-band (OAuth refresh_token rotation makes our
+// cached refresh_token unusable once codex-cli has consumed it).
+//
+// Returns true if the in-memory token was replaced with a fresher one.
+func reloadCodexAuthFromDisk(sess *codexSession, authFile string) bool {
+	fresh, err := loadCodexAuth(authFile)
+	if err != nil {
+		return false
+	}
+	if fresh.AccessToken == sess.AccessToken {
+		return false
+	}
+	sess.AccessToken = fresh.AccessToken
+	sess.RefreshToken = fresh.RefreshToken
+	if fresh.AccountID != "" {
+		sess.AccountID = fresh.AccountID
+	}
+	return true
+}
+
+// writeCodexAuthToDisk persists a refreshed token pair back to auth.json so
+// codex-cli and subsequent proxy restarts see the latest credentials. Failure
+// is non-fatal (in-memory session still works for this proxy).
+func writeCodexAuthToDisk(sess *codexSession, authFile string) {
+	if authFile == "" {
+		authFile = codexAuthFile
+	}
+	path := expandPath(authFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return
+	}
+	tokens, _ := raw["tokens"].(map[string]any)
+	if tokens == nil {
+		tokens = make(map[string]any)
+		raw["tokens"] = tokens
+	}
+	tokens["access_token"] = sess.AccessToken
+	if sess.RefreshToken != "" {
+		tokens["refresh_token"] = sess.RefreshToken
+	}
+	if sess.AccountID != "" {
+		tokens["account_id"] = sess.AccountID
+	}
+	raw["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return
+	}
+	// Atomic write: tmp file then rename
+	tmp := path + ".weiran.tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
+}
+
+func refreshCodexToken(sess *codexSession, authFile string) error {
 	values := url.Values{}
 	values.Set("grant_type", "refresh_token")
 	values.Set("client_id", codexClientID)
@@ -132,6 +200,14 @@ func refreshCodexToken(sess *codexSession) error {
 		return fmt.Errorf("read refresh response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// OAuth refresh_token_reused: disk likely has a newer token (codex-cli
+		// rotated it). Try reloading from disk as a fallback.
+		if bytes.Contains(body, []byte("refresh_token_reused")) || bytes.Contains(body, []byte("already been used")) {
+			if reloadCodexAuthFromDisk(sess, authFile) {
+				fmt.Fprintf(os.Stderr, "[%s] codex: refresh_token_reused → reloaded newer token from disk\n", appName)
+				return nil
+			}
+		}
 		return fmt.Errorf("refresh failed %s: %s", resp.Status, body)
 	}
 	var tr codexTokenResponse
@@ -145,16 +221,22 @@ func refreshCodexToken(sess *codexSession) error {
 	if tr.RefreshToken != "" {
 		sess.RefreshToken = tr.RefreshToken
 	}
+	// Persist so codex-cli and future proxy restarts see the rotated pair.
+	writeCodexAuthToDisk(sess, authFile)
 	return nil
 }
 
-func ensureCodexTokenFresh(sess *codexSession) error {
+func ensureCodexTokenFresh(sess *codexSession, authFile string) error {
+	// Always peek at disk first — codex-cli may have refreshed out-of-band,
+	// in which case our in-memory refresh_token is already burned.
+	reloadCodexAuthFromDisk(sess, authFile)
+
 	exp, ok := decodeJWTExp(sess.AccessToken)
 	if ok && time.Now().Before(exp.Add(-30*time.Second)) {
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "[%s] codex token expired, refreshing...\n", appName)
-	return refreshCodexToken(sess)
+	return refreshCodexToken(sess, authFile)
 }
 
 func codexUserAgent() string {
@@ -177,22 +259,27 @@ type codexAnthropicMessage struct {
 }
 
 type codexAnthropicBlock struct {
-	Type  string          `json:"type"`
-	Text  string          `json:"text,omitempty"`
-	ID    string          `json:"id,omitempty"`    // for tool_use blocks
-	Name  string          `json:"name,omitempty"`  // for tool_use blocks
-	Input json.RawMessage `json:"input,omitempty"` // for tool_use blocks
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`    // for tool_use blocks
+	Name      string          `json:"name,omitempty"`  // for tool_use blocks
+	Input     json.RawMessage `json:"input,omitempty"` // for tool_use blocks
+	Thinking  string          `json:"thinking,omitempty"`
+	Signature string          `json:"signature,omitempty"`
 }
 
 type codexAnthropicResponse struct {
-	ID           string                `json:"id"`
-	Type         string                `json:"type"`
-	Role         string                `json:"role"`
-	Content      []codexAnthropicBlock `json:"content"`
-	Model        string                `json:"model"`
-	StopReason   string                `json:"stop_reason"`
-	StopSequence *string               `json:"stop_sequence"`
-	Usage        codexAnthropicUsage   `json:"usage"`
+	ID      string                `json:"id"`
+	Type    string                `json:"type"`
+	Role    string                `json:"role"`
+	Content []codexAnthropicBlock `json:"content"`
+	Model   string                `json:"model"`
+	// StopReason/StopSequence as pointers → serialize as JSON null (Anthropic
+	// canonical) on message_start, not "" which some SDK paths treat as
+	// already-set and never update from the subsequent message_delta.
+	StopReason   *string             `json:"stop_reason"`
+	StopSequence *string             `json:"stop_sequence"`
+	Usage        codexAnthropicUsage `json:"usage"`
 }
 
 type codexAnthropicUsage struct {
@@ -239,15 +326,25 @@ type codexMsgStop struct {
 // ── Codex request ─────────────────────────────────────────────────────────────
 
 type codexAPIRequest struct {
-	Model             string            `json:"model"`
-	Store             bool              `json:"store"`
-	Stream            bool              `json:"stream"`
-	Instructions      string            `json:"instructions"`
-	Input             []any             `json:"input"`
-	Text              map[string]any    `json:"text"`
-	Tools             []codexToolSpec   `json:"tools,omitempty"`
-	ToolChoice        string            `json:"tool_choice"`
-	ParallelToolCalls bool              `json:"parallel_tool_calls"`
+	Model             string                `json:"model"`
+	Store             bool                  `json:"store"`
+	Stream            bool                  `json:"stream"`
+	Instructions      string                `json:"instructions"`
+	Input             []any                 `json:"input"`
+	Text              map[string]any        `json:"text"`
+	Tools             []codexToolSpec       `json:"tools,omitempty"`
+	ToolChoice        string                `json:"tool_choice"`
+	ParallelToolCalls bool                  `json:"parallel_tool_calls"`
+	Reasoning         *codexReasoningConfig `json:"reasoning,omitempty"`
+}
+
+// codexReasoningConfig requests reasoning summary emission. Without
+// summary="auto", GPT-5 / o-series still reason internally but do NOT emit
+// any response.reasoning_summary_text.delta events, so CC sees zero thinking
+// blocks. Effort is left empty so the upstream uses its model default.
+type codexReasoningConfig struct {
+	Summary string `json:"summary,omitempty"`
+	Effort  string `json:"effort,omitempty"`
 }
 
 // codexToolSpec is a Codex function tool definition (OpenAI Responses API format).
@@ -632,7 +729,7 @@ func startOpenAIProxy(provider providerConfig) (int, error) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		handleCodexMessages(w, r, sess, chatURL)
+		handleCodexMessages(w, r, sess, chatURL, authFile)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `{"status":"ok","proxy":"weiran/codex"}`)
@@ -651,7 +748,7 @@ func startOpenAIProxy(provider providerConfig) (int, error) {
 
 // handleCodexMessages translates Anthropic /v1/messages → Codex /codex/responses
 // with full tool use support (function_call ↔ tool_use).
-func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSession, chatURL string) {
+func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSession, chatURL, authFile string) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
@@ -671,7 +768,7 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		return
 	}
 
-	if err := ensureCodexTokenFresh(sess); err != nil {
+	if err := ensureCodexTokenFresh(sess, authFile); err != nil {
 		http.Error(w, "token refresh: "+err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -712,6 +809,11 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		Tools:             codexTools,
 		ToolChoice:        "auto",
 		ParallelToolCalls: true,
+		// Always opt into reasoning summaries so GPT-5/o-series emit
+		// response.reasoning_summary_text.delta events. Without this the
+		// upstream still reasons internally but never surfaces a summary,
+		// so CC's jsonl ends up with zero thinking blocks.
+		Reasoning: &codexReasoningConfig{Summary: "auto"},
 	}
 
 	reqBody, err := json.Marshal(creq)
@@ -741,6 +843,12 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		upBody, _ := io.ReadAll(resp.Body)
+		snippet := string(upBody)
+		if len(snippet) > 2000 {
+			snippet = snippet[:2000] + "...[truncated]"
+		}
+		fmt.Fprintf(os.Stderr, "[%s] codex upstream %d for model=%s: %s\n",
+			appName, resp.StatusCode, targetModel, snippet)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		errMsg, _ := json.Marshal(map[string]any{
@@ -789,6 +897,14 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 	toolItemOrder := make([]string, 0)       // emit order for cleanup
 	toolItemClosed := make(map[string]bool)  // track which items already had block_stop
 
+	// Reasoning item state. Codex emits a "reasoning" output_item containing
+	// summary parts; we materialise each reasoning item as one Anthropic
+	// thinking block. summary_part.added → maybe-open block; summary_text.delta
+	// → emit thinking_delta; output_item.done(reasoning) → close block.
+	reasoningItemBlockIdx := make(map[string]int)
+	reasoningItemOpen := make(map[string]bool)
+	reasoningItemClosed := make(map[string]bool)
+
 	// Terminal signals from upstream (Codex only emits one of completed / failed / incomplete).
 	finishReason := ""
 	incompleteReason := ""
@@ -804,6 +920,16 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 				Type: "content_block_stop", Index: blockIndex,
 			})
 			textBlockStarted = false
+			blockIndex++
+		}
+		for itemID, open := range reasoningItemOpen {
+			if !open || reasoningItemClosed[itemID] {
+				continue
+			}
+			codexWriteSSE(w, "content_block_stop", codexBlockStop{
+				Type: "content_block_stop", Index: reasoningItemBlockIdx[itemID],
+			})
+			reasoningItemClosed[itemID] = true
 			blockIndex++
 		}
 		for _, itemID := range toolItemOrder {
@@ -827,6 +953,38 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		}
 	}
 
+	// closeTextIfOpen / openReasoningBlock helpers for reasoning event handlers.
+	closeTextIfOpen := func() {
+		if textBlockStarted {
+			codexWriteSSE(w, "content_block_stop", codexBlockStop{
+				Type: "content_block_stop", Index: blockIndex,
+			})
+			textBlockStarted = false
+			blockIndex++
+		}
+	}
+	openReasoningBlock := func(itemID string) {
+		if itemID == "" {
+			return
+		}
+		if reasoningItemOpen[itemID] {
+			return
+		}
+		closeTextIfOpen()
+		// Mirror textBlockStarted convention: don't bump blockIndex on
+		// block_start; it's bumped at block_stop.
+		reasoningItemBlockIdx[itemID] = blockIndex
+		codexWriteSSE(w, "content_block_start", codexBlockStart{
+			Type:  "content_block_start",
+			Index: blockIndex,
+			ContentBlock: codexAnthropicBlock{
+				Type:     "thinking",
+				Thinking: "",
+			},
+		})
+		reasoningItemOpen[itemID] = true
+	}
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -843,10 +1001,40 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		}
 
 		eventType, _ := event["type"].(string)
+
+		// Diagnostic: log every distinct event type seen, once per session.
+		// Lets us discover whether the chatgpt codex endpoint actually emits
+		// reasoning_summary_* events (private endpoint may differ from
+		// public /v1/responses spec).
+		if codexSeenEventTypes == nil {
+			codexSeenEventTypes = map[string]bool{}
+		}
+		if !codexSeenEventTypes[eventType] {
+			codexSeenEventTypes[eventType] = true
+			// Sample a small slice of the event payload.
+			snip, _ := json.Marshal(event)
+			if len(snip) > 200 {
+				snip = snip[:200]
+			}
+			fmt.Fprintf(os.Stderr, "[%s] codex event type seen: %s | %s\n", appName, eventType, string(snip))
+		}
+
 		switch eventType {
 		case "response.output_text.delta":
 			delta, _ := event["delta"].(string)
 			if delta != "" {
+				// Close any reasoning block currently open — text follows
+				// reasoning in upstream order.
+				for rItemID, open := range reasoningItemOpen {
+					if !open || reasoningItemClosed[rItemID] {
+						continue
+					}
+					codexWriteSSE(w, "content_block_stop", codexBlockStop{
+						Type: "content_block_stop", Index: reasoningItemBlockIdx[rItemID],
+					})
+					reasoningItemClosed[rItemID] = true
+					blockIndex++
+				}
 				// Lazy-start a text block
 				if !textBlockStarted {
 					codexWriteSSE(w, "content_block_start", codexBlockStart{
@@ -866,6 +1054,64 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 				}
 			}
 
+		case "response.reasoning_summary_part.added":
+			// First signal a reasoning item is producing summary output.
+			// We open the thinking block here so subsequent text deltas
+			// have a target index. Some upstreams skip this event and go
+			// straight to summary_text.delta — handled there too via lazy
+			// open.
+			itemID, _ := event["item_id"].(string)
+			openReasoningBlock(itemID)
+			if flusher != nil {
+				flusher.Flush()
+			}
+
+		case "response.reasoning_summary_text.delta":
+			itemID, _ := event["item_id"].(string)
+			delta, _ := event["delta"].(string)
+			if delta == "" {
+				continue
+			}
+			openReasoningBlock(itemID)
+			bIdx, ok := reasoningItemBlockIdx[itemID]
+			if !ok {
+				continue
+			}
+			codexWriteSSE(w, "content_block_delta", codexBlockDelta{
+				Type:  "content_block_delta",
+				Index: bIdx,
+				Delta: map[string]any{"type": "thinking_delta", "thinking": delta},
+			})
+			if flusher != nil {
+				flusher.Flush()
+			}
+
+		case "response.reasoning_summary_text.done":
+			// Soft-flush; the .done for the whole reasoning item is
+			// `output_item.done` (handled below). If a single summary part
+			// finishes but more parts follow on the same item, we leave the
+			// block open and continue appending.
+			itemID, _ := event["item_id"].(string)
+			text, _ := event["text"].(string)
+			if itemID == "" || text == "" {
+				continue
+			}
+			// If the upstream skipped streaming deltas and only sent .done,
+			// emit the full text as a single delta.
+			openReasoningBlock(itemID)
+			if reasoningItemClosed[itemID] {
+				continue
+			}
+			// (No-op if deltas already streamed the same text — duplicate
+			// emission would double the thinking content. Anthropic's spec
+			// only allows incremental deltas, so we skip the .done body.)
+
+		case "response.reasoning_summary_part.done":
+			// Boundary between summary parts within the same reasoning item.
+			// Keep the block open; treat the full reasoning item close as
+			// the boundary instead.
+			_ = event
+
 		case "response.output_item.added":
 			// Start a new block as soon as the item is announced so that
 			// subsequent `function_call_arguments.delta` events can stream into
@@ -876,6 +1122,11 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 				continue
 			}
 			itemType, _ := item["type"].(string)
+			if itemType == "reasoning" {
+				// Reasoning items don't have streamed args; lazy-open on
+				// first summary delta. No-op here.
+				continue
+			}
 			if itemType != "function_call" {
 				continue
 			}
@@ -893,6 +1144,17 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 				})
 				blockIndex++
 				textBlockStarted = false
+			}
+			// Close any open reasoning block — tool_use comes after.
+			for rItemID, open := range reasoningItemOpen {
+				if !open || reasoningItemClosed[rItemID] {
+					continue
+				}
+				codexWriteSSE(w, "content_block_stop", codexBlockStop{
+					Type: "content_block_stop", Index: reasoningItemBlockIdx[rItemID],
+				})
+				reasoningItemClosed[rItemID] = true
+				blockIndex++
 			}
 			callID, _ := item["call_id"].(string)
 			name, _ := item["name"].(string)
@@ -970,6 +1232,24 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 				continue
 			}
 			itemType, _ := item["type"].(string)
+			if itemType == "reasoning" {
+				itemID, _ := item["id"].(string)
+				if itemID == "" {
+					continue
+				}
+				if !reasoningItemOpen[itemID] || reasoningItemClosed[itemID] {
+					continue
+				}
+				codexWriteSSE(w, "content_block_stop", codexBlockStop{
+					Type: "content_block_stop", Index: reasoningItemBlockIdx[itemID],
+				})
+				reasoningItemClosed[itemID] = true
+				blockIndex++
+				if flusher != nil {
+					flusher.Flush()
+				}
+				continue
+			}
 			if itemType != "function_call" {
 				continue
 			}
@@ -1128,6 +1408,10 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 	}
 
 	stopReason := mapCodexStopReason(finishReason, incompleteReason, hasToolUse)
+	// Diagnostic: log the inputs + mapping so we can see why downstream CC
+	// sometimes records an empty stop_reason.
+	fmt.Fprintf(os.Stderr, "[%s] codex stop_reason debug finishReason=%q incompleteReason=%q hasToolUse=%v → stop_reason=%q\n",
+		appName, finishReason, incompleteReason, hasToolUse, stopReason)
 
 	msgDelta := codexMsgDelta{Type: "message_delta", Usage: codexAnthropicUsage{OutputTokens: outputTokens}}
 	msgDelta.Delta.StopReason = stopReason

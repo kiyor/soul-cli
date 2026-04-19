@@ -141,7 +141,7 @@ func TestHandleCodexMessages_StreamingToolCallValidated(t *testing.T) {
 	body := `{"model":"gpt-4.1","stream":true,"max_tokens":1024,"messages":[{"role":"user","content":"read it"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	handleCodexMessages(rec, req, fakeCodexSession(), upstream.URL)
+	handleCodexMessages(rec, req, fakeCodexSession(), upstream.URL, "")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
@@ -217,7 +217,7 @@ func TestHandleCodexMessages_IncompleteMaxOutputTokensMapsMaxTokens(t *testing.T
 	body := `{"model":"gpt-4.1","stream":true,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	handleCodexMessages(rec, req, fakeCodexSession(), upstream.URL)
+	handleCodexMessages(rec, req, fakeCodexSession(), upstream.URL, "")
 
 	// Find message_delta's stop_reason
 	var stopReason string
@@ -252,7 +252,7 @@ func TestHandleCodexMessages_UpstreamFailedEmitsErrorEvent(t *testing.T) {
 	body := `{"model":"gpt-4.1","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	handleCodexMessages(rec, req, fakeCodexSession(), upstream.URL)
+	handleCodexMessages(rec, req, fakeCodexSession(), upstream.URL, "")
 
 	out := rec.Body.String()
 	var sawError bool
@@ -298,7 +298,7 @@ func TestHandleCodexMessages_FallbackOutputItemDoneStillWorks(t *testing.T) {
 	body := `{"model":"gpt-4.1","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"grep it"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	handleCodexMessages(rec, req, fakeCodexSession(), upstream.URL)
+	handleCodexMessages(rec, req, fakeCodexSession(), upstream.URL, "")
 
 	out := rec.Body.String()
 	if !strings.Contains(out, `"toolu_call_z"`) {

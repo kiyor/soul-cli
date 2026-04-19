@@ -540,6 +540,12 @@ func handleOllamaMessages(w http.ResponseWriter, r *http.Request, chatURL string
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		upBody, _ := io.ReadAll(resp.Body)
+		snippet := string(upBody)
+		if len(snippet) > 2000 {
+			snippet = snippet[:2000] + "...[truncated]"
+		}
+		fmt.Fprintf(os.Stderr, "[%s] ollama upstream %d for model=%s: %s\n",
+			appName, resp.StatusCode, modelName, snippet)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		errMsg, _ := json.Marshal(map[string]any{
