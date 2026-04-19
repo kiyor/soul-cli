@@ -456,7 +456,7 @@ func handleServer(args []string) {
 		providers, _ := loadAllProviders()
 		var infos []providerInfo
 		for name, prov := range providers {
-			if prov.BaseURL == "" && prov.Type != "openai" && prov.Type != "ollama" {
+			if prov.BaseURL == "" && prov.Type != "openai" && prov.Type != "ollama" && prov.Type != "gemini" {
 				continue
 			}
 			infos = append(infos, providerInfo{Name: name, Models: prov.Models})
@@ -518,6 +518,32 @@ func handleServer(args []string) {
 			return
 		}
 		serverOllamaProxies.Store(providerName, port)
+		writeJSON(w, http.StatusOK, map[string]int{"port": port})
+	}))
+
+	// Gemini (Code Assist) proxy management: start gemini proxy in server process and return port.
+	// GET /api/proxy/gemini?provider=gemini
+	mux.HandleFunc("GET /api/proxy/gemini", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		providerName := r.URL.Query().Get("provider")
+		if providerName == "" {
+			http.Error(w, "provider query param required", http.StatusBadRequest)
+			return
+		}
+		provider := resolveProvider(providerName)
+		if provider == nil || provider.Type != "gemini" {
+			http.Error(w, "provider not found or not gemini type", http.StatusNotFound)
+			return
+		}
+		if cached, ok := serverGeminiProxies.Load(providerName); ok {
+			writeJSON(w, http.StatusOK, map[string]int{"port": cached.(int)})
+			return
+		}
+		port, err := startGeminiProxy(*provider)
+		if err != nil {
+			http.Error(w, "start proxy: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		serverGeminiProxies.Store(providerName, port)
 		writeJSON(w, http.StatusOK, map[string]int{"port": port})
 	}))
 
@@ -901,6 +927,11 @@ func handleServer(args []string) {
 		sess.touch()
 		sess.setStatus("running")
 
+		// User sent a new message — implicitly dismiss any pending
+		// AskUserQuestion. We reply behavior=deny so claude reads the new
+		// message instead of continuing to block on stdin.
+		sess.dismissAllPendingAUQ("user_message")
+
 		// Capture first user message for hint display
 		sess.mu.Lock()
 		firstMsgCaptured := sess.FirstMsg == ""
@@ -1016,6 +1047,87 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 	}))
 
+	// Aggregate UI state for a session: pending AskUserQuestion, running tasks,
+	// todos. The Web UI fetches this on page load to make refresh idempotent —
+	// SSE replays the message stream, this endpoint replays the panel state.
+	mux.HandleFunc("GET /api/sessions/{id}/state", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		sess := sm.getSession(r.PathValue("id"))
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+		sess.mu.Lock()
+		var todos json.RawMessage
+		if len(sess.Todos) > 0 {
+			todos = make(json.RawMessage, len(sess.Todos))
+			copy(todos, sess.Todos)
+		}
+		sess.mu.Unlock()
+		state := map[string]any{
+			"pending_auq":   sess.snapshotPendingAUQ(),
+			"running_tasks": sess.tasks.snapshot(),
+		}
+		if todos != nil {
+			state["todos"] = todos
+		}
+		writeJSON(w, http.StatusOK, state)
+	}))
+
+	// Read a tool output file (Bash run_in_background, Agent transcripts, Monitor
+	// captures). Whitelisted to /tmp/claude-* and /private/tmp/claude-* with no
+	// path traversal. Returns the last 64 KiB of the file as plain text.
+	mux.HandleFunc("GET /api/files/read", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		raw := r.URL.Query().Get("path")
+		if raw == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
+			return
+		}
+		clean := filepath.Clean(raw)
+		// Whitelist: only files under Claude Code's per-pid temp roots.
+		allowed := false
+		for _, prefix := range []string{"/tmp/claude-", "/private/tmp/claude-", "/var/folders/"} {
+			if strings.HasPrefix(clean, prefix) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "path not in whitelist"})
+			return
+		}
+		fi, err := os.Stat(clean)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if fi.IsDir() {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is a directory"})
+			return
+		}
+		f, err := os.Open(clean)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		defer f.Close()
+		const maxRead = 64 * 1024
+		size := fi.Size()
+		var offset int64
+		if size > maxRead {
+			offset = size - maxRead
+			_, _ = f.Seek(offset, 0)
+		}
+		buf := make([]byte, maxRead)
+		n, _ := f.Read(buf)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"path":       clean,
+			"size":       size,
+			"offset":     offset,
+			"truncated":  size > maxRead,
+			"content":    string(buf[:n]),
+		})
+	}))
+
 	// IPC: send message from one session to another
 	mux.HandleFunc("POST /api/sessions/{id}/message-from", authMiddleware(cfg.Token,
 		handleIPCMessageFrom(sm, hub, cfg.MaxInteractionRounds)))
@@ -1054,9 +1166,9 @@ func handleServer(args []string) {
 		}
 		defer file.Close()
 
-		// Validate file type (images only for now)
+		// Validate file type (images + PDF documents)
 		ext := strings.ToLower(filepath.Ext(header.Filename))
-		allowedExts := map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".svg": true}
+		allowedExts := map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".svg": true, ".pdf": true}
 		if !allowedExts[ext] {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported file type: " + ext})
 			return

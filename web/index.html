@@ -926,6 +926,86 @@ body{
   .subagent-drawer{width:min(280px,80vw)}
 }
 
+/* ── Tasks Drawer (background tool runs: Bash bg, Monitor, Agent bg) ── */
+.tasks-drawer{
+  position:fixed;right:0;top:var(--topbar-h);bottom:0;width:340px;
+  background:var(--panel-blur);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border-left:1px solid var(--border);
+  transform:translateX(100%);transition:transform .3s var(--spring),right .3s var(--spring);
+  z-index:30;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  display:flex;flex-direction:column;
+}
+.tasks-drawer.open{transform:translateX(0)}
+.tasks-drawer-header{padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;gap:8px}
+.tasks-drawer-header h3{font-size:13px;font-weight:750;color:var(--text);flex:1}
+.tasks-drawer-close{appearance:none;border:none;background:none;color:var(--muted2);font-size:18px;cursor:pointer;width:28px;height:28px;border-radius:8px;display:grid;place-items:center}
+.tasks-drawer-close:hover{background:var(--bg2);color:var(--text)}
+.tasks-drawer-body{flex:1;padding:8px 12px;overflow-y:auto}
+.tasks-drawer-empty{padding:20px;text-align:center;color:var(--muted2);font-size:12px}
+.tasks-tab{
+  position:fixed;right:0;top:calc(50% + 88px);transform:translateY(-50%);z-index:29;
+  writing-mode:vertical-rl;text-orientation:mixed;
+  padding:10px 5px;border-radius:8px 0 0 8px;
+  background:#0ea5e9;color:#fff;font-size:11px;font-weight:700;
+  cursor:pointer;opacity:.7;transition:opacity .2s,right .3s var(--spring);
+  letter-spacing:1px;display:none;
+}
+.tasks-tab:hover{opacity:1}
+.tasks-tab.visible{display:block}
+.tasks-tab .tasks-badge{display:inline-block;background:#fff;color:#0ea5e9;border-radius:99px;font-size:9px;padding:1px 4px;margin-left:2px;font-weight:800}
+.task-card{padding:10px 12px;margin:4px 0;border-radius:8px;background:var(--bg2);border-left:3px solid transparent;transition:background .2s;cursor:pointer}
+.task-card:hover{background:var(--bg3,var(--bg2))}
+.task-card.running{border-left-color:#0ea5e9}
+.task-card.done{border-left-color:#34d399}
+.task-card.failed{border-left-color:#f87171}
+.task-card.cancelled{border-left-color:#9ca3af}
+.task-card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:6px}
+.task-card-type{font-size:10px;font-weight:700;color:#0ea5e9;text-transform:uppercase;letter-spacing:.5px;background:rgba(14,165,233,.12);padding:1px 6px;border-radius:4px}
+.task-card-status{font-size:10px;font-weight:600;display:flex;align-items:center;gap:4px}
+.task-card-status .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+.task-card-status .dot.running{background:#0ea5e9;animation:pulse 1.5s infinite}
+.task-card-status .dot.done{background:#34d399}
+.task-card-status .dot.failed{background:#f87171}
+.task-card-status .dot.cancelled{background:#9ca3af}
+.task-card-desc{font-size:12px;font-weight:600;color:var(--text);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.task-card-meta{font-size:10px;color:var(--muted2);font-family:var(--mono);display:flex;justify-content:space-between;gap:6px}
+.task-card-event{margin-top:6px;padding:6px 8px;background:var(--bg);border-radius:6px;font-size:10.5px;color:var(--muted);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-card-output{margin-top:6px;font-size:10.5px}
+.task-card-output a{color:#0ea5e9;text-decoration:none}
+.task-card-output a:hover{text-decoration:underline}
+@media(max-width:768px){.tasks-drawer{width:min(320px,90vw)}}
+
+/* ── Output file viewer modal ── */
+.file-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;display:none;align-items:center;justify-content:center;padding:16px}
+.file-modal-overlay.open{display:flex}
+.file-modal{background:var(--panel-blur);border:1px solid var(--border);border-radius:12px;width:min(900px,100%);max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+.file-modal-head{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+.file-modal-head h3{font-size:12px;font-weight:700;color:var(--text);flex:1;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-modal-close{appearance:none;border:none;background:none;color:var(--muted2);font-size:20px;cursor:pointer;padding:4px 10px;border-radius:6px}
+.file-modal-close:hover{background:var(--bg2);color:var(--text)}
+.file-modal-body{flex:1;overflow:auto;padding:12px 16px}
+.file-modal-body pre{margin:0;font-size:11px;font-family:var(--mono);color:var(--text);white-space:pre-wrap;word-break:break-word}
+.file-modal-meta{font-size:10px;color:var(--muted2);padding:6px 16px;border-top:1px solid var(--border);font-family:var(--mono)}
+
+/* ── Task notification (inline in chat) — improved ── */
+.task-notif{display:flex;gap:10px;padding:8px 12px;background:var(--bg2);border-radius:8px;margin:6px 0;border-left:3px solid #0ea5e9;font-size:12px}
+.task-notif.terminal{border-left-color:#34d399}
+.task-notif.failed{border-left-color:#f87171}
+.task-notif .tn-icon{font-size:14px;flex-shrink:0}
+.task-notif .tn-body{flex:1;min-width:0}
+.task-notif .tn-summary{font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-notif .tn-detail{margin-top:2px;color:var(--muted);font-family:var(--mono);font-size:11px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
+.task-notif .tn-id{margin-top:2px;color:var(--muted2);font-family:var(--mono);font-size:10px}
+.task-notif .tn-output{margin-top:4px;font-size:11px}
+.task-notif .tn-output a{color:#0ea5e9;text-decoration:none}
+.task-notif .tn-output a:hover{text-decoration:underline}
+
+/* ── AUQ dismissed state ── */
+.auq-container.auq-dismissed{opacity:.55;position:relative}
+.auq-container.auq-dismissed::after{content:attr(data-dismiss-label);position:absolute;top:6px;right:8px;font-size:10px;font-weight:700;color:#9ca3af;background:rgba(156,163,175,.12);padding:2px 8px;border-radius:99px;letter-spacing:.5px}
+.auq-container.auq-dismissed .choice-card{pointer-events:none;filter:grayscale(.6)}
+.auq-container.auq-dismissed .choices-confirm,.auq-container.auq-dismissed .auq-cancel{pointer-events:none;opacity:.5}
+
 /* Hide tool chain by default, show when toggled */
 .msg.ai:has(.tool-block),.msg.system-msg:has(.tool-block),.msg.tool-msg{display:none}
 .show-tools .msg.ai:has(.tool-block),.show-tools .msg.system-msg:has(.tool-block),.show-tools .msg.tool-msg{display:block}
@@ -1206,6 +1286,9 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 .upload-preview:empty{display:none}
 .upload-thumb{position:relative;width:64px;height:64px;border-radius:8px;overflow:hidden;border:1px solid var(--border2)}
 .upload-thumb img{width:100%;height:100%;object-fit:cover}
+.upload-thumb.is-pdf{background:rgba(220,38,38,.12);display:grid;place-items:center;text-align:center}
+.upload-thumb.is-pdf .pdf-icon{font-size:22px;line-height:1}
+.upload-thumb.is-pdf .pdf-name{font-size:9px;color:var(--muted);margin-top:2px;padding:0 4px;line-height:1.1;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .upload-thumb .remove-thumb{position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;border:none;font-size:11px;cursor:pointer;display:grid;place-items:center;line-height:1}
 .composer.drag-over .inputwrap{border-color:rgba(var(--accent-r),.6);box-shadow:0 0 0 3px rgba(var(--accent-r),.15)}
 .upload-progress{padding:4px 10px 0;font-size:11px;color:var(--muted2)}
@@ -1642,8 +1725,8 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
     <div class="composer disabled" id="composer">
       <div class="slash-dropdown" id="slash-dropdown"></div>
       <div class="inner">
-        <input type="file" id="file-input" accept="image/*" multiple hidden onchange="handleFileSelect(this.files)">
-        <button class="attach-btn" title="Attach image" onclick="document.getElementById('file-input').click()">&#128206;</button>
+        <input type="file" id="file-input" accept="image/*,application/pdf,.pdf" multiple hidden onchange="handleFileSelect(this.files)">
+        <button class="attach-btn" title="Attach image or PDF" onclick="document.getElementById('file-input').click()">&#128206;</button>
         <div class="inputwrap">
           <div class="upload-preview" id="upload-preview"></div>
           <textarea id="input" placeholder="Send a message... (/ for commands)" rows="1"></textarea>
@@ -1679,6 +1762,30 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   </div>
   <div class="subagent-drawer-body" id="subagent-drawer-body">
     <div class="subagent-drawer-empty">暂无子任务</div>
+  </div>
+</div>
+
+<!-- Tasks Drawer (Bash run_in_background, Monitor, async Agent) -->
+<div class="tasks-tab" id="tasks-tab" onclick="toggleTasksDrawer()">📡 Tasks <span class="tasks-badge" id="tasks-badge" style="display:none">0</span></div>
+<div class="tasks-drawer" id="tasks-drawer">
+  <div class="tasks-drawer-header">
+    <h3>📡 Background Tasks</h3>
+    <button class="tasks-drawer-close" onclick="toggleTasksDrawer()">&times;</button>
+  </div>
+  <div class="tasks-drawer-body" id="tasks-drawer-body">
+    <div class="tasks-drawer-empty">暂无后台任务</div>
+  </div>
+</div>
+
+<!-- Output File Viewer Modal -->
+<div class="file-modal-overlay" id="file-modal-overlay" onclick="if(event.target===this)closeFileModal()">
+  <div class="file-modal">
+    <div class="file-modal-head">
+      <h3 id="file-modal-path">—</h3>
+      <button class="file-modal-close" onclick="closeFileModal()">&times;</button>
+    </div>
+    <div class="file-modal-body"><pre id="file-modal-content">loading…</pre></div>
+    <div class="file-modal-meta" id="file-modal-meta"></div>
   </div>
 </div>
 
@@ -1822,6 +1929,11 @@ renderer.image = function(href, title, text) {
   // Video extensions
   if(/\.(mp4|webm|mov|ogg)(\?|$)/i.test(href)){
     return `<video controls playsinline preload="metadata" style="max-width:100%;border-radius:12px;margin:8px 0"><source src="${esc(href)}">Your browser does not support video.</video>`;
+  }
+  // PDF — render as a downloadable file chip instead of broken <img>
+  if(/\.pdf(\?|$)/i.test(href)){
+    const label=esc(text||title||'PDF');
+    return `<a href="${esc(href)}" target="_blank" rel="noopener" class="pdf-chip" style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:10px;background:rgba(220,38,38,.12);color:var(--text);text-decoration:none;border:1px solid rgba(220,38,38,.3);font-size:13px;margin:4px 0">📄 ${label}</a>`;
   }
   // Regular image — make clickable for lightbox
   return `<img src="${esc(href)}" alt="${esc(text||'')}" title="${esc(title||'')}" onclick="openLightbox(this.src)" loading="lazy">`;
@@ -2827,6 +2939,15 @@ function handleSessionEvent(event,data){
     case 'ask_user_question':
       handleAskUserQuestion(data);
       break;
+    case 'ask_user_question_dismissed':
+      handleAUQDismissed(data);
+      break;
+    case 'task_event':
+      // data is the runningTask snapshot. Attach to active session if it's the
+      // session generating events (we can't tell from data alone, but the SSE
+      // is per-session so the active session id is correct context).
+      if(activeSessionId)upsertTask(activeSessionId, data);
+      break;
     case 'system':
       if(data.subtype==='compact_boundary'){
         const sid=data.session_id||activeSessionId;
@@ -2885,8 +3006,10 @@ function selectSession(id){
   updateTodoDrawer([]);
   document.getElementById('todo-drawer').classList.remove('open');
   document.getElementById('subagent-drawer').classList.remove('open');
+  document.getElementById('tasks-drawer').classList.remove('open');
   // Render subagent drawer for newly selected session (state is preserved per-session)
   renderSubagentDrawer();
+  renderTasksDrawer();
 
   // Sync URL query string — prefer cc id (stable user-visible handle);
   // fall back to weiran id if cc id not yet known (e.g. freshly created session).
@@ -2961,6 +3084,8 @@ function selectSession(id){
     }
     // Subscribe via WebSocket
     wsSend({type:'subscribe',sid:id,skip_replay:!!(msgs&&msgs.length)});
+    // Load aggregate state (pending AUQ, running tasks, todos) — refresh-idempotent
+    loadSessionState(id);
   });
   updateSidebarActive();
 }
@@ -3479,6 +3604,13 @@ function renderUserMsg(text){
   // Strip noise tags entirely
   text=text.replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>\s*/g,'');
   text=text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>\s*/g,'');
+  // Extract task-notification blocks (Claude Code injects these as user input
+  // for background tool completion / Monitor events) → render as compact cards.
+  const notifCards=[];
+  text=text.replace(/<task-notification>([\s\S]*?)<\/task-notification>\s*/g,(_,inner)=>{
+    notifCards.push(renderTaskNotif(parseTaskNotif(inner)));
+    return '';
+  });
   // Extract command blocks → rendered separately
   const cmdBlocks=[];
   text=text.replace(/<command-name>([\s\S]*?)<\/command-name>\s*(?:<command-message>[\s\S]*?<\/command-message>\s*)?(?:<command-args>([\s\S]*?)<\/command-args>)?/g,(_,name,args)=>{
@@ -3496,6 +3628,8 @@ function renderUserMsg(text){
 
   // Build HTML parts
   const htmlParts=[];
+  // Render task-notification cards first (they replace the raw XML)
+  notifCards.forEach(card=>htmlParts.push(card));
   // Render command cards
   cmdBlocks.forEach(c=>{
     const label=esc(c.name)+(c.args?' <span class="cmd-args">'+esc(c.args)+'</span>':'');
@@ -3558,19 +3692,32 @@ function parseTaskNotif(inner){
   return{taskId:g('task-id'),toolUseId:g('tool-use-id'),summary:g('summary'),event:g('event'),outputFile:g('output-file')};
 }
 
-// Render a task notification as a compact inline card
+// Render a task notification as a compact inline card.
+// Best-effort classification: output-file usually means terminal, "fail/error/killed"
+// downgrades to failure styling.
 function renderTaskNotif(n){
-  // Determine icon based on content
   let icon='📋',label='';
+  let cls='';
   if(n.summary){
-    if(n.summary.includes('progress')||n.summary.includes('Monitor')){icon='📡';label=n.summary}
-    else{label=n.summary}
+    const lower=n.summary.toLowerCase();
+    if(lower.includes('monitor')||lower.includes('event')){icon='📡';label=n.summary}
+    else if(lower.includes('fail')||lower.includes('error')||lower.includes('killed')){icon='⚠️';label=n.summary;cls='failed'}
+    else if(lower.includes('completed')||lower.includes('finished')||lower.includes('exited')){icon='✓';label=n.summary;cls='terminal'}
+    else label=n.summary;
   }
-  if(n.outputFile){icon='📂';label=label||'Background task completed'}
+  if(n.outputFile){
+    icon='📂';
+    label=label||'Background task completed';
+    if(!cls)cls='terminal';
+  }
   if(!label)label=n.event||n.taskId||'Task update';
-  let html=`<div class="task-notif"><span class="tn-icon">${icon}</span><div class="tn-body">`;
+  let html=`<div class="task-notif${cls?' '+cls:''}"><span class="tn-icon">${icon}</span><div class="tn-body">`;
   html+=`<div class="tn-summary">${esc(label)}</div>`;
   if(n.event)html+=`<div class="tn-detail">${esc(n.event)}</div>`;
+  if(n.outputFile){
+    const path=n.outputFile;
+    html+=`<div class="tn-output">📂 <a href="#" onclick="openFileModal('${esc(path)}');return false">${esc(shortPath(path))}</a></div>`;
+  }
   if(n.taskId)html+=`<div class="tn-id">${esc(n.taskId)}${n.toolUseId?' · '+esc(n.toolUseId):''}</div>`;
   html+=`</div></div>`;
   return html;
@@ -3579,9 +3726,13 @@ function renderTaskNotif(n){
 // ── Image Upload ──
 let pendingFiles=[];
 
+function isPdfFile(f){
+  return f.type==='application/pdf'||/\.pdf$/i.test(f.name||'');
+}
+
 function handleFileSelect(files){
   for(const f of files){
-    if(!f.type.startsWith('image/'))continue;
+    if(!f.type.startsWith('image/')&&!isPdfFile(f))continue;
     pendingFiles.push(f);
     addThumb(f);
   }
@@ -3592,16 +3743,30 @@ function addThumb(file){
   const prev=document.getElementById('upload-preview');
   const wrap=document.createElement('div');
   wrap.className='upload-thumb';
-  const img=document.createElement('img');
-  img.src=URL.createObjectURL(file);
+  let objUrl=null;
+  if(isPdfFile(file)){
+    wrap.classList.add('is-pdf');
+    wrap.title=file.name||'PDF';
+    const icon=document.createElement('div');
+    icon.className='pdf-icon';icon.textContent='📄';
+    const name=document.createElement('div');
+    name.className='pdf-name';name.textContent=file.name||'PDF';
+    wrap.append(icon,name);
+  }else{
+    const img=document.createElement('img');
+    objUrl=URL.createObjectURL(file);
+    img.src=objUrl;
+    wrap.append(img);
+  }
   const btn=document.createElement('button');
   btn.className='remove-thumb';btn.textContent='×';
   btn.onclick=()=>{
     const idx=pendingFiles.indexOf(file);
     if(idx>=0)pendingFiles.splice(idx,1);
-    URL.revokeObjectURL(img.src);wrap.remove();updateSendBtn();
+    if(objUrl)URL.revokeObjectURL(objUrl);
+    wrap.remove();updateSendBtn();
   };
-  wrap.append(img,btn);prev.append(wrap);
+  wrap.append(btn);prev.append(wrap);
 }
 
 function updateSendBtn(){
@@ -4336,6 +4501,181 @@ function renderTodoItems(todos){
   });
   html+='</div>';
   return html;
+}
+
+// ── Tasks Drawer (background tools: Bash bg, Monitor, Agent bg) ──
+// Per-session map: sid → Map(taskId → runningTask snapshot from /state or task_event SSE)
+const allSessionTasks=new Map();
+
+function tasksFor(sid){
+  if(!allSessionTasks.has(sid))allSessionTasks.set(sid,new Map());
+  return allSessionTasks.get(sid);
+}
+
+function toggleTasksDrawer(){
+  const drawer=document.getElementById('tasks-drawer');
+  drawer.classList.toggle('open');
+  if(drawer.classList.contains('open'))renderTasksDrawer();
+}
+
+function upsertTask(sid, task){
+  if(!sid||!task||!task.id)return;
+  const m=tasksFor(sid);
+  m.set(task.id, task);
+  if(sid===activeSessionId)renderTasksDrawer();
+}
+
+function applyTasksSnapshot(sid, list){
+  if(!sid)return;
+  const m=tasksFor(sid);
+  m.clear();
+  (list||[]).forEach(t=>{if(t&&t.id)m.set(t.id,t)});
+  if(sid===activeSessionId)renderTasksDrawer();
+}
+
+function fmtTaskAge(iso){
+  if(!iso)return '';
+  const t=new Date(iso).getTime();
+  if(isNaN(t))return '';
+  const sec=Math.max(0,Math.floor((Date.now()-t)/1000));
+  if(sec<60)return sec+'s';
+  if(sec<3600)return Math.floor(sec/60)+'m';
+  if(sec<86400)return Math.floor(sec/3600)+'h';
+  return Math.floor(sec/86400)+'d';
+}
+
+function renderTasksDrawer(){
+  const tab=document.getElementById('tasks-tab');
+  const badge=document.getElementById('tasks-badge');
+  const body=document.getElementById('tasks-drawer-body');
+  if(!body)return;
+  const tasks=activeSessionId?Array.from(tasksFor(activeSessionId).values()):[];
+  // Sort: running first, then newest
+  tasks.sort((a,b)=>{
+    if((a.status==='running')!==(b.status==='running'))return a.status==='running'?-1:1;
+    return new Date(b.started_at||0)-new Date(a.started_at||0);
+  });
+  const running=tasks.filter(t=>t.status==='running').length;
+  if(!tasks.length){
+    tab.classList.remove('visible');
+    badge.style.display='none';
+    body.innerHTML='<div class="tasks-drawer-empty">暂无后台任务</div>';
+    return;
+  }
+  tab.classList.add('visible');
+  if(running>0){badge.textContent=running;badge.style.display='inline-block'}
+  else{badge.style.display='none'}
+  let html='';
+  tasks.forEach(t=>{
+    const cls=t.status||'running';
+    const icon={running:'⟳',done:'✓',failed:'✗',cancelled:'⊘'}[cls]||'•';
+    const age=fmtTaskAge(t.started_at);
+    const evCount=t.event_count||0;
+    const out=t.output_file?`<div class="task-card-output">📂 <a href="#" onclick="openFileModal('${esc(t.output_file)}');return false">${esc(shortPath(t.output_file))}</a></div>`:'';
+    const ev=t.last_event?`<div class="task-card-event">${esc(t.last_event)}</div>`:'';
+    html+=`<div class="task-card ${cls}"><div class="task-card-top"><span class="task-card-type">${esc(t.type||'task')}</span><span class="task-card-status"><span class="dot ${cls}"></span>${icon} ${esc(cls)}</span></div><div class="task-card-desc">${esc(t.description||t.id)}</div><div class="task-card-meta"><span>${esc(t.id.slice(0,12))}</span><span>${age} · ${evCount} events</span></div>${ev}${out}</div>`;
+  });
+  body.innerHTML=html;
+}
+
+function shortPath(p){
+  if(!p)return '';
+  const parts=p.split('/');
+  return parts.length>3?'…/'+parts.slice(-2).join('/'):p;
+}
+
+// Garbage collect tasks for sessions that no longer exist
+function gcSessionTasks(){
+  for(const sid of Array.from(allSessionTasks.keys())){
+    if(!sessions[sid])allSessionTasks.delete(sid);
+  }
+  renderTasksDrawer();
+}
+
+// ── Output File Viewer ──
+async function openFileModal(path){
+  const overlay=document.getElementById('file-modal-overlay');
+  document.getElementById('file-modal-path').textContent=path;
+  document.getElementById('file-modal-content').textContent='loading…';
+  document.getElementById('file-modal-meta').textContent='';
+  overlay.classList.add('open');
+  try{
+    const resp=await fetch('/api/files/read?path='+encodeURIComponent(path),{
+      headers:{'Authorization':'Bearer '+TOKEN},
+    });
+    if(!resp.ok){
+      const err=await resp.text();
+      document.getElementById('file-modal-content').textContent='error: '+resp.status+' '+err;
+      return;
+    }
+    const data=await resp.json();
+    document.getElementById('file-modal-content').textContent=data.content||'(empty)';
+    const truncMsg=data.truncated?` · truncated (showing last ${(data.size-data.offset).toLocaleString()} of ${data.size.toLocaleString()} bytes)`:` · ${data.size.toLocaleString()} bytes`;
+    document.getElementById('file-modal-meta').textContent=path+truncMsg;
+    // Auto-scroll to bottom (most recent output)
+    const body=document.querySelector('.file-modal-body');
+    if(body)body.scrollTop=body.scrollHeight;
+  }catch(e){
+    document.getElementById('file-modal-content').textContent='fetch error: '+e.message;
+  }
+}
+
+function closeFileModal(){
+  document.getElementById('file-modal-overlay').classList.remove('open');
+}
+
+// ── AUQ dismissed (server told us a pending question was invalidated) ──
+function handleAUQDismissed(data){
+  if(!data||!data.request_id)return;
+  const container=document.querySelector(`.auq-container[data-request-id="${CSS.escape(data.request_id)}"]`);
+  if(!container)return;
+  const reason=data.reason||'';
+  const label=reason==='session_dead'?'已失效':reason==='user_message'?'已跳过':'已忽略';
+  container.classList.add('auq-dismissed');
+  container.setAttribute('data-dismiss-label',label);
+  // Disable interaction
+  container.querySelectorAll('.choice-card').forEach(c=>c.classList.add('disabled'));
+  const btn=container.querySelector('.choices-confirm');
+  if(btn){btn.disabled=true;btn.textContent=label}
+  const cancel=container.querySelector('.auq-cancel');
+  if(cancel)cancel.disabled=true;
+}
+
+// ── Session State Restore (refresh idempotency) ──
+// Called after switching to a session. Fetches /state and rehydrates the
+// pending AUQ panels and Tasks drawer from the server's authoritative copy,
+// since SSE history is bounded to ~100 events.
+async function loadSessionState(sid){
+  if(!sid)return;
+  try{
+    const resp=await fetch('/api/sessions/'+encodeURIComponent(sid)+'/state',{
+      headers:{'Authorization':'Bearer '+TOKEN},
+    });
+    if(!resp.ok)return;
+    const state=await resp.json();
+    // Tasks
+    if(state.running_tasks)applyTasksSnapshot(sid, state.running_tasks);
+    // Pending AskUserQuestion — re-render any that aren't already on screen
+    if(Array.isArray(state.pending_auq)){
+      state.pending_auq.forEach(p=>{
+        if(!p||!p.request_id||!p.input)return;
+        const qs=p.input.questions;
+        if(!Array.isArray(qs))return;
+        // renderAskUserQuestion is already idempotent (dedupes by request_id)
+        renderAskUserQuestion(p.request_id, p.tool_use_id||'', qs);
+      });
+    }
+    // Todos handled separately by existing TodoWrite path; /state.todos is
+    // backup for the case where the SSE replay window has rolled past the
+    // most recent TodoWrite event.
+    if(state.todos&&Array.isArray(state.todos)){
+      const sname=(sessions[sid]&&sessions[sid].name)||'';
+      allSessionTodos.set(sid,{name:sname,todos:state.todos});
+      renderTodoDrawerAggregated();
+    }
+  }catch(e){
+    console.warn('loadSessionState failed:',e);
+  }
 }
 
 // ── Subagent Drawer ──

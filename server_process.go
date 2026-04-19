@@ -414,8 +414,9 @@ func buildMessageContent(content string) any {
 	return blocks
 }
 
-// resolveImageBlock reads an image (local file or HTTP URL) and returns
-// a Claude API image content block with base64 data, or nil on failure.
+// resolveImageBlock reads an image or PDF (local file or HTTP URL) and returns
+// a Claude API content block with base64 data: "image" for images,
+// "document" for application/pdf. Returns nil on failure.
 func resolveImageBlock(imgURL string, altText string) map[string]any {
 	var data []byte
 	var mediaType string
@@ -440,7 +441,7 @@ func resolveImageBlock(imgURL string, altText string) map[string]any {
 			fmt.Fprintf(os.Stderr, "[%s] image download status: %d\n", appName, resp.StatusCode)
 			return nil
 		}
-		data, err = io.ReadAll(io.LimitReader(resp.Body, 20<<20)) // 20MB max
+		data, err = io.ReadAll(io.LimitReader(resp.Body, 32<<20)) // 32MB max (PDFs can be larger than images)
 		mediaType = resp.Header.Get("Content-Type")
 		if mediaType == "" {
 			mediaType = guessMediaType(imgURL)
@@ -450,12 +451,18 @@ func resolveImageBlock(imgURL string, altText string) map[string]any {
 	}
 
 	if err != nil || len(data) == 0 {
-		fmt.Fprintf(os.Stderr, "[%s] image read failed: %v\n", appName, err)
+		fmt.Fprintf(os.Stderr, "[%s] image/document read failed: %v\n", appName, err)
 		return nil
 	}
 
+	// PDFs become document blocks, everything else stays image blocks.
+	blockType := "image"
+	if strings.HasPrefix(mediaType, "application/pdf") {
+		blockType = "document"
+	}
+
 	return map[string]any{
-		"type": "image",
+		"type": blockType,
 		"source": map[string]any{
 			"type":       "base64",
 			"media_type": mediaType,
@@ -478,6 +485,8 @@ func guessMediaType(filename string) string {
 		return "image/webp"
 	case ".svg":
 		return "image/svg+xml"
+	case ".pdf":
+		return "application/pdf"
 	default:
 		return "image/png"
 	}

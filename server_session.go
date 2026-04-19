@@ -119,6 +119,11 @@ type serverSession struct {
 	pendingAUQMu sync.Mutex
 	pendingAUQ   map[string]*pendingAUQEntry
 
+	// tasks tracks background tool invocations (Bash run_in_background, Monitor,
+	// async Agent) so the Web UI's Tasks panel can render their state and
+	// survive page refresh. Initialized in newServerSession.
+	tasks *taskTracker
+
 	// Model fallback for non-interactive modes (heartbeat/cron/evolve):
 	// when process exits with rate_limit, retry with next fallback model.
 	fallbackModels []string // remaining models to try
@@ -158,6 +163,62 @@ func (s *serverSession) takePendingAUQ(requestID string) *pendingAUQEntry {
 	}
 	delete(s.pendingAUQ, requestID)
 	return entry
+}
+
+// snapshotPendingAUQ returns a JSON-safe copy of all pending AUQ entries.
+func (s *serverSession) snapshotPendingAUQ() []map[string]any {
+	s.pendingAUQMu.Lock()
+	defer s.pendingAUQMu.Unlock()
+	out := make([]map[string]any, 0, len(s.pendingAUQ))
+	for _, e := range s.pendingAUQ {
+		out = append(out, map[string]any{
+			"request_id":  e.RequestID,
+			"tool_use_id": e.ToolUseID,
+			"input":       e.Input,
+			"created_at":  e.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	return out
+}
+
+// dismissAllPendingAUQ atomically clears all pending AUQ entries and returns them.
+// Used in two scenarios:
+//   - reason="user_message": user sent a new message instead of answering. We
+//     reply behavior=deny so claude reads the new message instead of blocking.
+//   - reason="session_dead": the claude subprocess exited; the control_request
+//     is dead with it. We only broadcast to the UI; do NOT write stdin.
+func (s *serverSession) dismissAllPendingAUQ(reason string) []*pendingAUQEntry {
+	s.pendingAUQMu.Lock()
+	pending := make([]*pendingAUQEntry, 0, len(s.pendingAUQ))
+	for _, e := range s.pendingAUQ {
+		pending = append(pending, e)
+	}
+	s.pendingAUQ = nil
+	s.pendingAUQMu.Unlock()
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	proc := s.process
+	for _, e := range pending {
+		// Only attempt control_response if the subprocess is still alive.
+		if reason == "user_message" && proc != nil && proc.alive() {
+			decision := map[string]any{
+				"behavior": "deny",
+				"message":  "User sent a new message instead of answering. Read it and proceed.",
+			}
+			_ = proc.sendPermissionDecision(e.RequestID, decision)
+		}
+		// Always broadcast so the Web UI can mark the card grey.
+		evt, _ := json.Marshal(map[string]any{
+			"request_id":  e.RequestID,
+			"tool_use_id": e.ToolUseID,
+			"reason":      reason,
+		})
+		s.broadcaster.broadcast(sseEvent{Event: "ask_user_question_dismissed", Data: evt})
+	}
+	return pending
 }
 
 // touch updates LastActive timestamp.
@@ -576,7 +637,18 @@ func attachProcessBridge(proc *claudeProcess, sess *serverSession, source string
 	go func() {
 		bridgeStdout(proc, sess.broadcaster, makeOnInit(sess, source), makeOnResult(sess, fullSync), func(todos json.RawMessage) {
 			sess.setTodos(todos)
-		}, makeOnMemoryAudit(sess), makeOnCanUseTool(sess))
+		}, makeOnMemoryAudit(sess), makeOnCanUseTool(sess), makeOnTask(sess))
+		// Process exited: invalidate pending AUQ (the control_request is gone
+		// with the subprocess) and mark in-flight tasks cancelled so the UI
+		// stops showing them as still running.
+		sess.dismissAllPendingAUQ("session_dead")
+		if cancelled := sess.tasks.markAllRunningAsCancelled(); len(cancelled) > 0 {
+			for _, t := range cancelled {
+				if data, err := json.Marshal(t); err == nil {
+					sess.broadcaster.broadcast(sseEvent{Event: "task_event", Data: data})
+				}
+			}
+		}
 		close(doneCh)
 		// Clear bridgeDone if it still points to this generation's channel,
 		// so subsequent waitBridgeDone() won't return immediately on a stale close.
@@ -602,6 +674,29 @@ func makeOnMemoryAudit(sess *serverSession) func(*memoryAuditEntry) {
 		entry.SessionName = sess.Name
 		sess.mu.Unlock()
 		go logMemoryAudit(db, *entry)
+	}
+}
+
+// makeOnTask returns a callback that feeds tool_use / tool_result events to
+// the session-scoped task tracker. For each created or updated task, an SSE
+// event "task_event" is broadcast so the Web UI's Tasks panel can update in
+// real time.
+func makeOnTask(sess *serverSession) func(event string, raw json.RawMessage) {
+	return func(event string, raw json.RawMessage) {
+		var changed []*runningTask
+		switch event {
+		case "tool_use":
+			if t := sess.tasks.trackToolUse(raw); t != nil {
+				changed = append(changed, t)
+			}
+		case "tool_result":
+			changed = sess.tasks.trackToolResult(raw)
+		}
+		for _, t := range changed {
+			if data, err := json.Marshal(t); err == nil {
+				sess.broadcaster.broadcast(sseEvent{Event: "task_event", Data: data})
+			}
+		}
 	}
 }
 
@@ -777,6 +872,7 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		hub:         sm.hub,
 		GalID:       opts.GalID,
 		SpawnedBy:   opts.SpawnedBy,
+		tasks:       newTaskTracker(),
 	}
 
 	sm.mu.Lock()
@@ -1398,6 +1494,7 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 		StreamURL:   fmt.Sprintf("/api/sessions/%s/stream", id),
 		broadcaster: bc,
 		hub:         sm.hub,
+		tasks:       newTaskTracker(),
 	}
 
 	// Atomic slot reservation:
@@ -1708,7 +1805,10 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 	var all []historyMessage
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 512*1024), 512*1024)
+	// Claude Code JSONL lines can contain large base64 images or fetched HTML
+	// (seen >1 MB in practice). Use a generous 64 MB max to avoid
+	// "bufio.Scanner: token too long" truncating the tail of the history.
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()

@@ -194,7 +194,7 @@ func serveSSE(w http.ResponseWriter, r *http.Request, broadcaster *sseBroadcaste
 // Web UI through an ask_user_question SSE event. If the callback is nil
 // or returns false, bridgeStdout auto-allows the tool (preserving prior
 // bypassPermissions behavior for tools that unexpectedly reach this path).
-func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage), onMemoryAudit func(*memoryAuditEntry), onCanUseTool func(json.RawMessage) bool) {
+func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage), onMemoryAudit func(*memoryAuditEntry), onCanUseTool func(json.RawMessage) bool, onTask func(event string, raw json.RawMessage)) {
 	// Track pending memory tool_use ops waiting for their tool_result
 	pendingMemOps := make(map[string]*pendingMemoryOp)
 
@@ -231,6 +231,13 @@ func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(
 		// Detect TodoWrite tool_use and extract todos for cross-session broadcast
 		if event == "tool_use" && onTodos != nil {
 			extractTodoWrite(raw, onTodos)
+		}
+
+		// Forward tool_use / tool_result to the per-session task tracker so it
+		// can build a snapshot of running background tasks (Bash run_in_background,
+		// Monitor, async Agent) and capture <task-notification> updates.
+		if onTask != nil && (event == "tool_use" || event == "tool_result") {
+			onTask(event, raw)
 		}
 
 		// Memory audit: track tool_use targeting memory paths
