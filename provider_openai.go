@@ -403,6 +403,38 @@ func anthropicThinkingToCodexReasoning(th *codexAnthropicThinking) *codexReasoni
 	return &codexReasoningConfig{Summary: "auto", Effort: effort}
 }
 
+// codexModelSupportsMinimalEffort reports whether the target codex model
+// accepts reasoning.effort="minimal". gpt-5.4 and its siblings renamed the
+// zero-reasoning tier to "none" and now reject "minimal" with HTTP 400:
+//
+//	Unsupported value: 'minimal' is not supported with the 'gpt-5.4' model.
+//	Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.
+//
+// This matters most for subagent (Agent tool) dispatch: Claude Code spawns
+// subagents without a `thinking` field, which falls through to
+// anthropicThinkingToCodexReasoning → Effort:"minimal" → 400 on gpt-5.4.
+// Subagents cannot configure their own effort, so the proxy has to normalize.
+func codexModelSupportsMinimalEffort(model string) bool {
+	// gpt-5.4 and gpt-5.4-mini (and any gpt-5.4-* variants) reject "minimal".
+	// Older families (gpt-5.3, gpt-5.2) still accept it.
+	if strings.HasPrefix(model, "gpt-5.4") {
+		return false
+	}
+	return true
+}
+
+// normalizeCodexEffortForModel rewrites effort values that the target model
+// does not accept. Today only one rewrite is needed: "minimal" → "none" for
+// the gpt-5.4 family. The function is nil-safe and idempotent.
+func normalizeCodexEffortForModel(cfg *codexReasoningConfig, model string) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Effort == "minimal" && !codexModelSupportsMinimalEffort(model) {
+		cfg.Effort = "none"
+	}
+}
+
 // codexToolSpec is a Codex function tool definition (OpenAI Responses API format).
 type codexToolSpec struct {
 	Type        string         `json:"type"` // "function"
@@ -894,6 +926,18 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 			appName, targetModel)
 	}
 
+	// Map Anthropic's thinking config onto Codex's reasoning config so
+	// user intent (adaptive / enabled:N / disabled) actually reaches the
+	// upstream. Previously every request was hardcoded to summary:"auto"
+	// with empty effort, which overbought reasoning for small budgets and
+	// under-instrumented for large ones.
+	//
+	// Then normalize per target model — gpt-5.4 rejects "minimal" with 400,
+	// which breaks subagent (Agent tool) spawns because subagents send no
+	// thinking field and fall through to Effort:"minimal".
+	reasoning := anthropicThinkingToCodexReasoning(areq.Thinking)
+	normalizeCodexEffortForModel(reasoning, targetModel)
+
 	creq := codexAPIRequest{
 		Model:             targetModel,
 		Store:             false,
@@ -904,12 +948,7 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		Tools:             codexTools,
 		ToolChoice:        "auto",
 		ParallelToolCalls: true,
-		// Map Anthropic's thinking config onto Codex's reasoning config so
-		// user intent (adaptive / enabled:N / disabled) actually reaches the
-		// upstream. Previously every request was hardcoded to summary:"auto"
-		// with empty effort, which overbought reasoning for small budgets and
-		// under-instrumented for large ones.
-		Reasoning: anthropicThinkingToCodexReasoning(areq.Thinking),
+		Reasoning:         reasoning,
 	}
 
 	reqBody, err := json.Marshal(creq)

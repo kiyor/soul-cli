@@ -437,6 +437,79 @@ func TestAnthropicThinkingToCodexReasoning(t *testing.T) {
 	}
 }
 
+// TestNormalizeCodexEffortForModel covers the gpt-5.4 minimal→none shim.
+// gpt-5.4 rejects effort="minimal" (only accepts none/low/medium/high/xhigh),
+// so subagent spawns (which default to thinking=disabled → effort=minimal)
+// would 400 without this normalization.
+func TestNormalizeCodexEffortForModel(t *testing.T) {
+	cases := []struct {
+		name       string
+		in         *codexReasoningConfig
+		model      string
+		wantEffort string
+	}{
+		{
+			name:       "gpt-5.4 minimal → none",
+			in:         &codexReasoningConfig{Effort: "minimal"},
+			model:      "gpt-5.4",
+			wantEffort: "none",
+		},
+		{
+			name:       "gpt-5.4-mini minimal → none",
+			in:         &codexReasoningConfig{Effort: "minimal"},
+			model:      "gpt-5.4-mini",
+			wantEffort: "none",
+		},
+		{
+			name:       "gpt-5.3-codex minimal stays (older family still accepts it)",
+			in:         &codexReasoningConfig{Effort: "minimal"},
+			model:      "gpt-5.3-codex",
+			wantEffort: "minimal",
+		},
+		{
+			name:       "gpt-5.2 minimal stays",
+			in:         &codexReasoningConfig{Effort: "minimal"},
+			model:      "gpt-5.2",
+			wantEffort: "minimal",
+		},
+		{
+			name:       "gpt-5.4 low unchanged",
+			in:         &codexReasoningConfig{Effort: "low", Summary: "auto"},
+			model:      "gpt-5.4",
+			wantEffort: "low",
+		},
+		{
+			name:       "gpt-5.4 high unchanged",
+			in:         &codexReasoningConfig{Effort: "high", Summary: "auto"},
+			model:      "gpt-5.4",
+			wantEffort: "high",
+		},
+		{
+			name:       "gpt-5.4 empty effort unchanged",
+			in:         &codexReasoningConfig{Effort: "", Summary: "auto"},
+			model:      "gpt-5.4",
+			wantEffort: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			normalizeCodexEffortForModel(tc.in, tc.model)
+			if tc.in.Effort != tc.wantEffort {
+				t.Errorf("Effort = %q, want %q", tc.in.Effort, tc.wantEffort)
+			}
+		})
+	}
+
+	t.Run("nil config is no-op (doesn't panic)", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("panicked: %v", r)
+			}
+		}()
+		normalizeCodexEffortForModel(nil, "gpt-5.4")
+	})
+}
+
 // TestCodexTranslateTools_BackfillsEmptyParams ensures tools missing an
 // input_schema get a valid empty-object schema so Codex accepts them.
 func TestCodexTranslateTools_BackfillsEmptyParams(t *testing.T) {
