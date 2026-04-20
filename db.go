@@ -90,7 +90,7 @@ func openDB() (*sql.DB, error) {
 		`CREATE INDEX IF NOT EXISTS idx_maudit_ts ON memory_audit(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_maudit_op ON memory_audit(operation)`,
 		`CREATE INDEX IF NOT EXISTS idx_maudit_sess ON memory_audit(session_id)`,
-		// tool_hook_audit: every PreToolUse hook invocation (Read/Edit/Write/Grep/...).
+		// tool_hook_audit: every hook invocation (Read/Edit/Write/Grep/Prompt/...).
 		// One row per hook call. Acts simultaneously as audit log and dedup state
 		// (per_session/per_file dedup implemented via WHERE injected=1 lookups here).
 		`CREATE TABLE IF NOT EXISTS tool_hook_audit (
@@ -98,6 +98,7 @@ func openDB() (*sql.DB, error) {
 			timestamp       TEXT NOT NULL,
 			session_id      TEXT NOT NULL DEFAULT '',
 			cwd             TEXT NOT NULL DEFAULT '',
+			event_name      TEXT NOT NULL DEFAULT 'PreToolUse',
 			tool_name       TEXT NOT NULL DEFAULT '',
 			path            TEXT NOT NULL DEFAULT '',
 			rule_id         TEXT NOT NULL DEFAULT '',
@@ -118,6 +119,14 @@ func openDB() (*sql.DB, error) {
 			db.Close()
 			return nil, fmt.Errorf("schema creation failed: %w", err)
 		}
+	}
+	// Idempotent migration for pre-existing DBs that predate the event_name column.
+	// SQLite returns an error if the column already exists; we ignore it. The
+	// event_name index must be created *after* the ALTER so it works on legacy DBs.
+	_, _ = db.Exec(`ALTER TABLE tool_hook_audit ADD COLUMN event_name TEXT NOT NULL DEFAULT 'PreToolUse'`)
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_thook_event ON tool_hook_audit(event_name)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("event_name index creation failed: %w", err)
 	}
 	// soul_sessions table (session lifecycle management)
 	if err := ensureSoulSessionTable(db); err != nil {

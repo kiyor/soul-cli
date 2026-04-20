@@ -467,13 +467,26 @@ func loadConfig() {
 }
 
 func init() {
+	traceT0 := time.Now()
 	if buildVersion == "" {
 		buildVersion = strings.TrimSpace(embeddedVersion)
 	}
 	// Capture original working directory before any chdir
 	launchDir, _ = os.Getwd()
 	initAppName()
+	tracePoint("init:appname", traceT0)
 	initWorkspace()
+	tracePoint("init:workspace", traceT0)
+}
+
+// tracePoint is a zero-cost timing probe when WEIRAN_HOOK_TRACE is unset.
+// When set, prints cumulative elapsed time from the given start to stderr,
+// tagged with the label. Used only for ad-hoc profiling; never compiled out.
+func tracePoint(label string, start time.Time) {
+	if os.Getenv("WEIRAN_HOOK_TRACE") != "1" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[trace] %s=%s\n", label, time.Since(start))
 }
 
 // initSessionDir creates /tmp/<agent>-MMDD-HHMM/ as the temp directory for this session
@@ -589,6 +602,8 @@ Examples:
 }
 
 func main() {
+	traceMain := time.Now()
+	tracePoint("main:enter", traceMain)
 	// help / version
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -731,6 +746,7 @@ func main() {
 		handleToken(extra)
 		return
 	case "tool-hook":
+		tracePoint("main:dispatch_tool_hook", traceMain)
 		handleToolHook(extra)
 		return
 	}

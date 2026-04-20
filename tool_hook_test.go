@@ -334,3 +334,238 @@ func TestQueryToolHookStats(t *testing.T) {
 		t.Errorf("r1: got %+v", r1)
 	}
 }
+
+// ── UserPromptSubmit dispatch tests ──
+
+func TestEventMatches(t *testing.T) {
+	cases := []struct {
+		name   string
+		rule   ToolHookRule
+		event  string
+		expect bool
+	}{
+		{"empty events defaults to PreToolUse", ToolHookRule{}, HookEventPreToolUse, true},
+		{"empty events does not match UserPromptSubmit", ToolHookRule{}, HookEventUserPromptSubmit, false},
+		{"explicit match", ToolHookRule{Events: []string{"UserPromptSubmit"}}, HookEventUserPromptSubmit, true},
+		{"explicit no-match", ToolHookRule{Events: []string{"UserPromptSubmit"}}, HookEventPreToolUse, false},
+		{"case-insensitive", ToolHookRule{Events: []string{"userpromptsubmit"}}, HookEventUserPromptSubmit, true},
+		{"multi-event list", ToolHookRule{Events: []string{"PreToolUse", "UserPromptSubmit"}}, HookEventUserPromptSubmit, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.rule.eventMatches(tc.event)
+			if got != tc.expect {
+				t.Errorf("got %v want %v", got, tc.expect)
+			}
+		})
+	}
+}
+
+func TestMatchesPromptRegex(t *testing.T) {
+	cases := []struct {
+		name     string
+		prompt   string
+		patterns []string
+		want     bool
+	}{
+		{"empty prompt", "", []string{"foo"}, false},
+		{"empty patterns", "hello", nil, false},
+		{"simple match", "请记住这件事", []string{"记住|记下"}, true},
+		{"case-insensitive flag", "REMEMBER this", []string{"(?i)remember this"}, true},
+		{"case-sensitive mismatch", "REMEMBER this", []string{"remember this"}, false},
+		{"no match", "天气真好", []string{"记住|记下"}, false},
+		{"bad regex skipped (no crash)", "记住", []string{"[invalid", "记住"}, true},
+		{"bad regex no match", "天气", []string{"[invalid"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := matchesPromptRegex(tc.prompt, tc.patterns)
+			if got != tc.want {
+				t.Errorf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunUserPromptSubmitHook_Match(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "ups.db")
+	defer func() { dbPath = origDB }()
+
+	origWS := workspace
+	workspace = dir
+	defer func() { workspace = origWS }()
+
+	os.WriteFile(filepath.Join(dir, "tool-hooks.yaml"), []byte(`rules:
+  - id: remember_signal
+    events: [UserPromptSubmit]
+    match_prompt:
+      - '记住|记下|remember this'
+    inject: "write to file, do not just reply"
+    dedupe: never
+`), 0644)
+
+	input := ToolHookInput{
+		SessionID:     "ups-sess",
+		HookEventName: "UserPromptSubmit",
+		Prompt:        "主人说 请记住 以后都这样",
+	}
+	payload, _ := json.Marshal(input)
+
+	r, w, _ := os.Pipe()
+	w.Write(payload)
+	w.Close()
+	origStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = origStdin }()
+
+	pr, pw, _ := os.Pipe()
+	origStdout := os.Stdout
+	os.Stdout = pw
+	runToolHook()
+	pw.Close()
+	os.Stdout = origStdout
+
+	buf := make([]byte, 2048)
+	n, _ := pr.Read(buf)
+	out := string(buf[:n])
+
+	if !strings.Contains(out, "write to file") {
+		t.Errorf("expected injection, got %q", out)
+	}
+	if !strings.Contains(out, `"hookEventName":"UserPromptSubmit"`) {
+		t.Errorf("expected UserPromptSubmit event name in output, got %q", out)
+	}
+
+	db, _ := openDB()
+	defer db.Close()
+	var n1 int
+	db.QueryRow(`SELECT COUNT(*) FROM tool_hook_audit WHERE rule_id='remember_signal' AND injected=1 AND event_name='UserPromptSubmit'`).Scan(&n1)
+	if n1 != 1 {
+		t.Errorf("expected 1 UserPromptSubmit audit row, got %d", n1)
+	}
+}
+
+func TestRunUserPromptSubmitHook_NoMatch(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "ups-nomatch.db")
+	defer func() { dbPath = origDB }()
+
+	origWS := workspace
+	workspace = dir
+	defer func() { workspace = origWS }()
+
+	os.WriteFile(filepath.Join(dir, "tool-hooks.yaml"), []byte(`rules:
+  - id: remember_signal
+    events: [UserPromptSubmit]
+    match_prompt: ['记住|记下']
+    inject: "write to file"
+`), 0644)
+
+	input := ToolHookInput{
+		SessionID:     "ups-nomatch",
+		HookEventName: "UserPromptSubmit",
+		Prompt:        "今天天气怎么样",
+	}
+	payload, _ := json.Marshal(input)
+
+	r, w, _ := os.Pipe()
+	w.Write(payload)
+	w.Close()
+	origStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = origStdin }()
+
+	pr, pw, _ := os.Pipe()
+	origStdout := os.Stdout
+	os.Stdout = pw
+	runToolHook()
+	pw.Close()
+	os.Stdout = origStdout
+
+	buf := make([]byte, 1024)
+	n, _ := pr.Read(buf)
+	out := string(buf[:n])
+	if strings.Contains(out, "additionalContext") {
+		t.Errorf("expected no injection, got %q", out)
+	}
+
+	// Observability row still written (no rule matched)
+	db, _ := openDB()
+	defer db.Close()
+	var cnt int
+	db.QueryRow(`SELECT COUNT(*) FROM tool_hook_audit WHERE session_id='ups-nomatch' AND event_name='UserPromptSubmit'`).Scan(&cnt)
+	if cnt != 1 {
+		t.Errorf("expected 1 observability row, got %d", cnt)
+	}
+}
+
+func TestEventDispatch_BackwardCompat_NoEventName(t *testing.T) {
+	// Payloads without hook_event_name must still work as PreToolUse.
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "bc.db")
+	defer func() { dbPath = origDB }()
+
+	origWS := workspace
+	workspace = dir
+	defer func() { workspace = origWS }()
+
+	os.WriteFile(filepath.Join(dir, "tool-hooks.yaml"), []byte(`rules:
+  - id: legacy_rule
+    tools: [Read]
+    match: ["**/*.md"]
+    inject: "legacy fires"
+`), 0644)
+
+	input := ToolHookInput{
+		SessionID: "bc-sess",
+		ToolName:  "Read",
+		ToolInput: json.RawMessage(`{"file_path":"/tmp/x.md"}`),
+		// HookEventName intentionally empty
+	}
+	payload, _ := json.Marshal(input)
+
+	r, w, _ := os.Pipe()
+	w.Write(payload)
+	w.Close()
+	origStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = origStdin }()
+
+	pr, pw, _ := os.Pipe()
+	origStdout := os.Stdout
+	os.Stdout = pw
+	runToolHook()
+	pw.Close()
+	os.Stdout = origStdout
+
+	buf := make([]byte, 2048)
+	n, _ := pr.Read(buf)
+	out := string(buf[:n])
+	if !strings.Contains(out, "legacy fires") {
+		t.Errorf("expected legacy rule injection, got %q", out)
+	}
+}
+
+func TestPromptDigest(t *testing.T) {
+	cases := []struct {
+		in  string
+		n   int
+		out string
+	}{
+		{"", 10, ""},
+		{"short", 10, "short"},
+		{"line1\nline2", 100, "line1 line2"},
+		{"abcdefghijklmnop", 5, "abcde…"},
+		{"中文测试内容", 3, "中文测…"},
+	}
+	for _, tc := range cases {
+		got := promptDigest(tc.in, tc.n)
+		if got != tc.out {
+			t.Errorf("promptDigest(%q, %d) = %q want %q", tc.in, tc.n, got, tc.out)
+		}
+	}
+}

@@ -16,37 +16,101 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ── PreToolUse hook: path-aware system-reminder injection ──
+// ── Hook translator: event-aware system-reminder injection ──
 //
-// Claude Code invokes the hook with a JSON payload on stdin. For PreToolUse
-// it contains: {"tool_name": "...", "tool_input": {...}, "session_id": "...", "cwd": "..."}
-// Any stdout the hook produces is injected as a system-reminder before Claude
-// processes the tool result. Exit 0 = allow, non-zero = block (we never block;
-// injection is advisory only).
+// Claude Code invokes this binary with a JSON payload on stdin for any hook
+// event (PreToolUse, UserPromptSubmit, SessionStart, Stop, ...). We dispatch
+// on hook_event_name and run the matching rules from YAML.
+//
+//   PreToolUse         → tool_name + file path glob (ToolHookRule.Tools / .Match)
+//   UserPromptSubmit   → prompt regex (ToolHookRule.MatchPrompt)
+//   (future events)    → added case by case
+//
+// Any stdout the hook produces is injected as system-reminder context.
+// Exit 0 = allow, non-zero = block (we never block; injection is advisory).
 //
 // Every invocation writes one row to tool_hook_audit. The table doubles as
 // dedup state (per_session / per_file): dedup checks query WHERE injected=1.
 
-// ToolHookInput mirrors the PreToolUse payload Claude Code sends via stdin.
+// Supported hook event names — mirrors Claude Code's settings.json-level
+// allowlist in src/utils/settings/settings.ts (as of upstream 2026-04).
+// All are audited; only the ones with bespoke matchers (PreToolUse,
+// UserPromptSubmit) run rule matching. Everything else is audit-only.
+const (
+	HookEventPreToolUse       = "PreToolUse"
+	HookEventPostToolUse      = "PostToolUse"
+	HookEventNotification     = "Notification"
+	HookEventUserPromptSubmit = "UserPromptSubmit"
+	HookEventSessionStart     = "SessionStart"
+	HookEventSessionEnd       = "SessionEnd"
+	HookEventStop             = "Stop"
+	HookEventSubagentStop     = "SubagentStop"
+	HookEventPreCompact       = "PreCompact"
+	HookEventPostCompact      = "PostCompact"
+	HookEventTeammateIdle     = "TeammateIdle"
+	HookEventTaskCreated      = "TaskCreated"
+	HookEventTaskCompleted    = "TaskCompleted"
+)
+
+// AllHookEvents is the ordered list Claude Code accepts at the top level of
+// settings.json's `hooks` object. Kept in sync with Claude Code upstream.
+// Adding a new event here also requires adding it to settings.json for the
+// binary to be invoked; otherwise no audit is written for it.
+var AllHookEvents = []string{
+	HookEventPreToolUse,
+	HookEventPostToolUse,
+	HookEventNotification,
+	HookEventUserPromptSubmit,
+	HookEventSessionStart,
+	HookEventSessionEnd,
+	HookEventStop,
+	HookEventSubagentStop,
+	HookEventPreCompact,
+	HookEventPostCompact,
+	HookEventTeammateIdle,
+	HookEventTaskCreated,
+	HookEventTaskCompleted,
+}
+
+// knownHookEvents is the set form of AllHookEvents for O(1) lookup.
+// Events outside this set are still audited but flagged as "unknown event"
+// so we notice when Claude Code adds a new hook we haven't wired.
+var knownHookEvents = func() map[string]bool {
+	m := make(map[string]bool, len(AllHookEvents))
+	for _, e := range AllHookEvents {
+		m[e] = true
+	}
+	return m
+}()
+
+// defaultEvent is assumed when a rule's Events list is empty — preserves
+// backward compatibility with the original path-only tool-hook YAML.
+const defaultEvent = HookEventPreToolUse
+
+// ToolHookInput mirrors the payload Claude Code sends via stdin. Fields are a
+// union across supported events; unused ones are zero.
 type ToolHookInput struct {
 	SessionID      string          `json:"session_id"`
 	CWD            string          `json:"cwd"`
-	ToolName       string          `json:"tool_name"`
-	ToolInput      json.RawMessage `json:"tool_input"`
+	ToolName       string          `json:"tool_name"`       // PreToolUse
+	ToolInput      json.RawMessage `json:"tool_input"`      // PreToolUse
+	Prompt         string          `json:"prompt"`          // UserPromptSubmit
 	HookEventName  string          `json:"hook_event_name"`
 	TranscriptPath string          `json:"transcript_path"`
 }
 
 // ToolHookRule is one YAML rule definition.
 type ToolHookRule struct {
-	ID        string   `yaml:"id"`
-	Match     []string `yaml:"match"`     // glob patterns against target path
-	Tools     []string `yaml:"tools"`     // Read / Edit / Write / Grep / Glob; empty = any
-	Inject    string   `yaml:"inject"`    // system-reminder body (trimmed)
-	Dedupe    string   `yaml:"dedupe"`    // never | per_session | per_file (default per_file)
-	Budget    int      `yaml:"budget"`    // per-rule max chars; 0 = 500 default
-	Priority  int      `yaml:"priority"`  // higher fires first; 0 = 50 default
-	Disabled  bool     `yaml:"disabled"`
+	ID          string   `yaml:"id"`
+	Events      []string `yaml:"events"`       // which hook events the rule applies to; empty = [PreToolUse]
+	Match       []string `yaml:"match"`        // glob patterns against target path (PreToolUse)
+	Tools       []string `yaml:"tools"`        // Read / Edit / Write / Grep / Glob; empty = any (PreToolUse)
+	MatchPrompt []string `yaml:"match_prompt"` // regex patterns against user prompt (UserPromptSubmit)
+	Inject      string   `yaml:"inject"`       // system-reminder body (trimmed)
+	Dedupe      string   `yaml:"dedupe"`       // never | per_session | per_file (default per_file)
+	Budget      int      `yaml:"budget"`       // per-rule max chars; 0 = 500 default
+	Priority    int      `yaml:"priority"`     // higher fires first; 0 = 50 default
+	Disabled    bool     `yaml:"disabled"`
 }
 
 // ToolHookConfig is the top-level YAML doc.
@@ -227,6 +291,58 @@ func (r *ToolHookRule) toolMatches(tool string) bool {
 	return false
 }
 
+// eventMatches returns true if the rule applies to the given hook event.
+// Empty Events list defaults to [PreToolUse] — keeps legacy rules working
+// without a YAML migration.
+func (r *ToolHookRule) eventMatches(event string) bool {
+	if len(r.Events) == 0 {
+		return event == defaultEvent
+	}
+	for _, e := range r.Events {
+		if strings.EqualFold(e, event) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesPromptRegex returns true if prompt matches any of the regex patterns.
+// Patterns are compiled on first use and cached. Invalid patterns are skipped.
+func matchesPromptRegex(prompt string, patterns []string) bool {
+	if prompt == "" || len(patterns) == 0 {
+		return false
+	}
+	for _, pat := range patterns {
+		rx := compilePromptRegex(pat)
+		if rx != nil && rx.MatchString(prompt) {
+			return true
+		}
+	}
+	return false
+}
+
+var promptRegexCache sync.Map // pattern → *regexp.Regexp (or nil sentinel on bad pattern)
+
+type badRegex struct{}
+
+var badRegexSentinel = &badRegex{}
+
+func compilePromptRegex(pattern string) *regexp.Regexp {
+	if v, ok := promptRegexCache.Load(pattern); ok {
+		if rx, ok := v.(*regexp.Regexp); ok {
+			return rx
+		}
+		return nil // sentinel = known-bad
+	}
+	rx, err := regexp.Compile(pattern)
+	if err != nil {
+		promptRegexCache.Store(pattern, badRegexSentinel)
+		return nil
+	}
+	promptRegexCache.Store(pattern, rx)
+	return rx
+}
+
 // isDeduped checks the audit table for a prior successful injection of this
 // rule, scoped by dedupe policy.
 func isDeduped(db *sql.DB, rule ToolHookRule, sessionID, path string) bool {
@@ -255,10 +371,13 @@ func writeToolHookAudit(db *sql.DB, row toolHookAuditRow) {
 	if db == nil {
 		return
 	}
+	if row.EventName == "" {
+		row.EventName = defaultEvent
+	}
 	_, err := db.Exec(`INSERT INTO tool_hook_audit
-		(timestamp, session_id, cwd, tool_name, path, rule_id, injected, skip_reason, injection_size, budget_used, latency_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		row.Timestamp, row.SessionID, row.CWD, row.ToolName, row.Path,
+		(timestamp, session_id, cwd, event_name, tool_name, path, rule_id, injected, skip_reason, injection_size, budget_used, latency_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		row.Timestamp, row.SessionID, row.CWD, row.EventName, row.ToolName, row.Path,
 		row.RuleID, row.Injected, row.SkipReason, row.InjectionSize, row.BudgetUsed, row.LatencyMS)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[tool-hook] audit write failed: %v\n", err)
@@ -269,6 +388,7 @@ type toolHookAuditRow struct {
 	Timestamp     string
 	SessionID     string
 	CWD           string
+	EventName     string
 	ToolName      string
 	Path          string
 	RuleID        string
@@ -279,24 +399,35 @@ type toolHookAuditRow struct {
 	LatencyMS     int64
 }
 
-// runToolHook is the entry point when weiran is invoked as a PreToolUse hook.
-// Reads JSON from stdin, writes system-reminder (if any) to stdout, never errors
-// (hook failures must not block the user's work).
+// runToolHook is the entry point when weiran is invoked as a Claude Code hook.
+// Reads JSON from stdin, dispatches on hook_event_name, writes optional
+// system-reminder JSON to stdout. Never errors — hook failures must not block.
 func runToolHook() {
-	start := time.Now()
+	if os.Getenv("WEIRAN_HOOK_TRACE") == "1" {
+		traceStart := time.Now()
+		defer func() {
+			fmt.Fprintf(os.Stderr, "[trace] total=%s\n", time.Since(traceStart))
+		}()
+	}
 
 	rawIn, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		// silent failure — hook must not block
 		return
+	}
+	if os.Getenv("WEIRAN_HOOK_TRACE") == "1" {
+		fmt.Fprintf(os.Stderr, "[trace] stdin_read ok\n")
 	}
 	var in ToolHookInput
 	if err := json.Unmarshal(rawIn, &in); err != nil {
 		return
 	}
 
-	path := extractToolPath(in.ToolName, in.ToolInput)
-	sessionID := in.SessionID
+	// Default legacy payloads (no hook_event_name) to PreToolUse so older
+	// Claude Code versions keep working unchanged.
+	event := in.HookEventName
+	if event == "" {
+		event = defaultEvent
+	}
 
 	cfg, err := loadToolHookConfig(defaultToolHookConfigPath())
 	if err != nil {
@@ -309,13 +440,61 @@ func runToolHook() {
 		defer db.Close()
 	}
 
-	audited := false // ensure we write at least one "no match" row for observability
+	switch event {
+	case HookEventPreToolUse:
+		runPreToolUseHook(in, cfg, db)
+	case HookEventUserPromptSubmit:
+		runUserPromptSubmitHook(in, cfg, db)
+	default:
+		// All other events (PostToolUse, Stop, SessionStart, Notification,
+		// PreCompact, ...) are audit-only for now: one row per invocation, no
+		// injection. Future bespoke matchers can be added by name.
+		runAuditOnlyHook(event, in, db)
+	}
+}
+
+// runAuditOnlyHook records a single observability row for events that don't
+// (yet) have a rule matcher. The audit row still captures session_id / cwd /
+// event_name / tool_name (if PostToolUse) so we can see what Claude Code does.
+func runAuditOnlyHook(event string, in ToolHookInput, db *sql.DB) {
+	if db == nil {
+		return
+	}
+	start := time.Now()
+	// For PostToolUse we keep the tool_name + path so tool usage is observable
+	// end-to-end; for other events those stay empty.
+	var toolName, path string
+	if event == HookEventPostToolUse {
+		toolName = in.ToolName
+		path = extractToolPath(in.ToolName, in.ToolInput)
+	}
+	writeToolHookAudit(db, toolHookAuditRow{
+		Timestamp: time.Now().Format(time.RFC3339),
+		SessionID: in.SessionID,
+		CWD:       in.CWD,
+		EventName: event,
+		ToolName:  toolName,
+		Path:      path,
+		LatencyMS: time.Since(start).Milliseconds(),
+	})
+}
+
+// runPreToolUseHook handles the original path + tool glob matching.
+func runPreToolUseHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
+	start := time.Now()
+	path := extractToolPath(in.ToolName, in.ToolInput)
+	sessionID := in.SessionID
+
+	audited := false
 	budgetRemaining := cfg.Budget
 	var injections []string
 	budgetUsedTotal := 0
 
 	for _, rule := range cfg.Rules {
 		if rule.Disabled || rule.ID == "" {
+			continue
+		}
+		if !rule.eventMatches(HookEventPreToolUse) {
 			continue
 		}
 		if !rule.toolMatches(in.ToolName) {
@@ -331,6 +510,7 @@ func runToolHook() {
 				Timestamp:  time.Now().Format(time.RFC3339),
 				SessionID:  sessionID,
 				CWD:        in.CWD,
+				EventName:  HookEventPreToolUse,
 				ToolName:   in.ToolName,
 				Path:       path,
 				RuleID:     rule.ID,
@@ -350,6 +530,7 @@ func runToolHook() {
 				Timestamp:  time.Now().Format(time.RFC3339),
 				SessionID:  sessionID,
 				CWD:        in.CWD,
+				EventName:  HookEventPreToolUse,
 				ToolName:   in.ToolName,
 				Path:       path,
 				RuleID:     rule.ID,
@@ -368,6 +549,7 @@ func runToolHook() {
 			Timestamp:     time.Now().Format(time.RFC3339),
 			SessionID:     sessionID,
 			CWD:           in.CWD,
+			EventName:     HookEventPreToolUse,
 			ToolName:      in.ToolName,
 			Path:          path,
 			RuleID:        rule.ID,
@@ -378,34 +560,155 @@ func runToolHook() {
 		})
 	}
 
-	// Always record at least one "observed" row so stats reflect total Read volume,
-	// not just matched ones. Empty rule_id = no rule fired.
 	if !audited && db != nil {
 		writeToolHookAudit(db, toolHookAuditRow{
 			Timestamp: time.Now().Format(time.RFC3339),
 			SessionID: sessionID,
 			CWD:       in.CWD,
+			EventName: HookEventPreToolUse,
 			ToolName:  in.ToolName,
 			Path:      path,
 			LatencyMS: time.Since(start).Milliseconds(),
 		})
 	}
 
-	if len(injections) > 0 {
-		// Claude Code PreToolUse supports injecting text into Claude's context
-		// via JSON output with hookSpecificOutput.additionalContext.
-		// Plain stdout is shown only to the user via the transcript.
-		body := strings.Join(injections, "\n\n")
-		out := map[string]interface{}{
-			"hookSpecificOutput": map[string]interface{}{
-				"hookEventName":     "PreToolUse",
-				"additionalContext": body,
-			},
-			"suppressOutput": true,
+	emitInjections(HookEventPreToolUse, injections)
+}
+
+// runUserPromptSubmitHook handles prompt regex matching for the user's message.
+// Dedupe scope uses session_id only (no "path" concept for UserPromptSubmit);
+// the audit table's path column is reused as a short prompt digest (first 120
+// chars) for observability.
+func runUserPromptSubmitHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
+	start := time.Now()
+	sessionID := in.SessionID
+	digest := promptDigest(in.Prompt, 120)
+
+	audited := false
+	budgetRemaining := cfg.Budget
+	var injections []string
+	budgetUsedTotal := 0
+
+	for _, rule := range cfg.Rules {
+		if rule.Disabled || rule.ID == "" {
+			continue
 		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.Encode(out)
+		if !rule.eventMatches(HookEventUserPromptSubmit) {
+			continue
+		}
+		if !matchesPromptRegex(in.Prompt, rule.MatchPrompt) {
+			continue
+		}
+		audited = true
+
+		// For UserPromptSubmit we dedupe per_session (and per_file is treated
+		// as per_session too since there is no file path).
+		if db != nil && isDedupedPrompt(db, rule, sessionID) {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  HookEventUserPromptSubmit,
+				Path:       digest,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: "dedupe",
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+			continue
+		}
+
+		body := strings.TrimSpace(rule.Inject)
+		if len(body) > rule.Budget {
+			body = body[:rule.Budget]
+		}
+		if len(body) > budgetRemaining {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  HookEventUserPromptSubmit,
+				Path:       digest,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: "budget",
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+			continue
+		}
+
+		injections = append(injections, fmt.Sprintf("[rule:%s] %s", rule.ID, body))
+		budgetUsedTotal += len(body)
+		budgetRemaining -= len(body)
+
+		writeToolHookAudit(db, toolHookAuditRow{
+			Timestamp:     time.Now().Format(time.RFC3339),
+			SessionID:     sessionID,
+			CWD:           in.CWD,
+			EventName:     HookEventUserPromptSubmit,
+			Path:          digest,
+			RuleID:        rule.ID,
+			Injected:      true,
+			InjectionSize: len(body),
+			BudgetUsed:    budgetUsedTotal,
+			LatencyMS:     time.Since(start).Milliseconds(),
+		})
 	}
+
+	if !audited && db != nil {
+		writeToolHookAudit(db, toolHookAuditRow{
+			Timestamp: time.Now().Format(time.RFC3339),
+			SessionID: sessionID,
+			CWD:       in.CWD,
+			EventName: HookEventUserPromptSubmit,
+			Path:      digest,
+			LatencyMS: time.Since(start).Milliseconds(),
+		})
+	}
+
+	emitInjections(HookEventUserPromptSubmit, injections)
+}
+
+// isDedupedPrompt is the UserPromptSubmit dedupe check (session-scoped only).
+// "never" → always allow; anything else → 1 per (rule, session).
+func isDedupedPrompt(db *sql.DB, rule ToolHookRule, sessionID string) bool {
+	if rule.Dedupe == "never" {
+		return false
+	}
+	var n int
+	db.QueryRow(`SELECT 1 FROM tool_hook_audit
+		WHERE rule_id=? AND session_id=? AND event_name=? AND injected=1 LIMIT 1`,
+		rule.ID, sessionID, HookEventUserPromptSubmit).Scan(&n)
+	return n == 1
+}
+
+// promptDigest returns a short excerpt of the prompt for audit-table observability.
+// Kept tiny; the full prompt lives in Claude Code's own session JSONL.
+func promptDigest(prompt string, n int) string {
+	p := strings.ReplaceAll(strings.ReplaceAll(prompt, "\n", " "), "\r", " ")
+	if len([]rune(p)) <= n {
+		return p
+	}
+	runes := []rune(p)
+	return string(runes[:n]) + "…"
+}
+
+// emitInjections writes the final JSON output that Claude Code consumes.
+// Nothing is written when there are no injections.
+func emitInjections(event string, injections []string) {
+	if len(injections) == 0 {
+		return
+	}
+	body := strings.Join(injections, "\n\n")
+	out := map[string]interface{}{
+		"hookSpecificOutput": map[string]interface{}{
+			"hookEventName":     event,
+			"additionalContext": body,
+		},
+		"suppressOutput": true,
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.Encode(out)
 }
 
 // ── CLI: `weiran tool-hook stats` ──
@@ -417,6 +720,7 @@ type toolHookStats struct {
 	InjectedCalls   int                      `json:"injected_calls"`
 	ByRule          map[string]toolHookRuleS `json:"by_rule"`
 	ByTool          map[string]int           `json:"by_tool"`
+	ByEvent         map[string]int           `json:"by_event"`
 	TopPaths        []toolHookPathStat       `json:"top_paths"`
 	SkipBreakdown   map[string]int           `json:"skip_breakdown"`
 	DaysQueried     int                      `json:"days_queried"`
@@ -441,6 +745,7 @@ func queryToolHookStats(db *sql.DB, days int) (*toolHookStats, error) {
 	stats := &toolHookStats{
 		ByRule:        map[string]toolHookRuleS{},
 		ByTool:        map[string]int{},
+		ByEvent:       map[string]int{},
 		SkipBreakdown: map[string]int{},
 		DaysQueried:   days,
 	}
@@ -490,6 +795,19 @@ func queryToolHookStats(db *sql.DB, days int) (*toolHookStats, error) {
 		rows.Close()
 	}
 
+	// by event
+	rows, err = db.Query(`SELECT event_name, COUNT(*) FROM tool_hook_audit
+		WHERE timestamp >= ? GROUP BY event_name`, since)
+	if err == nil {
+		for rows.Next() {
+			var e string
+			var n int
+			rows.Scan(&e, &n)
+			stats.ByEvent[e] = n
+		}
+		rows.Close()
+	}
+
 	// top paths
 	rows, err = db.Query(`SELECT path, COUNT(*) FROM tool_hook_audit
 		WHERE timestamp >= ? AND path != '' GROUP BY path ORDER BY COUNT(*) DESC LIMIT 15`, since)
@@ -532,18 +850,311 @@ func handleToolHook(args []string) {
 		handleToolHookTest(args[1:])
 	case "rules":
 		handleToolHookRules()
+	case "events":
+		handleToolHookEvents()
+	case "gc":
+		handleToolHookGC(args[1:])
+	case "log":
+		handleToolHookLog(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: %s tool-hook [stats|test|rules]\n", appName)
-		fmt.Fprintf(os.Stderr, "  (no args = run as PreToolUse hook, reads JSON from stdin)\n")
+		fmt.Fprintf(os.Stderr, "usage: %s tool-hook <subcommand>\n\n", appName)
+		fmt.Fprintf(os.Stderr, "  (no args)            run as hook (reads JSON from stdin)\n")
+		fmt.Fprintf(os.Stderr, "  stats [--days N] [--json]\n                       aggregated audit stats (human by default)\n")
+		fmt.Fprintf(os.Stderr, "  log   [filters…]     tail recent audit rows (see log --help)\n")
+		fmt.Fprintf(os.Stderr, "  test  <tool> <path>  dry-run PreToolUse rule matching\n")
+		fmt.Fprintf(os.Stderr, "  rules                list configured rules (YAML)\n")
+		fmt.Fprintf(os.Stderr, "  events               list hook events this binary recognizes\n")
+		fmt.Fprintf(os.Stderr, "  gc    [--days N]     delete audit rows older than N days (default 30)\n")
 		os.Exit(1)
 	}
 }
 
-func handleToolHookStats(args []string) {
-	days := 7
+// handleToolHookLog dumps recent audit rows with filtering. Output format is
+// a compact single-line-per-row KV pairs which is greppable and fits terminal.
+//
+// Filters (combinable, AND semantics):
+//   --event    <name>     PreToolUse / UserPromptSubmit / …
+//   --session  <id>       exact session id match
+//   --rule     <id>       only rows where this rule fired or skipped
+//   --tool     <name>     only PreToolUse/PostToolUse rows for this tool
+//   --injected             only rows that actually injected
+//   --skipped              only rows with a skip_reason (dedupe/budget)
+//   --grep     <substr>   substring match against path/prompt digest
+//   --days     <N>        lookback window (default 1)
+//   --limit    <N>        row cap (default 50, max 1000)
+//   --json                emit NDJSON instead of human format
+//   --help                usage
+func handleToolHookLog(args []string) {
+	days := 1
+	limit := 50
+	var filterEvent, filterSession, filterRule, filterTool, filterGrep string
+	jsonOut := false
+	onlyInjected := false
+	onlySkipped := false
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		peek := func() string {
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			return ""
+		}
+		switch a {
+		case "--help", "-h":
+			fmt.Print(`weiran tool-hook log — search the audit table.
+
+Filters (all combinable):
+  --event <name>     PreToolUse | PostToolUse | UserPromptSubmit | Stop | …
+  --session <id>     exact session id
+  --rule <id>        rule id (match or skip)
+  --tool <name>      Read | Edit | Write | Bash | …
+  --injected         only rows that actually injected context
+  --skipped          only rows with a skip_reason
+  --grep <substr>    substring match against path/prompt digest
+  --days <N>         lookback window (default 1)
+  --limit <N>        row cap (default 50, max 1000)
+  --json             NDJSON output instead of human format
+
+Examples:
+  weiran tool-hook log --event UserPromptSubmit --days 7
+  weiran tool-hook log --rule remember_signal --injected
+  weiran tool-hook log --grep memory/topics/feedback --limit 100
+  weiran tool-hook log --tool Edit --days 3 --json | jq .
+`)
+			return
+		case "--event":
+			filterEvent = peek()
+		case "--session":
+			filterSession = peek()
+		case "--rule":
+			filterRule = peek()
+		case "--tool":
+			filterTool = peek()
+		case "--grep":
+			filterGrep = peek()
+		case "--days":
+			fmt.Sscanf(peek(), "%d", &days)
+		case "--limit":
+			fmt.Sscanf(peek(), "%d", &limit)
+		case "--json":
+			jsonOut = true
+		case "--injected":
+			onlyInjected = true
+		case "--skipped":
+			onlySkipped = true
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag: %s (try --help)\n", a)
+			os.Exit(1)
+		}
+	}
+	if days < 1 {
+		days = 1
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open DB: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	// Build parameterized query to keep grep noise minimal.
+	since := time.Now().AddDate(0, 0, -days).Format(time.RFC3339)
+	q := `SELECT timestamp, session_id, event_name, tool_name, path, rule_id,
+		injected, skip_reason, injection_size, budget_used, latency_ms
+		FROM tool_hook_audit WHERE timestamp >= ?`
+	params := []interface{}{since}
+	if filterEvent != "" {
+		q += " AND event_name=?"
+		params = append(params, filterEvent)
+	}
+	if filterSession != "" {
+		q += " AND session_id=?"
+		params = append(params, filterSession)
+	}
+	if filterRule != "" {
+		q += " AND rule_id=?"
+		params = append(params, filterRule)
+	}
+	if filterTool != "" {
+		q += " AND tool_name=?"
+		params = append(params, filterTool)
+	}
+	if onlyInjected {
+		q += " AND injected=1"
+	}
+	if onlySkipped {
+		q += " AND skip_reason != ''"
+	}
+	if filterGrep != "" {
+		q += " AND path LIKE ?"
+		params = append(params, "%"+filterGrep+"%")
+	}
+	q += " ORDER BY id DESC LIMIT ?"
+	params = append(params, limit)
+
+	rows, err := db.Query(q, params...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "query: %v\n", err)
+		os.Exit(1)
+	}
+	defer rows.Close()
+
+	type logRow struct {
+		Timestamp     string `json:"timestamp"`
+		SessionID     string `json:"session_id"`
+		EventName     string `json:"event_name"`
+		ToolName      string `json:"tool_name"`
+		Path          string `json:"path"`
+		RuleID        string `json:"rule_id"`
+		Injected      bool   `json:"injected"`
+		SkipReason    string `json:"skip_reason"`
+		InjectionSize int    `json:"injection_size"`
+		BudgetUsed    int    `json:"budget_used"`
+		LatencyMS     int64  `json:"latency_ms"`
+	}
+	var out []logRow
+	for rows.Next() {
+		var r logRow
+		var inj int
+		if err := rows.Scan(&r.Timestamp, &r.SessionID, &r.EventName, &r.ToolName,
+			&r.Path, &r.RuleID, &inj, &r.SkipReason, &r.InjectionSize,
+			&r.BudgetUsed, &r.LatencyMS); err != nil {
+			continue
+		}
+		r.Injected = inj == 1
+		out = append(out, r)
+	}
+
+	if jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		for _, r := range out {
+			enc.Encode(r)
+		}
+		return
+	}
+
+	if len(out) == 0 {
+		fmt.Fprintf(os.Stderr, "no rows matched (try --days %d --limit %d or relax filters)\n", days, limit)
+		return
+	}
+
+	// Human output: rows newest-first. Each line is a stable KV sequence so
+	// `grep event=UserPromptSubmit` / `awk '$0 ~ /rule=remember/'` still work.
+	for _, r := range out {
+		verdict := "observe"
+		if r.Injected {
+			verdict = "INJECT"
+		} else if r.SkipReason != "" {
+			verdict = "skip:" + r.SkipReason
+		}
+		line := fmt.Sprintf("%s  event=%-17s tool=%-10s rule=%-30s verdict=%-15s sess=%s",
+			r.Timestamp, r.EventName, nz(r.ToolName), nz(r.RuleID), verdict, shortSessionID(r.SessionID, 8))
+		if r.Path != "" {
+			line += "  path=" + r.Path
+		}
+		if r.Injected || r.InjectionSize > 0 {
+			line += fmt.Sprintf("  bytes=%d", r.InjectionSize)
+		}
+		fmt.Println(line)
+	}
+	fmt.Fprintf(os.Stderr, "\n(%d rows in last %dd; --limit %d, --days %d)\n", len(out), days, limit, days)
+}
+
+// nz returns "-" when s is empty, keeping log columns aligned.
+func nz(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// shortSessionID truncates a UUID-ish session id for visual density. Named
+// explicitly to avoid colliding with the workspace-aware `shortID` in safe.go.
+func shortSessionID(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// handleToolHookEvents prints the list of hook events this binary recognizes.
+// Useful when wiring up ~/.claude/settings.json: any event printed here can
+// be safely registered; anything else will be audit-only with "unknown event".
+func handleToolHookEvents() {
+	fmt.Printf("%d hook events recognized (per Claude Code settings.json allowlist):\n\n", len(AllHookEvents))
+	for _, e := range AllHookEvents {
+		matcher := "audit-only"
+		switch e {
+		case HookEventPreToolUse:
+			matcher = "rule-driven (tools + match glob)"
+		case HookEventUserPromptSubmit:
+			matcher = "rule-driven (match_prompt regex)"
+		}
+		fmt.Printf("  %-20s %s\n", e, matcher)
+	}
+	fmt.Println("\nEvents not listed above are still accepted — their event_name is recorded verbatim in the audit table, flagged as unknown.")
+}
+
+// handleToolHookGC deletes audit rows older than `days`. Defaults to 30 days.
+// Safe to run concurrently (DELETE is atomic). Reports how many rows were
+// removed and the resulting table row count.
+func handleToolHookGC(args []string) {
+	days := 30
 	for i, a := range args {
 		if a == "--days" && i+1 < len(args) {
 			fmt.Sscanf(args[i+1], "%d", &days)
+		}
+	}
+	if days < 1 {
+		fmt.Fprintf(os.Stderr, "refusing to gc with --days < 1 (would delete everything)\n")
+		os.Exit(1)
+	}
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open DB: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	cutoff := time.Now().AddDate(0, 0, -days).Format(time.RFC3339)
+	res, err := db.Exec(`DELETE FROM tool_hook_audit WHERE timestamp < ?`, cutoff)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gc failed: %v\n", err)
+		os.Exit(1)
+	}
+	deleted, _ := res.RowsAffected()
+
+	var remaining int
+	db.QueryRow(`SELECT COUNT(*) FROM tool_hook_audit`).Scan(&remaining)
+
+	// VACUUM is cheap after a big DELETE and keeps the sqlite file from
+	// growing unbounded. Best-effort; ignore errors.
+	_, _ = db.Exec(`VACUUM`)
+
+	fmt.Printf("deleted %d rows older than %d days (cutoff=%s); %d rows remaining\n",
+		deleted, days, cutoff, remaining)
+}
+
+func handleToolHookStats(args []string) {
+	days := 7
+	jsonOut := false
+	for i, a := range args {
+		switch a {
+		case "--days":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &days)
+			}
+		case "--json":
+			jsonOut = true
 		}
 	}
 	db, err := openDB()
@@ -557,9 +1168,88 @@ func handleToolHookStats(args []string) {
 		fmt.Fprintf(os.Stderr, "query: %v\n", err)
 		os.Exit(1)
 	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	enc.Encode(stats)
+	if jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(stats)
+		return
+	}
+	printToolHookStatsHuman(stats)
+}
+
+// printToolHookStatsHuman is the default stats output — aligned columns
+// optimized for reading and grep-ability. Key lines start with a stable
+// prefix (`rule=`, `event=`, `tool=`, `path=`) so `grep` and `awk` work.
+func printToolHookStatsHuman(s *toolHookStats) {
+	fmt.Printf("══ tool-hook stats (last %d days) ══\n", s.DaysQueried)
+	fmt.Printf("calls=%d  matched=%d  injected=%d  avg_latency_ms=%d\n\n",
+		s.TotalCalls, s.MatchedCalls, s.InjectedCalls, s.AvgLatencyMS)
+
+	if len(s.ByEvent) > 0 {
+		fmt.Println("── by event ──")
+		keys := sortedStringKeys(s.ByEvent)
+		for _, k := range keys {
+			fmt.Printf("event=%-20s calls=%d\n", k, s.ByEvent[k])
+		}
+		fmt.Println()
+	}
+
+	if len(s.ByRule) > 0 {
+		fmt.Println("── by rule ──")
+		// Sort by calls descending for visual ranking.
+		type kv struct {
+			k string
+			v toolHookRuleS
+		}
+		list := make([]kv, 0, len(s.ByRule))
+		for k, v := range s.ByRule {
+			list = append(list, kv{k, v})
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i].v.Calls > list[j].v.Calls })
+		for _, e := range list {
+			fmt.Printf("rule=%-36s calls=%-5d injected=%-5d avg_bytes=%-5d avg_latency_ms=%d\n",
+				e.k, e.v.Calls, e.v.Injected, e.v.AvgInjection, e.v.AvgLatencyMS)
+		}
+		fmt.Println()
+	}
+
+	if len(s.ByTool) > 0 {
+		fmt.Println("── by tool (PreToolUse/PostToolUse) ──")
+		keys := sortedStringKeys(s.ByTool)
+		for _, k := range keys {
+			label := k
+			if label == "" {
+				label = "<none>"
+			}
+			fmt.Printf("tool=%-14s calls=%d\n", label, s.ByTool[k])
+		}
+		fmt.Println()
+	}
+
+	if len(s.TopPaths) > 0 {
+		fmt.Println("── top paths ──")
+		for _, p := range s.TopPaths {
+			fmt.Printf("path=%-80s calls=%d\n", trimForDisplay(p.Path, 80), p.Count)
+		}
+		fmt.Println()
+	}
+
+	if len(s.SkipBreakdown) > 0 {
+		fmt.Println("── skip reasons ──")
+		keys := sortedStringKeys(s.SkipBreakdown)
+		for _, k := range keys {
+			fmt.Printf("skip=%-10s calls=%d\n", k, s.SkipBreakdown[k])
+		}
+	}
+}
+
+func sortedStringKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func handleToolHookTest(args []string) {
