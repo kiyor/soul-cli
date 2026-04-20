@@ -690,8 +690,10 @@ func geminiExtractSystemText(system any) string {
 }
 
 // geminiSeenToolTypes tracks unique Anthropic tool `type` values observed on
-// incoming requests. Same pattern as codexSeenToolTypes — diagnostic only.
-var geminiSeenToolTypes = map[string]bool{}
+// incoming requests. Same pattern as codexSeenToolTypes — diagnostic only,
+// concurrent-safe via sync.Map so multiple in-flight requests can race on
+// first-sighting without panicking the process.
+var geminiSeenToolTypes sync.Map // map[string]struct{}
 
 // geminiTranslateTools converts Anthropic tool definitions to a single Gemini
 // Tool entry with many function declarations (Gemini's preferred shape).
@@ -713,9 +715,10 @@ func geminiTranslateTools(tools []any) []geminiTool {
 		typ, _ := obj["type"].(string)
 		params, _ := obj["input_schema"].(map[string]any)
 
+		// LoadOrStore is atomic — concurrent requests with the same tool key
+		// only emit the diagnostic log line once.
 		diagKey := typ + "|" + name
-		if !geminiSeenToolTypes[diagKey] {
-			geminiSeenToolTypes[diagKey] = true
+		if _, loaded := geminiSeenToolTypes.LoadOrStore(diagKey, struct{}{}); !loaded {
 			fmt.Fprintf(os.Stderr, "[%s] gemini tool seen: type=%q name=%q has_schema=%v\n",
 				appName, typ, name, params != nil)
 		}

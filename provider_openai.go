@@ -23,19 +23,22 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
 // codexSeenEventTypes tracks unique SSE event types observed across all
-// requests. Lazily-initialised diagnostic map; no mutex because writes are
-// rare and worst-case is a duplicate log line. Cleared on process restart.
-var codexSeenEventTypes map[string]bool
+// requests. Diagnostic only; concurrent-safe via sync.Map so multiple in-flight
+// proxy requests can race on first-sighting without panicking the process.
+// Cleared on process restart.
+var codexSeenEventTypes sync.Map // map[string]struct{}
 
 // codexSeenToolTypes tracks unique Anthropic tool `type` values observed on
 // incoming requests. Same contract as codexSeenEventTypes — diagnostic only,
-// no mutex. Lets us learn what CC actually sends (e.g. web_search_20250305,
-// bash_20250124, text_editor_*, custom function tools with no `type` field).
-var codexSeenToolTypes map[string]bool
+// concurrent-safe via sync.Map. Lets us learn what CC actually sends (e.g.
+// web_search_20250305, bash_20250124, text_editor_*, custom function tools
+// with no `type` field).
+var codexSeenToolTypes sync.Map // map[string]struct{}
 
 const (
 	codexEndpoint = "https://chatgpt.com/backend-api/codex/responses"
@@ -533,9 +536,6 @@ func codexExtractContentText(content any) string {
 //     these have no equivalent; upstream cannot execute them. We strip them
 //     to avoid malformed function tools with empty parameter schemas.
 func codexTranslateTools(tools []any) []codexToolSpec {
-	if codexSeenToolTypes == nil {
-		codexSeenToolTypes = map[string]bool{}
-	}
 	var out []codexToolSpec
 	for _, t := range tools {
 		obj, ok := t.(map[string]any)
@@ -550,9 +550,10 @@ func codexTranslateTools(tools []any) []codexToolSpec {
 		// Diagnostic: log each distinct tool type once per proxy lifetime.
 		// Key is type|name so we see both server tools (type=X) and client
 		// tools (type="" or type="custom" + unique name).
+		// LoadOrStore is atomic — multiple in-flight requests on the same key
+		// will only emit the log line once.
 		diagKey := typ + "|" + name
-		if !codexSeenToolTypes[diagKey] {
-			codexSeenToolTypes[diagKey] = true
+		if _, loaded := codexSeenToolTypes.LoadOrStore(diagKey, struct{}{}); !loaded {
 			fmt.Fprintf(os.Stderr, "[%s] codex tool seen: type=%q name=%q has_schema=%v\n",
 				appName, typ, name, params != nil)
 		}
@@ -984,11 +985,47 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		}
 		fmt.Fprintf(os.Stderr, "[%s] codex upstream %d for model=%s: %s\n",
 			appName, resp.StatusCode, targetModel, snippet)
+
+		// Map upstream HTTP status to Anthropic-shaped error type. CC/SDK
+		// clients branch on `error.type`: rate_limit_error triggers exponential
+		// backoff, while api_error gets a fast retry that compounds upstream
+		// throttle. Lumping everything into api_error (the previous behaviour)
+		// breaks 429 backoff and disguises 4xx config errors as transient
+		// server faults.
+		errType := "api_error"
+		switch {
+		case resp.StatusCode == http.StatusTooManyRequests:
+			errType = "rate_limit_error"
+		case resp.StatusCode == http.StatusUnauthorized:
+			errType = "authentication_error"
+		case resp.StatusCode == http.StatusForbidden:
+			errType = "permission_error"
+		case resp.StatusCode == http.StatusNotFound:
+			errType = "not_found_error"
+		case resp.StatusCode == http.StatusRequestEntityTooLarge:
+			errType = "request_too_large"
+		case resp.StatusCode >= 400 && resp.StatusCode < 500:
+			errType = "invalid_request_error"
+		case resp.StatusCode >= 500:
+			errType = "api_error"
+		}
+
+		// On 429, propagate Retry-After so CC backs off the right amount.
+		// Prefer upstream's value; fall back to a 1s floor if missing so CC
+		// doesn't immediately stampede.
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				w.Header().Set("Retry-After", ra)
+			} else {
+				w.Header().Set("Retry-After", "1")
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		errMsg, _ := json.Marshal(map[string]any{
 			"type":  "error",
-			"error": map[string]string{"type": "api_error", "message": string(upBody)},
+			"error": map[string]string{"type": errType, "message": string(upBody)},
 		})
 		w.Write(errMsg)
 		return
@@ -1137,15 +1174,12 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 
 		eventType, _ := event["type"].(string)
 
-		// Diagnostic: log every distinct event type seen, once per session.
+		// Diagnostic: log every distinct event type seen, once per process.
 		// Lets us discover whether the chatgpt codex endpoint actually emits
 		// reasoning_summary_* events (private endpoint may differ from
-		// public /v1/responses spec).
-		if codexSeenEventTypes == nil {
-			codexSeenEventTypes = map[string]bool{}
-		}
-		if !codexSeenEventTypes[eventType] {
-			codexSeenEventTypes[eventType] = true
+		// public /v1/responses spec). LoadOrStore is atomic — concurrent
+		// SSE streams seeing the same event type only log it once.
+		if _, loaded := codexSeenEventTypes.LoadOrStore(eventType, struct{}{}); !loaded {
 			// Sample a small slice of the event payload.
 			snip, _ := json.Marshal(event)
 			if len(snip) > 200 {
