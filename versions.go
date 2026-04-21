@@ -158,8 +158,10 @@ func handleBuild() {
 		commitHash = strings.TrimSpace(string(out))
 	}
 	now := time.Now().Format("2006-01-02T15:04:05")
-	ldflags := fmt.Sprintf("-X main.buildDate=%s -X main.buildCommit=%s -X main.defaultAppName=%s",
-		now, commitHash, appName)
+	// Only defaultAppName is baked in; commit/date are persisted to a sidecar
+	// .meta file below so CDHash is stable across commits. This matches the
+	// main Makefile's strategy — see loadBuildMeta() in main.go.
+	ldflags := fmt.Sprintf("-X main.defaultAppName=%s", appName)
 	cmd := exec.Command("go", "build", "-ldflags", ldflags, "-o", tmpBin, ".")
 	cmd.Dir = srcDir
 	cmd.Stdout = os.Stdout
@@ -208,6 +210,13 @@ func handleBuild() {
 			os.Exit(1)
 		}
 		os.Remove(tmpBin)
+	}
+
+	// Write sidecar .meta so the runtime can surface commit/date without
+	// embedding them in the binary. Keeps CDHash stable across commits.
+	metaContent := fmt.Sprintf("version=%s\ncommit=%s\ndate=%s\n", buildVersion, commitHash, now)
+	if err := os.WriteFile(appBin+".meta", []byte(metaContent), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "["+appName+"] warning: failed to write .meta: %v\n", err)
 	}
 
 	fmt.Printf("["+appName+"] build successful ✅ (%s)\n", appBin)

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 出站网络访问（WAN + LAN） -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- 入站网络服务（server mode 需要） -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <!-- Allow unsigned libs for Go runtime plugins -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- Allow DYLD env for debugging -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>

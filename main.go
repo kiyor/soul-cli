@@ -20,12 +20,21 @@ import (
 //go:embed VERSION
 var embeddedVersion string
 
-// Injected at build time: go build -ldflags "-X main.buildDate=xxx -X main.buildCommit=xxx -X main.defaultAppName=weiran"
+// buildVersion is embedded from the VERSION file at compile time (affects
+// the binary content — if you bump VERSION, CDHash changes, which is desired).
+// defaultAppName is injected via ldflags (stable per APP_NAME target).
+//
+// buildCommit / buildDate are intentionally NOT ldflags-injected — they are
+// loaded at runtime from an external meta file (see initBuildMeta). This
+// keeps the binary byte-stable across commits: signing only changes when
+// real code or VERSION change. Without this, every git commit would alter
+// the embedded build metadata, change the CDHash, and macOS Local Network
+// Privacy would re-prompt for LAN permission on each rebuild.
 var (
 	buildVersion   = ""
 	buildDate      = "unknown"
 	buildCommit    = "unknown"
-	defaultAppName = "" // if set via ldflags, takes priority over os.Args[0]
+	defaultAppName = "" // injected via ldflags; takes priority over os.Args[0]
 )
 
 var (
@@ -466,11 +475,57 @@ func loadConfig() {
 	}
 }
 
+// loadBuildMeta reads buildCommit / buildDate from an external meta file next
+// to the installed binary. Format is simple `key=value` lines. If the file is
+// missing or malformed, buildCommit / buildDate stay "unknown".
+//
+// Why external instead of ldflags: see the comment on buildCommit/buildDate
+// declaration. Summary: keeps the binary byte-stable across commits so
+// macOS Local Network Privacy (TCC) doesn't re-prompt per rebuild.
+func loadBuildMeta() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	// resolve symlinks so the meta sits next to the real file
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	metaPath := exe + ".meta"
+	raw, err := os.ReadFile(metaPath)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		switch k {
+		case "commit":
+			if v != "" {
+				buildCommit = v
+			}
+		case "date":
+			if v != "" {
+				buildDate = v
+			}
+		}
+	}
+}
+
 func init() {
 	traceT0 := time.Now()
 	if buildVersion == "" {
 		buildVersion = strings.TrimSpace(embeddedVersion)
 	}
+	loadBuildMeta()
 	// Capture original working directory before any chdir
 	launchDir, _ = os.Getwd()
 	initAppName()
@@ -542,6 +597,8 @@ Subcommands:
   {{NAME}} server --host 0.0.0.0 expose to network (default 127.0.0.1)
   {{NAME}} server --token SECRET  set auth token (or use WEIRAN_SERVER_TOKEN env / config.json)
   {{NAME}} token                 print fresh Claude OAuth access_token (for SSH shells; IPCs to server)
+  {{NAME}} netprobe              one-shot LAN health sweep (parallel HTTP/TCP probes; one approval covers all)
+  {{NAME}} netprobe --only vpn   filter categories (service/gpu/vpn/infra/extra); --json / --list / --timeout 2s / --extra <url>
   {{NAME}} clean                 clean old session temp directories under /tmp
   {{NAME}} sessions [keyword]    search sessions (fuzzy match on title/content/project)
   {{NAME}} ss [keyword]          same as above (shorthand)
@@ -749,6 +806,9 @@ func main() {
 		tracePoint("main:dispatch_tool_hook", traceMain)
 		handleToolHook(extra)
 		return
+	case "netprobe":
+		handleNetProbe(extra)
+		return
 	}
 
 	initSessionDir()
@@ -762,7 +822,7 @@ func main() {
 		if defaultModel != "" && (mode == "cron" || mode == "heartbeat" || mode == "evolve") {
 			overrideModel = defaultModel
 			fmt.Fprintf(os.Stderr, "[%s] using defaultModel: %s\n", appName, defaultModel)
-		} else if defaultInteractiveModel != "" && (mode == "" || mode == "print") {
+		} else if defaultInteractiveModel != "" && (mode == "" || mode == "interactive" || mode == "print") {
 			overrideModel = defaultInteractiveModel
 			fmt.Fprintf(os.Stderr, "[%s] using defaultInteractiveModel: %s\n", appName, defaultInteractiveModel)
 		}
@@ -1162,6 +1222,10 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			return
 		case "tool-hook":
 			mode = "tool-hook"
+			extra = args[i+1:]
+			return
+		case "netprobe":
+			mode = "netprobe"
 			extra = args[i+1:]
 			return
 		case "--cron":

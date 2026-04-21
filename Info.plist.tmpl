@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>me.kiyor.@@APP_NAME@@</string>
+    <key>CFBundleName</key>
+    <string>@@APP_NAME@@</string>
+    <key>CFBundleExecutable</key>
+    <string>@@APP_NAME@@</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@@VERSION@@</string>
+    <key>CFBundleVersion</key>
+    <string>@@VERSION@@</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <!-- Critical for macOS Sonoma+ Local Network Privacy.
+         Without this key, Apple's TCC subsystem falls back to tracking
+         the app by CDHash, which means every rebuild creates a new TCC
+         record. With it, TCC tracks by (signing-identity, CFBundleIdentifier)
+         so the LAN permission grant persists across rebuilds. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>@@APP_NAME@@ needs local network access to probe LAN services (netprobe), call local MCP servers, and coordinate with other on-LAN agent instances.</string>
+</dict>
+</plist>
