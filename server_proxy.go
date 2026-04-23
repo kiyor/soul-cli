@@ -30,6 +30,28 @@ type proxyConfig struct {
 	Upstream string `json:"upstream"` // default https://api.anthropic.com
 }
 
+// parseSinceUnix turns an ISO-8601 / RFC3339 timestamp from ?since= / ?until=
+// query params into a Unix epoch second. We cannot compare ?since= directly
+// against proxy_requests.time via string ordering: the DB stores
+// `2026-04-22T23:53:43-07:00` (local TZ) while the frontend's Date.toISOString()
+// emits `2026-04-23T05:53:59.055067Z` (UTC with Z suffix) — same instant,
+// totally different bytes, so lexicographic `time >= ?` silently drops
+// (or returns) the wrong rows. Callers should pair this with
+// `CAST(strftime('%s', time) AS INTEGER) >= ?` so SQLite does the TZ math.
+func parseSinceUnix(s string) (int64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	// Try RFC3339Nano first (covers the browser-emitted `…Z` with ms precision),
+	// then plain RFC3339 (`±HH:MM` offsets), then a couple of common variants.
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.Unix(), true
+		}
+	}
+	return 0, false
+}
+
 func defaultProxyConfig() proxyConfig {
 	return proxyConfig{
 		Enabled:  false,
@@ -1038,13 +1060,19 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 		if q.Get("error") == "true" {
 			where = append(where, "is_error = 1")
 		}
+		// Use Unix-epoch compare so DB's local-tz time and frontend's UTC ?since=
+		// agree on the same instant (see parseSinceUnix docstring above).
 		if since := q.Get("since"); since != "" {
-			where = append(where, "time >= ?")
-			args = append(args, since)
+			if ts, ok := parseSinceUnix(since); ok {
+				where = append(where, "CAST(strftime('%s', time) AS INTEGER) >= ?")
+				args = append(args, ts)
+			}
 		}
 		if until := q.Get("until"); until != "" {
-			where = append(where, "time <= ?")
-			args = append(args, until)
+			if ts, ok := parseSinceUnix(until); ok {
+				where = append(where, "CAST(strftime('%s', time) AS INTEGER) <= ?")
+				args = append(args, ts)
+			}
 		}
 		if st := q.Get("status"); st != "" {
 			switch st {
@@ -1332,13 +1360,19 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 		if q.Get("error") == "true" {
 			where = append(where, "is_error = 1")
 		}
+		// Use Unix-epoch compare so DB's local-tz time and frontend's UTC ?since=
+		// agree on the same instant (see parseSinceUnix docstring above).
 		if since := q.Get("since"); since != "" {
-			where = append(where, "time >= ?")
-			args = append(args, since)
+			if ts, ok := parseSinceUnix(since); ok {
+				where = append(where, "CAST(strftime('%s', time) AS INTEGER) >= ?")
+				args = append(args, ts)
+			}
 		}
 		if until := q.Get("until"); until != "" {
-			where = append(where, "time <= ?")
-			args = append(args, until)
+			if ts, ok := parseSinceUnix(until); ok {
+				where = append(where, "CAST(strftime('%s', time) AS INTEGER) <= ?")
+				args = append(args, ts)
+			}
 		}
 		if st := q.Get("status"); st != "" {
 			switch st {
@@ -1401,13 +1435,19 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 			where = append(where, "event_type LIKE ?")
 			args = append(args, "%"+et+"%")
 		}
+		// Use Unix-epoch compare so DB's local-tz time and frontend's UTC ?since=
+		// agree on the same instant (see parseSinceUnix docstring above).
 		if since := q.Get("since"); since != "" {
-			where = append(where, "time >= ?")
-			args = append(args, since)
+			if ts, ok := parseSinceUnix(since); ok {
+				where = append(where, "CAST(strftime('%s', time) AS INTEGER) >= ?")
+				args = append(args, ts)
+			}
 		}
 		if until := q.Get("until"); until != "" {
-			where = append(where, "time <= ?")
-			args = append(args, until)
+			if ts, ok := parseSinceUnix(until); ok {
+				where = append(where, "CAST(strftime('%s', time) AS INTEGER) <= ?")
+				args = append(args, ts)
+			}
 		}
 		if q.Get("payload") != "" {
 			where = append(where, "payload LIKE ?")
