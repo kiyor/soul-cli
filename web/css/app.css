@@ -1,3 +1,6 @@
+/* Alpine.js: hide cloaked elements until init completes (avoids flash). */
+[x-cloak]{display:none !important}
+
 :root,
 [data-theme="midnight"]{
   --bg0:#0b0f17;--bg1:#0f1522;--bg2:#131b2c;--bg3:#1a2540;
