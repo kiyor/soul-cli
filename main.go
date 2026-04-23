@@ -257,17 +257,40 @@ func initWorkspace() {
 	legacyDir := filepath.Join(workspace, "scripts", appName)
 	migrateAppData(legacyDir, appDir)
 
-	// Source directory: where go.mod lives (for build/update commands)
-	// Try: workspace/scripts/<appName>/ → executable dir → not found
-	srcDir = filepath.Join(workspace, "scripts", appName)
-	if _, err := os.Stat(filepath.Join(srcDir, "go.mod")); err != nil {
-		if exe, err := os.Executable(); err == nil {
-			candidate := filepath.Dir(exe)
-			if _, err := os.Stat(filepath.Join(candidate, "go.mod")); err == nil {
-				srcDir = candidate
+	// Source directory: where the CLI's own Go source lives (for build/update/evolve audit).
+	// Resolution priority:
+	//   1. Env override: <APPNAME>_SRC_DIR (e.g. WEIRAN_SRC_DIR) or generic SOUL_CLI_SRC_DIR
+	//   2. Conventional: workspace/scripts/<appName>/ with soul-cli signature files
+	//   3. Fallback: directory of the running executable (dev-mode `go run`), same signature check
+	//
+	// "soul-cli signature" = go.mod + main.go + tasks.go all present. This prevents
+	// picking up an unrelated Go project whose go.mod happens to live in a fallback dir
+	// (e.g. someone's /tmp/go.mod debug snippet).
+	srcDirEnv := strings.ToUpper(appName) + "_SRC_DIR"
+	srcDirEnv = strings.ReplaceAll(srcDirEnv, "-", "_")
+	isSoulCliSrc := func(dir string) bool {
+		for _, f := range []string{"go.mod", "main.go", "tasks.go"} {
+			if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+				return false
 			}
 		}
+		return true
 	}
+	srcDir = ""
+	if v := os.Getenv(srcDirEnv); v != "" && isSoulCliSrc(v) {
+		srcDir = v
+	} else if v := os.Getenv("SOUL_CLI_SRC_DIR"); v != "" && isSoulCliSrc(v) {
+		srcDir = v
+	} else if c := filepath.Join(workspace, "scripts", appName); isSoulCliSrc(c) {
+		srcDir = c
+	} else if exe, err := os.Executable(); err == nil {
+		c := filepath.Dir(exe)
+		if isSoulCliSrc(c) {
+			srcDir = c
+		}
+	}
+	// If nothing matched, leave srcDir empty — tasks.go's hasSourceCode() returns false
+	// and code-evolution phase is skipped cleanly instead of mis-auditing a random dir.
 
 	// Service monitor list: read from <appDir>/services.json, fallback to hardcoded defaults
 	monitoredServices = loadServices()

@@ -128,15 +128,22 @@ func defaultToolHookConfigPath() string {
 	return filepath.Join(workspace, "tool-hooks.yaml")
 }
 
-// extractToolPath pulls the file_path / path from tool_input based on tool name.
-// Returns "" if the tool has no path concept we care about.
+// extractToolPath pulls the identifying string from tool_input based on tool name.
+// For file tools this is file_path / path / notebook_path.
+// For the Skill tool we return the skill name so tool_hook_audit.path doubles as
+// per-skill invocation telemetry (`SELECT path, COUNT(*) ... WHERE tool_name='Skill'`).
+// Returns "" if the tool has no identifier we care about.
 func extractToolPath(tool string, input json.RawMessage) string {
 	var probe struct {
 		FilePath     string `json:"file_path"`
 		Path         string `json:"path"`
 		NotebookPath string `json:"notebook_path"`
+		Skill        string `json:"skill"`
 	}
 	_ = json.Unmarshal(input, &probe)
+	if tool == "Skill" && probe.Skill != "" {
+		return probe.Skill
+	}
 	switch {
 	case probe.FilePath != "":
 		return probe.FilePath

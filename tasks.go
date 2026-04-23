@@ -17,6 +17,32 @@ var evolveTemplate = template.Must(template.New("evolve").Parse(`# Self-Evolutio
 This is your daily self-evolution cycle. Follow the phases in order.
 If no evolution needed, write "No evolution inspiration today" in the report and exit.
 
+## Charter (read once, apply to every phase)
+
+### Blast Radius — Hard Caps (per cycle)
+- **20 files** changed max
+- **2000 lines** changed max
+- **3 skills** touched max
+- **1 invariant** or SOUL/IDENTITY anchor edit max
+
+Check file count BEFORE editing. At 80% of any cap → STOP editing, finish the current phase cleanly, and report partial progress. Exceeding = rollback to HEAD and record "blast_radius_exceeded" in the report.
+
+### Ethics Gate (non-negotiable — violation = ABORT that change, log, continue)
+1. **HUMAN WELFARE** — Never create tools or patterns enabling surveillance, phishing, social engineering, or behavioral manipulation of humans.
+2. **TRANSPARENCY** — All mutations must be auditable via git diff + daily notes. No hidden changes, no steganography, no config nudges without a note.
+3. **SAFETY** — Never weaken guardrails, invariants, tests, or validation to make a commit succeed. Never disable a failing test; fix the root cause or revert the change.
+4. **FIDELITY** — Never fabricate evidence (invented probe passes, invented test results, invented user consent). Honest "nothing to evolve" beats invented progress.
+5. **NO SELF-ESCALATION** — Never grant yourself new permissions, extend token/rate budgets, or add new lifecycle triggers (cron, hook, autostart) without surfacing it in the report and flagging ` + "`needs_human_review: true`" + `.
+
+If a change conflicts with any item above: ABORT that change, add ` + "`ethics_gate: <which>`" + ` to the report, move on. Do NOT try to "work around" the gate.
+
+### Reuse Before Invent
+Before creating a NEW feedback file / skill / memory topic:
+1. Grep ` + "`memory/topics/`" + ` and ` + "`memory/evolve/`" + ` for the same keyword or pattern.
+2. If something similar exists → extend it, don't duplicate.
+3. Only create new when clearly novel (different trigger, different outcome, or pattern count ≥3 in daily notes).
+Duplicate/overlap = wasted cycle + maintenance burden.
+
 ## Phase 0: Review Recent Interactions (quick scan)
 Read recent daily notes:
 {{.Notes}}
@@ -80,20 +106,60 @@ Review the probe output. If a rule shows "with mode FAIL" (severe degradation), 
 - Improve skills (better prompts, new parameters)
 - Check ` + "`memory/evolve/proposals-*.md`" + ` — any pending proposals to surface?
 
+### Phase {{.SoulStepNum}}b: Skill Inventory & Distillation (analysis only — no destructive edits)
+Run a non-invasive pass over installed skills. Output goes to a proposal file; deletions/merges require human review.
+
+1. **Inventory** — list ` + "`{{.Workspace}}/../skills/*/SKILL.md`" + ` and parse their YAML frontmatter (name, description).
+2. **Usage signal** (if available) — query sessions.db tool_hook_audit for last 7d per-skill match counts:
+   ` + "`sqlite3 {{.Workspace}}/../data/sessions.db \"SELECT rule_name, COUNT(*) FROM tool_hook_audit WHERE ts > datetime('now','-7 days') GROUP BY rule_name ORDER BY 2 DESC LIMIT 40\"`" + `
+3. **Classify** each skill:
+   - **zero-hit (7d)** + description generic → archive candidate
+   - **tight overlap** with another skill (similar name or description semantics) → merge candidate
+   - **high-hit (7d, top 20%)** → healthy, record as reference for similar future skills
+4. **Pattern gap** — scan last 3d daily notes for repeated manual actions (≥3 occurrences, same verb+object) that have NO matching skill → new-skill candidate.
+5. **Output** — write findings to ` + "`{{.Workspace}}/memory/evolve/skill-distill-{{.Today}}.md`" + ` with:
+   - ` + "`archive_candidates: [...]`" + `
+   - ` + "`merge_candidates: [[a, b, reason], ...]`" + `
+   - ` + "`new_skill_candidates: [{name, trigger_pattern, evidence_count}, ...]`" + `
+   - ` + "`healthy_skills: [...]`" + `
+
+Do NOT delete, merge, or create skills in this phase. This is analysis only. A human reviews the distill file before acting.
+
 ## Phase {{.WrapStepNum}}: Wrap Up
 - Record what was evolved today in daily notes ({{.Workspace}}/memory/{{.Today}}.md)
 - **Write report file** (auto-sends via Telegram after exit):
 ` + "```bash" + `
 cat > {{.ReportPath}} << 'RPTEOF'
-🧬 Evolution report:
+🧬 Evolution report ({{.Today}}):
+
+## Summary (structured — for automation)
+` + "```json" + `
+{
+  "cycle_date": "{{.Today}}",
+  "blast_radius": {"files_changed": 0, "lines_changed": 0, "skills_touched": 0, "exceeded": false},
+  "invariants":   {"checked": 0, "passed": 0, "failed": 0, "violations": []},
+  "fact_drift":   {"stale_refs_fixed": 0},
+  "feedback":     {"new_drafts": 0, "probed": 0, "pass": 0, "fail": 0},
+  "skill_distill":{"archive_candidates": 0, "merge_candidates": 0, "new_candidates": 0, "healthy": 0},
+  "soul_memory":  {"files_edited": []},{{if .IsDev}}
+  "code":         {"commits": 0, "files_changed": 0, "tests_passed": true},{{end}}
+  "ethics_gate":  {"aborted": 0, "reasons": []},
+  "needs_human_review": false,
+  "status": "evolved"
+}
+` + "```" + `
+
+## Narrative
 - [invariants] pass/fail count
 - [fact-drift] stale references fixed (if any)
-- [feedback] new drafts / probe results (N pass, N fail){{if .IsDev}}
+- [feedback] new drafts / probe results (N pass, N fail)
+- [skill-distill] archive/merge/new candidates (all require human review){{if .IsDev}}
 - [code] what changed and why (if any){{end}}
 - [soul/memory] what changed and why (if any)
 RPTEOF
 ` + "```" + `
-If no evolution needed, write "No evolution inspiration today, system running normally" in the report.
+If no evolution needed, set status="no-op" in the JSON block and write "No evolution inspiration today, system running normally" in the narrative.
+If the Ethics Gate or Blast Radius cap triggered, set the corresponding counters and set ` + "`needs_human_review: true`" + `.
 
 ## Principles
 - **Do it or skip it** — don't evolve for the sake of evolving
@@ -139,10 +205,18 @@ Do NOT push — the user decides when to push.
 - README.md: only if a user-visible feature was added/removed
 `))
 
-// hasSourceCode checks if the srcDir contains buildable Go source (go.mod exists)
+// hasSourceCode checks if srcDir points at a valid soul-cli Go source tree
+// (resolved in main.go; empty means nothing matched — skip code-evolution phase).
 func hasSourceCode() bool {
-	_, err := os.Stat(filepath.Join(srcDir, "go.mod"))
-	return err == nil
+	if srcDir == "" {
+		return false
+	}
+	for _, f := range []string{"go.mod", "main.go", "tasks.go"} {
+		if _, err := os.Stat(filepath.Join(srcDir, f)); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func evolveTask() string {
