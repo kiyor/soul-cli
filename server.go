@@ -39,6 +39,12 @@ var serviceWorkerJS []byte
 //go:embed web/icons
 var iconsFS embed.FS
 
+//go:embed web/css
+var cssFS embed.FS
+
+//go:embed web/js
+var jsFS embed.FS
+
 // ── Server Config ──
 
 type serverConfig struct {
@@ -2054,6 +2060,20 @@ func handleServer(args []string) {
 	mux.HandleFunc("GET /icons/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "public, max-age=604800")
 		http.StripPrefix("/icons/", http.FileServerFS(iconsSubFS)).ServeHTTP(w, r)
+	})
+
+	// Static assets split out of index.html for modularity (see web/README or
+	// commit log). CSS is large-ish (~1.6K LOC) and JS grows per feature, so
+	// keep them cacheable and separately editable.
+	cssSubFS, _ := fs.Sub(cssFS, "web/css")
+	mux.HandleFunc("GET /css/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.StripPrefix("/css/", http.FileServerFS(cssSubFS)).ServeHTTP(w, r)
+	})
+	jsSubFS, _ := fs.Sub(jsFS, "web/js")
+	mux.HandleFunc("GET /js/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.StripPrefix("/js/", http.FileServerFS(jsSubFS)).ServeHTTP(w, r)
 	})
 
 	// Serve UI — inject server config via string replacement (not text/template,
