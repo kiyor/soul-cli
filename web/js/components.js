@@ -62,7 +62,14 @@
   // doesn't matter).
   const esc = s => (global.esc ? global.esc(s) : String(s == null ? '' : s));
   const wsSend = msg => global.wsSend && global.wsSend(msg);
-  const sid = () => global.activeSessionId;
+  // activeSessionId is declared with `let` in index.html's inline script —
+  // classic-script top-level `let` goes into the shared global lexical env,
+  // NOT onto window. So we must look it up lexically, not via global.X.
+  // (Same gotcha that broke TOKEN lookup in drawer-tmux.js, commit 565ced9.)
+  const sid = () => {
+    try { return typeof activeSessionId !== 'undefined' ? activeSessionId : null; }
+    catch (_) { return null; }
+  };
 
   // Shared ID counter across all components.
   let _idCtr = 0;
