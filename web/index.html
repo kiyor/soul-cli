@@ -177,7 +177,7 @@ body{
 .login-error{color:var(--bad);font-size:12px;min-height:18px}
 
 /* ── App Shell ── */
-.app{height:100%;display:grid;grid-template-rows:var(--topbar-h) 1fr;grid-template-columns:var(--sidebar-w) 1fr}
+.app{height:100%;display:grid;grid-template-rows:var(--topbar-h) 1fr;grid-template-columns:var(--sidebar-w) 1fr;transition:grid-template-columns .28s var(--spring)}
 .app.hidden{display:none}
 
 /* ── Topbar ── */
@@ -853,6 +853,33 @@ body{
 }
 .todo-tab:hover{opacity:1}
 .todo-tab.visible{display:block}
+
+/* ── Sidebar Tab (pinned to content's left edge, symmetric to todo-tab) ── */
+.sidebar-tab{
+  position:fixed;left:var(--sidebar-w);top:50%;transform:translateY(-50%);z-index:29;
+  padding:12px 6px;border-radius:0 10px 10px 0;
+  background:linear-gradient(135deg,rgba(var(--accent-r),.92),rgba(var(--pink-r),.82));
+  color:#fff;cursor:pointer;opacity:.7;
+  transition:opacity .2s,left .28s var(--spring),transform .2s var(--spring),box-shadow .2s;
+  display:flex;flex-direction:column;align-items:center;gap:8px;
+  box-shadow:2px 0 14px rgba(var(--accent-r),.22);
+  user-select:none;-webkit-user-select:none;
+  border:1px solid rgba(255,255,255,.12);border-left:none;
+}
+.sidebar-tab.collapsed{left:0}
+.sidebar-tab:hover{opacity:1;transform:translateY(-50%) translateX(2px);box-shadow:4px 0 18px rgba(var(--accent-r),.4)}
+.sidebar-tab:active{transform:translateY(-50%) scale(.95)}
+.sidebar-tab .st-icon{
+  width:14px;height:14px;display:grid;place-items:center;
+  transition:transform .3s var(--spring);
+}
+.sidebar-tab.collapsed .st-icon{transform:rotate(180deg)}
+.sidebar-tab .st-label{
+  writing-mode:vertical-rl;text-orientation:mixed;
+  font-size:10px;font-weight:700;letter-spacing:2px;
+  text-shadow:0 1px 2px rgba(0,0,0,.2);
+}
+@media(max-width:768px){.sidebar-tab{display:none}}
 .todo-session-group{padding:8px;margin:4px 0;border-radius:8px;background:var(--bg2);cursor:pointer;transition:background .2s}
 .todo-session-group:hover{background:var(--bg3,var(--bg2))}
 .todo-session-group.active{border-left:3px solid var(--accent2);padding-left:5px}
@@ -896,6 +923,9 @@ body{
 }
 .subagent-tab:hover{opacity:1}
 .subagent-tab.visible{display:block}
+.subagent-tab .subagent-badge{display:inline-block;background:#fff;color:#a855f7;border-radius:99px;font-size:9px;padding:1px 4px;margin-left:2px;font-weight:800}
+/* Unify right-side tab widths so Todo/Agents/Tasks align (strongmind OCD fix) */
+.todo-tab,.subagent-tab,.tasks-tab{width:28px;box-sizing:border-box;text-align:center}
 .subagent-card{
   padding:10px 12px;margin:4px 0;border-radius:8px;background:var(--bg2);
   cursor:pointer;transition:background .2s;border-left:3px solid transparent;
@@ -974,6 +1004,67 @@ body{
 .task-card-output a{color:#0ea5e9;text-decoration:none}
 .task-card-output a:hover{text-decoration:underline}
 @media(max-width:768px){.tasks-drawer{width:min(320px,90vw)}}
+
+/* ── Tmux Drawer (read-only peek at tmux sessions 未然 has open) ── */
+.tmux-drawer{
+  position:fixed;right:0;top:var(--topbar-h);bottom:0;width:360px;
+  background:var(--panel-blur);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border-left:1px solid var(--border);
+  transform:translateX(100%);transition:transform .3s var(--spring),right .3s var(--spring);
+  z-index:30;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  display:flex;flex-direction:column;
+}
+.tmux-drawer.open{transform:translateX(0)}
+.tmux-drawer-header{padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;gap:8px}
+.tmux-drawer-header h3{font-size:13px;font-weight:750;color:var(--text);flex:1}
+.tmux-drawer-refresh{appearance:none;border:1px solid var(--border);background:none;color:var(--muted);font-size:12px;cursor:pointer;padding:3px 8px;border-radius:6px}
+.tmux-drawer-refresh:hover{color:var(--text);border-color:var(--accent2)}
+.tmux-drawer-close{appearance:none;border:none;background:none;color:var(--muted2);font-size:18px;cursor:pointer;width:28px;height:28px;border-radius:8px;display:grid;place-items:center}
+.tmux-drawer-close:hover{background:var(--bg2);color:var(--text)}
+.tmux-drawer-body{flex:1;padding:8px 12px;overflow-y:auto}
+.tmux-drawer-empty{padding:20px;text-align:center;color:var(--muted2);font-size:12px;line-height:1.6}
+.tmux-tab{
+  position:fixed;right:0;top:calc(50% + 132px);transform:translateY(-50%);z-index:29;
+  writing-mode:vertical-rl;text-orientation:mixed;
+  padding:10px 5px;border-radius:8px 0 0 8px;
+  background:#10b981;color:#fff;font-size:11px;font-weight:700;
+  cursor:pointer;opacity:.7;transition:opacity .2s,right .3s var(--spring);
+  letter-spacing:1px;display:none;width:28px;box-sizing:border-box;text-align:center;
+}
+.tmux-tab:hover{opacity:1}
+.tmux-tab.visible{display:block}
+.tmux-tab .tmux-badge{display:inline-block;background:#fff;color:#10b981;border-radius:99px;font-size:9px;padding:1px 4px;margin-left:2px;font-weight:800}
+.tmux-session-card{
+  padding:10px 12px;margin:4px 0;border-radius:8px;background:var(--bg2);
+  border-left:3px solid #10b981;transition:background .2s;cursor:pointer;
+}
+.tmux-session-card:hover{background:var(--bg3,var(--bg2))}
+.tmux-session-card.attached{border-left-color:#f59e0b}
+.tmux-session-top{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:4px}
+.tmux-session-name{font-size:12px;font-weight:700;color:var(--text);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tmux-session-badges{display:flex;gap:4px;flex-shrink:0}
+.tmux-badge-pill{font-size:9px;font-weight:700;padding:1px 5px;border-radius:99px;background:rgba(16,185,129,.12);color:#10b981;letter-spacing:.3px}
+.tmux-badge-pill.attached{background:rgba(245,158,11,.15);color:#f59e0b}
+.tmux-session-meta{font-size:10px;color:var(--muted2);font-family:var(--mono);display:flex;justify-content:space-between;gap:6px;margin-bottom:6px}
+.tmux-window-row{display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:5px;font-size:11px;background:var(--bg);margin-bottom:3px;font-family:var(--mono)}
+.tmux-window-row.active{background:rgba(16,185,129,.10)}
+.tmux-window-row.web{background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25)}
+.tmux-window-row.web.active{background:rgba(99,102,241,.18);border-color:rgba(99,102,241,.45)}
+.tmux-web-badge{flex:1;color:#6366f1;font-size:10px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tmux-web-open{display:inline-block;padding:2px 8px;background:#6366f1;color:#fff!important;text-decoration:none;border-radius:4px;font-size:10px;font-weight:700;flex-shrink:0}
+.tmux-web-open:hover{background:#4f46e5}
+.tmux-window-idx{color:var(--muted2);min-width:20px;text-align:right}
+.tmux-window-name{color:var(--text);font-weight:600;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tmux-window-cmd{color:#10b981;font-size:10px}
+.tmux-window-path{flex:1;color:var(--muted2);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;direction:rtl}
+.tmux-preview{
+  margin-top:6px;padding:8px 10px;background:#000;color:#d1d5db;
+  border-radius:6px;font-size:10.5px;font-family:var(--mono);
+  white-space:pre;overflow-x:auto;max-height:260px;overflow-y:auto;line-height:1.35;
+}
+.tmux-preview.loading{color:var(--muted2)}
+.tmux-preview.error{color:#f87171;white-space:pre-wrap}
+@media(max-width:768px){.tmux-drawer{width:min(340px,92vw)}}
 
 /* ── Output file viewer modal ── */
 .file-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;display:none;align-items:center;justify-content:center;padding:16px}
@@ -1553,6 +1644,9 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 @media(min-width:769px){
   .menu-btn{display:none !important}
   .sidebar-backdrop{display:none !important}
+  .app.sb-collapsed{grid-template-columns:0 1fr}
+  .app.sb-collapsed .sidebar{opacity:0;pointer-events:none;transition:opacity .18s ease-out}
+  .sidebar{transition:opacity .22s ease-in .06s}
 }
 
 /* ── Btn helpers ── */
@@ -1742,6 +1836,10 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 <div class="status-bar" id="status-bar"></div>
 
 <!-- Todo Drawer -->
+<div class="sidebar-tab" id="sidebar-tab" onclick="toggleDesktopSidebar()" title="Toggle sidebar">
+  <div class="st-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg></div>
+  <div class="st-label">SESSIONS</div>
+</div>
 <div class="todo-tab" id="todo-tab" onclick="toggleTodoDrawer()">📋 Todo</div>
 <div class="todo-drawer" id="todo-drawer">
   <div class="todo-drawer-header">
@@ -1754,7 +1852,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 </div>
 
 <!-- Subagent Drawer -->
-<div class="subagent-tab" id="subagent-tab" onclick="toggleSubagentDrawer()">🔗 Agents</div>
+<div class="subagent-tab" id="subagent-tab" onclick="toggleSubagentDrawer()">🔗 Agents <span class="subagent-badge" id="subagent-badge" style="display:none">0</span></div>
 <div class="subagent-drawer" id="subagent-drawer">
   <div class="subagent-drawer-header">
     <h3>🔗 Subagents</h3>
@@ -1774,6 +1872,19 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   </div>
   <div class="tasks-drawer-body" id="tasks-drawer-body">
     <div class="tasks-drawer-empty">暂无后台任务</div>
+  </div>
+</div>
+
+<!-- Tmux Drawer (read-only peek at tmux sessions 未然 has open) -->
+<div class="tmux-tab" id="tmux-tab" onclick="toggleTmuxDrawer()">🖥️ tmux <span class="tmux-badge" id="tmux-badge" style="display:none">0</span></div>
+<div class="tmux-drawer" id="tmux-drawer">
+  <div class="tmux-drawer-header">
+    <h3>🖥️ tmux sessions</h3>
+    <button class="tmux-drawer-refresh" onclick="loadTmuxSessions(true)" title="Refresh">↻</button>
+    <button class="tmux-drawer-close" onclick="toggleTmuxDrawer()">&times;</button>
+  </div>
+  <div class="tmux-drawer-body" id="tmux-drawer-body">
+    <div class="tmux-drawer-empty">加载中…</div>
   </div>
 </div>
 
@@ -2766,7 +2877,12 @@ function handleWSMessage(msg){
           currentModel=msg.session.model;
           document.getElementById('model-badge').textContent=currentModel;
           contextMax=getContextWindow(currentModel);
-          updateContextBar(0);
+          // Restore peak from server-side snapshot so the ctx bar doesn't
+          // flash 0% until the next turn. Server updates this on every
+          // assistant message with usage, so it survives resume/reload.
+          const peak=+(msg.session.peak_context_tokens||0);
+          contextTokensPeak=peak>0?peak:0;
+          updateContextBar(contextTokensPeak);
           syncSettingsDropdowns();
         }
         if(isMobile)closeSidebar();
@@ -3040,7 +3156,12 @@ function selectSession(id){
     currentModel=s.model;
     document.getElementById('model-badge').textContent=currentModel;
     contextMax=getContextWindow(currentModel);
-    updateContextBar(0);
+    // Restore peak from session snapshot (updated by server on every
+    // assistant usage) so switching back to a session shows its real
+    // ctx % instead of 0 until the next turn.
+    const peak=+(s.peak_context_tokens||0);
+    contextTokensPeak=peak>0?peak:0;
+    updateContextBar(contextTokensPeak);
     syncSettingsDropdowns();
   }
   // Update cost badge
@@ -3307,6 +3428,31 @@ async function cancelAUQ(btn){
       body:JSON.stringify({request_id:requestId, cancelled:true}),
     });
   }catch(e){console.error('cancel-auq error:',e)}
+}
+
+// Silently cancel any active (unsubmitted) AskUserQuestion panels.
+// Called from sendMessage() so that typing a free-text reply auto-skips
+// pending AUQ prompts without requiring a click on the "跳过" button.
+// Returns the number of panels that were auto-skipped.
+async function autoSkipActiveAUQ(){
+  if(!activeSessionId)return 0;
+  const containers=document.querySelectorAll('.auq-container:not(.submitted)');
+  if(!containers.length)return 0;
+  const jobs=[];
+  containers.forEach(container=>{
+    const requestId=container.dataset.requestId;
+    if(!requestId)return;
+    lockAUQ(container,'已跳过（改用输入框回复）');
+    jobs.push(
+      fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/answer-question`,{
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},
+        body:JSON.stringify({request_id:requestId, cancelled:true}),
+      }).catch(e=>console.error('auto-skip-auq error:',e))
+    );
+  });
+  await Promise.all(jobs);
+  return containers.length;
 }
 
 function lockAUQ(container, confirmText){
@@ -3823,6 +3969,11 @@ async function sendMessage(){
   // Handle built-in slash commands client-side
   if(text.startsWith('/')&&!pendingFiles.length&&handleSlashSend(text))return;
 
+  // If an AskUserQuestion panel is still open, typing a free-text reply
+  // implicitly means "skip those questions". Auto-cancel before sending so
+  // the subprocess unblocks and the new message lands on a clean turn.
+  await autoSkipActiveAUQ();
+
   // Upload pending images first
   let imgMarkdown='';
   if(pendingFiles.length){
@@ -3945,9 +4096,11 @@ async function handleVoiceData(){
     const data=await r.json();
     if(!r.ok)throw new Error(data.error||'transcription failed');
     if(data.transcript){
-      // Put transcribed text into input box, let user send manually
+      // Put transcribed text into input box, let user send manually.
+      // Prefix with [voice] so the assistant knows this came from speech-to-text
+      // and can interpret zh/en code-switching errors charitably.
       const inp=document.getElementById('input');
-      inp.value=data.transcript;
+      inp.value='[voice] '+data.transcript;
       inp.focus();
       inp.dispatchEvent(new Event('input'));
     }
@@ -4378,6 +4531,39 @@ function closeSidebar(){
   bd.classList.remove('show');
   setTimeout(()=>{if(!sb.classList.contains('open')&&isMobile)sb.style.display='none'},300);
 }
+// Desktop sidebar collapse toggle
+function toggleDesktopSidebar(){
+  const app=document.getElementById('app');
+  const tab=document.getElementById('sidebar-tab');
+  if(!app)return;
+  const collapsed=app.classList.toggle('sb-collapsed');
+  if(tab)tab.classList.toggle('collapsed',collapsed);
+  try{localStorage.setItem('weiran.sidebarCollapsed',collapsed?'1':'0')}catch(e){}
+}
+// Restore collapsed state on load
+function restoreSidebarCollapsedState(){
+  try{
+    const collapsed=localStorage.getItem('weiran.sidebarCollapsed')==='1';
+    if(collapsed){
+      const app=document.getElementById('app');
+      const tab=document.getElementById('sidebar-tab');
+      if(app)app.classList.add('sb-collapsed');
+      if(tab)tab.classList.add('collapsed');
+    }
+  }catch(e){}
+}
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',restoreSidebarCollapsedState);
+}else{
+  restoreSidebarCollapsedState();
+}
+// Keyboard shortcut: Cmd/Ctrl + \
+document.addEventListener('keydown',function(e){
+  if((e.metaKey||e.ctrlKey)&&e.key==='\\'&&!isMobile){
+    e.preventDefault();
+    toggleDesktopSidebar();
+  }
+});
 
 // ── Todo Drawer (cross-session aggregated) ──
 let currentTodos=[];
@@ -4592,6 +4778,210 @@ function gcSessionTasks(){
   renderTasksDrawer();
 }
 
+// ── Tmux Drawer (read-only peek at tmux sessions, separate from Claude sessions) ──
+let tmuxSessions=[];
+let tmuxPollTimer=null;
+let tmuxExpanded=new Set(); // session names currently showing a capture preview
+let tmuxPreviewCache={}; // target → content
+let tmuxLastFetch=0;
+
+function toggleTmuxDrawer(){
+  const d=document.getElementById('tmux-drawer');
+  const opening=!d.classList.contains('open');
+  d.classList.toggle('open');
+  if(opening){
+    loadTmuxSessions(true);
+    // Auto-refresh every 5s while drawer is open
+    if(tmuxPollTimer)clearInterval(tmuxPollTimer);
+    tmuxPollTimer=setInterval(()=>loadTmuxSessions(false),5000);
+  }else{
+    if(tmuxPollTimer){clearInterval(tmuxPollTimer);tmuxPollTimer=null}
+  }
+}
+
+async function loadTmuxSessions(forceRender){
+  try{
+    const resp=await fetch('/api/tmux/sessions',{headers:{'Authorization':'Bearer '+TOKEN}});
+    if(!resp.ok){
+      document.getElementById('tmux-drawer-body').innerHTML='<div class="tmux-drawer-empty">加载失败: '+resp.status+'</div>';
+      return;
+    }
+    const data=await resp.json();
+    tmuxSessions=data.sessions||[];
+    tmuxLastFetch=Date.now();
+    updateTmuxTab(data);
+    renderTmuxDrawer(data);
+    // If a session is expanded, refresh its preview too (but throttled — only on manual refresh or every ~10s natural)
+    if(forceRender){
+      tmuxExpanded.forEach(name=>{
+        const s=tmuxSessions.find(x=>x.name===name);
+        if(s){
+          const active=(s.windows||[]).find(w=>w.active)||s.windows[0];
+          if(active)loadTmuxPreview(name+':'+active.index, true);
+        }
+      });
+    }
+  }catch(e){
+    document.getElementById('tmux-drawer-body').innerHTML='<div class="tmux-drawer-empty">fetch error: '+esc(e.message)+'</div>';
+  }
+}
+
+function updateTmuxTab(data){
+  const tab=document.getElementById('tmux-tab');
+  const badge=document.getElementById('tmux-badge');
+  if(!tab)return;
+  // Show tab if tmux is available (even if 0 sessions — lets user know feature exists)
+  if(data && data.available){
+    tab.classList.add('visible');
+  }else{
+    tab.classList.remove('visible');
+  }
+  const n=(data&&data.sessions)?data.sessions.length:0;
+  if(n>0){badge.textContent=n;badge.style.display='inline-block'}
+  else{badge.style.display='none'}
+}
+
+function fmtTmuxAge(sec){
+  if(!sec)return '';
+  const d=Math.floor((Date.now()/1000)-sec);
+  if(d<60)return d+'s ago';
+  if(d<3600)return Math.floor(d/60)+'m ago';
+  if(d<86400)return Math.floor(d/3600)+'h ago';
+  return Math.floor(d/86400)+'d ago';
+}
+
+function renderTmuxDrawer(data){
+  const body=document.getElementById('tmux-drawer-body');
+  if(!body)return;
+  if(!data||!data.available){
+    body.innerHTML='<div class="tmux-drawer-empty">tmux 未安装<br><span style="font-size:10px">服务端找不到 tmux 可执行文件</span></div>';
+    return;
+  }
+  if(data.error){
+    body.innerHTML='<div class="tmux-drawer-empty">tmux error:<br><span style="font-size:10px">'+esc(data.error)+'</span></div>';
+    return;
+  }
+  const ss=data.sessions||[];
+  if(!ss.length){
+    body.innerHTML='<div class="tmux-drawer-empty">暂无 tmux session<br><span style="font-size:10px">未然跑长任务时会自动开 tmux，这里就能看到</span></div>';
+    return;
+  }
+  let html='';
+  ss.forEach(s=>{
+    const attachedCls=s.attached?' attached':'';
+    const attachedBadge=s.attached?'<span class="tmux-badge-pill attached">attached</span>':'';
+    const winCount=(s.windows||[]).length;
+    const winPill='<span class="tmux-badge-pill">'+winCount+'w</span>';
+    const isExp=tmuxExpanded.has(s.name);
+    const activity=fmtTmuxAge(s.activity);
+    const created=fmtTmuxAge(s.created);
+    let windowsHtml='';
+    (s.windows||[]).forEach(w=>{
+      const ac=w.active?' active':'';
+      const path=shortTmuxPath(w.current_path||'');
+      // Web-service protocol: if @web_port/@web_url/@web_label are set, show an Open button
+      // + label in place of raw cmd/path. See memory/topics/feedback_web_service_in_tmux.md.
+      const hasWeb=!!(w.web_port||w.web_url);
+      if(hasWeb){
+        const url=w.web_url||('http://'+location.hostname+':'+w.web_port);
+        const label=w.web_label||('port '+(w.web_port||'?'));
+        windowsHtml+='<div class="tmux-window-row'+ac+' web">'+
+          '<span class="tmux-window-idx">'+w.index+'</span>'+
+          '<span class="tmux-window-name">'+esc(w.name||'')+'</span>'+
+          '<span class="tmux-web-badge">🌐 '+esc(label)+'</span>'+
+          '<a class="tmux-web-open" href="'+esc(url)+'" target="_blank" rel="noopener" onclick="event.stopPropagation()">Open ↗</a>'+
+          '</div>';
+      }else{
+        windowsHtml+='<div class="tmux-window-row'+ac+'">'+
+          '<span class="tmux-window-idx">'+w.index+'</span>'+
+          '<span class="tmux-window-name">'+esc(w.name||'')+'</span>'+
+          '<span class="tmux-window-cmd">'+esc(w.current_command||'')+'</span>'+
+          '<span class="tmux-window-path" title="'+esc(w.current_path||'')+'">'+esc(path)+'</span>'+
+          '</div>';
+      }
+    });
+    const active=(s.windows||[]).find(w=>w.active)||(s.windows&&s.windows[0]);
+    const target=active?(s.name+':'+active.index):s.name;
+    let previewHtml='';
+    if(isExp){
+      const cached=tmuxPreviewCache[target];
+      if(cached===undefined){
+        previewHtml='<div class="tmux-preview loading">loading…</div>';
+      }else if(cached&&cached.error){
+        previewHtml='<div class="tmux-preview error">'+esc(cached.error)+'</div>';
+      }else{
+        previewHtml='<div class="tmux-preview">'+esc((cached&&cached.content)||'(empty)')+'</div>';
+      }
+    }
+    html+='<div class="tmux-session-card'+attachedCls+'" onclick="toggleTmuxSession(\''+esc(s.name)+'\')">'+
+      '<div class="tmux-session-top">'+
+        '<span class="tmux-session-name">'+esc(s.name)+'</span>'+
+        '<span class="tmux-session-badges">'+winPill+attachedBadge+'</span>'+
+      '</div>'+
+      '<div class="tmux-session-meta">'+
+        '<span>active '+activity+'</span>'+
+        '<span>created '+created+'</span>'+
+      '</div>'+
+      windowsHtml+
+      previewHtml+
+    '</div>';
+  });
+  body.innerHTML=html;
+}
+
+function shortTmuxPath(p){
+  if(!p)return '';
+  const home=p.replace(/^\/Users\/[^/]+/,'~');
+  if(home.length<=40)return home;
+  const parts=home.split('/');
+  if(parts.length<=3)return home;
+  return parts[0]+'/…/'+parts.slice(-2).join('/');
+}
+
+function toggleTmuxSession(name){
+  if(tmuxExpanded.has(name)){
+    tmuxExpanded.delete(name);
+  }else{
+    tmuxExpanded.add(name);
+    // find active window to capture
+    const s=tmuxSessions.find(x=>x.name===name);
+    if(s){
+      const active=(s.windows||[]).find(w=>w.active)||(s.windows&&s.windows[0]);
+      if(active){
+        const target=name+':'+active.index;
+        if(!(target in tmuxPreviewCache))loadTmuxPreview(target,false);
+      }
+    }
+  }
+  // re-render from cached state
+  renderTmuxDrawer({available:true,sessions:tmuxSessions});
+}
+
+async function loadTmuxPreview(target, force){
+  if(!force && (target in tmuxPreviewCache))return;
+  try{
+    const resp=await fetch('/api/tmux/capture?target='+encodeURIComponent(target)+'&lines=80',{
+      headers:{'Authorization':'Bearer '+TOKEN},
+    });
+    if(!resp.ok){
+      tmuxPreviewCache[target]={error:'http '+resp.status};
+    }else{
+      const data=await resp.json();
+      if(data.error){
+        tmuxPreviewCache[target]={error:data.error};
+      }else{
+        tmuxPreviewCache[target]={content:data.content||''};
+      }
+    }
+  }catch(e){
+    tmuxPreviewCache[target]={error:e.message};
+  }
+  renderTmuxDrawer({available:true,sessions:tmuxSessions});
+}
+
+// Show tmux tab on page load (fire-and-forget initial check)
+setTimeout(()=>{loadTmuxSessions(false).catch(()=>{})},1200);
+
 // ── Output File Viewer ──
 async function openFileModal(path){
   const overlay=document.getElementById('file-modal-overlay');
@@ -4724,11 +5114,13 @@ function trackSubagentEnd(toolUseId,isError){
 
 function renderSubagentDrawer(){
   const tab=document.getElementById('subagent-tab');
+  const badge=document.getElementById('subagent-badge');
   const body=document.getElementById('subagent-drawer-body');
   const subs=nativeSubagentsForActive();
 
   if(!subs.size){
     tab.classList.remove('visible');
+    if(badge)badge.style.display='none';
     body.innerHTML='<div class="subagent-drawer-empty">暂无子任务</div>';
     return;
   }
@@ -4736,8 +5128,11 @@ function renderSubagentDrawer(){
 
   const running=[...subs.values()].filter(a=>a.status==='running').length;
   const total=subs.size;
-  // Update tab badge
-  tab.textContent=`🔗 Agents (${running}/${total})`;
+  // Update tab badge (separate span, so tab width stays aligned with Todo/Tasks)
+  if(badge){
+    badge.textContent=running>0?`${running}/${total}`:`${total}`;
+    badge.style.display='inline-block';
+  }
 
   let html='';
   for(const [id,sa] of subs){
@@ -5599,12 +5994,27 @@ function updateCostBadge(s){
 function getContextWindow(model){
   if(!model)return 200000;
   const m=model.toLowerCase();
+  // Anthropic — [1m] variants override everything
   if(m.includes('[1m]'))return 1000000;
   if(m.includes('opus'))return 200000;
   if(m.includes('sonnet'))return 200000;
   if(m.includes('haiku'))return 200000;
+  // Google Gemini — 1M across 2.x/3.x Pro + Flash lines
+  if(m.includes('gemini'))return 1000000;
+  // OpenAI GPT-5 / Codex family
+  if(m.includes('codex'))return 400000;
+  if(m.includes('gpt-5'))return 400000;
+  if(m.includes('gpt-4.1'))return 1000000;
+  if(m.includes('gpt-4o'))return 128000;
+  if(m.includes('o1')||m.includes('o3')||m.includes('o4'))return 200000;
+  // Z.AI GLM
+  if(m.includes('glm-4.6'))return 200000;
+  if(m.includes('glm-4.5'))return 128000;
   if(m.includes('glm'))return 200000;
-  if(m.includes('minimax'))return 200000;
+  // MiniMax — M1/M2 variants ~200k
+  if(m.includes('minimax'))return 204800;
+  // Local / Ollama — conservative default
+  if(m.includes('qwen')||m.includes('llama')||m.includes('deepseek'))return 128000;
   return 200000;
 }
 
@@ -5743,11 +6153,14 @@ async function showSniffUsage(){
   el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted2)">Loading...</div>';
 
   try{
-    const [usageR,statsR,glmR,mmR]=await Promise.all([
+    const [usageR,statsR,glmR,mmR,cxR,gmR,anR]=await Promise.all([
       fetch('/api/proxy/usage',{headers:{'Authorization':'Bearer '+TOKEN}}),
       fetch('/api/proxy/stats?group=hour&days=1',{headers:{'Authorization':'Bearer '+TOKEN}}),
       fetch('/api/glm/quota',{headers:{'Authorization':'Bearer '+TOKEN}}).catch(()=>null),
-      fetch('/api/minimax/quota',{headers:{'Authorization':'Bearer '+TOKEN}}).catch(()=>null)
+      fetch('/api/minimax/quota',{headers:{'Authorization':'Bearer '+TOKEN}}).catch(()=>null),
+      fetch('/api/codex/usage',{headers:{'Authorization':'Bearer '+TOKEN}}).catch(()=>null),
+      fetch('/api/gemini/usage',{headers:{'Authorization':'Bearer '+TOKEN}}).catch(()=>null),
+      fetch('/api/anthropic/usage',{headers:{'Authorization':'Bearer '+TOKEN}}).catch(()=>null)
     ]);
     const usage=await usageR.json();
     const statsData=await statsR.json();
@@ -5755,6 +6168,12 @@ async function showSniffUsage(){
     if(glmR&&glmR.ok){try{glmData=await glmR.json()}catch(e){}}
     let mmData=null;
     if(mmR&&mmR.ok){try{mmData=await mmR.json()}catch(e){}}
+    let cxData=null;
+    if(cxR&&cxR.ok){try{cxData=await cxR.json()}catch(e){}}
+    let gmData=null;
+    if(gmR&&gmR.ok){try{gmData=await gmR.json()}catch(e){}}
+    let anData=null;
+    if(anR&&anR.ok){try{anData=await anR.json()}catch(e){}}
     let html='';
 
     // Rate limit card
@@ -5797,6 +6216,52 @@ async function showSniffUsage(){
       }
       if(rl.status&&rl.status!=='allowed')html+=`<div class="sniff-stat"><span class="label">Status</span><span class="value" style="color:var(--warn)">${rl.status}</span></div>`;
       if(rl.is_overage)html+=`<div class="sniff-stat"><span class="label">Overage</span><span class="value" style="color:var(--bad)">Active</span></div>`;
+      html+=`</div>`;
+    }
+
+    // Anthropic Utilization card (endpoint-based, richer than header scraping)
+    // Source: https://api.anthropic.com/api/oauth/usage
+    // Shape: { five_hour?, seven_day?, seven_day_oauth_apps?, seven_day_opus?, seven_day_sonnet?, extra_usage? }
+    // Each bucket: { utilization: 0-100, resets_at: ISO-8601 }
+    if(anData&&anData.configured!==false&&(anData.five_hour||anData.seven_day||anData.seven_day_opus||anData.seven_day_sonnet||anData.extra_usage)){
+      html+=`<div class="sniff-card"><h3>Claude Utilization <span style="font-size:11px;color:var(--muted);text-transform:none;font-weight:normal">(endpoint)</span></h3>`;
+      const renderBucket=(label,b,windowMs)=>{
+        if(!b)return'';
+        const pct=typeof b.utilization==='number'?b.utilization:0;
+        const resetMs=b.resets_at?(new Date(b.resets_at).getTime()-Date.now()):0;
+        const color=quotaColorRel(pct,resetMs,windowMs);
+        let h=`<div class="sniff-stat"><span class="label">${label}</span><span class="value" style="color:${color}">${pct.toFixed(1)}%</span></div>`;
+        let nowMark='';
+        if(resetMs>0&&windowMs>0){
+          const elapsedPct=Math.min(100,Math.max(0,((windowMs-resetMs)/windowMs)*100));
+          nowMark=`<span class="tl-now" style="left:${elapsedPct.toFixed(1)}%"></span><span class="tl-now-label" style="left:${elapsedPct.toFixed(1)}%">now</span>`;
+        }
+        h+=`<div class="sniff-bar"><div class="sniff-bar-fill" style="width:${pct}%;background:${color}"></div>${nowMark}</div>`;
+        if(resetMs>0){
+          const days=Math.floor(resetMs/86400000);
+          const hrs=Math.floor((resetMs%86400000)/3600000);
+          const mins=Math.floor((resetMs%3600000)/60000);
+          const tl=days>0?`${days}d ${hrs}h`:(hrs>0?`${hrs}h ${mins}m`:`${mins}m`);
+          h+=`<div class="sniff-stat"><span class="label" style="padding-left:12px">↳ Resets in</span><span class="value">${tl}</span></div>`;
+        }
+        return h;
+      };
+      html+=renderBucket('5h Session',anData.five_hour,5*3600000);
+      html+=renderBucket('7d Weekly',anData.seven_day,7*86400000);
+      html+=renderBucket('7d Opus',anData.seven_day_opus,7*86400000);
+      html+=renderBucket('7d Sonnet',anData.seven_day_sonnet,7*86400000);
+      html+=renderBucket('7d OAuth Apps',anData.seven_day_oauth_apps,7*86400000);
+      const eu=anData.extra_usage;
+      if(eu&&eu.is_enabled){
+        const pct=typeof eu.utilization==='number'?eu.utilization:0;
+        const color=pct>=90?'var(--bad)':(pct>=70?'var(--warn)':'var(--ok)');
+        html+=`<div class="sniff-stat"><span class="label">Extra Usage (Credits)</span><span class="value" style="color:${color}">${pct.toFixed(1)}%</span></div>`;
+        html+=`<div class="sniff-bar"><div class="sniff-bar-fill" style="width:${pct}%;background:${color}"></div></div>`;
+        if(eu.used_credits!==null&&eu.monthly_limit!==null){
+          // Anthropic returns credits as cents (integer), divide by 100 for USD
+          html+=`<div class="sniff-stat"><span class="label" style="padding-left:12px">↳ Used / Limit</span><span class="value">$${((eu.used_credits||0)/100).toFixed(2)} / $${((eu.monthly_limit||0)/100).toFixed(2)}</span></div>`;
+        }
+      }
       html+=`</div>`;
     }
 
@@ -5940,6 +6405,106 @@ async function showSniffUsage(){
         });
         html+=`</div>`;
       }
+    }
+
+    // Codex (ChatGPT) Quota card (only if codex auth configured)
+    if(cxData&&cxData.rate_limit){
+      const plan=cxData.plan_type||'unknown';
+      const pw=cxData.rate_limit.primary_window;
+      const sw=cxData.rate_limit.secondary_window;
+      const cr=cxData.credits;
+      html+=`<div class="sniff-card"><h3>Codex Quota <span style="font-size:11px;color:var(--muted);text-transform:none;font-weight:normal">(${plan})</span></h3>`;
+      if(pw){
+        const pct=pw.used_percent||0;
+        const windowMs=(pw.limit_window_seconds||18000)*1000;
+        const remainMs=pw.reset_after_seconds?pw.reset_after_seconds*1000:(pw.reset_at?pw.reset_at*1000-Date.now():0);
+        const color=quotaColorRel(pct,remainMs,windowMs);
+        const winLabel=Math.round((pw.limit_window_seconds||0)/3600)+'h Session';
+        html+=`<div class="sniff-stat"><span class="label">${winLabel}</span><span class="value" style="color:${color}">${pct}%</span></div>`;
+        let nowMark='';
+        if(remainMs>0&&windowMs>0){
+          const elapsedPct=Math.min(100,Math.max(0,((windowMs-remainMs)/windowMs)*100));
+          nowMark=`<span class="tl-now" style="left:${elapsedPct.toFixed(1)}%"></span><span class="tl-now-label" style="left:${elapsedPct.toFixed(1)}%">now</span>`;
+        }
+        html+=`<div class="sniff-bar"><div class="sniff-bar-fill" style="width:${pct}%;background:${color}"></div>${nowMark}</div>`;
+        if(remainMs>0){
+          const hrs=Math.floor(remainMs/3600000);
+          const mins=Math.floor((remainMs%3600000)/60000);
+          html+=`<div class="sniff-stat"><span class="label">Resets in</span><span class="value">${hrs>0?hrs+'h '+mins+'m':mins+'m'}</span></div>`;
+        }
+      }
+      if(sw){
+        const pct=sw.used_percent||0;
+        const windowMs=(sw.limit_window_seconds||604800)*1000;
+        const remainMs=sw.reset_after_seconds?sw.reset_after_seconds*1000:(sw.reset_at?sw.reset_at*1000-Date.now():0);
+        const color=quotaColorRel(pct,remainMs,windowMs);
+        const winLabel=Math.round((sw.limit_window_seconds||0)/86400)+'d Weekly';
+        html+=`<div class="sniff-stat"><span class="label">${winLabel}</span><span class="value" style="color:${color}">${pct}%</span></div>`;
+        let nowMark='';
+        if(remainMs>0&&windowMs>0){
+          const elapsedPct=Math.min(100,Math.max(0,((windowMs-remainMs)/windowMs)*100));
+          nowMark=`<span class="tl-now" style="left:${elapsedPct.toFixed(1)}%"></span><span class="tl-now-label" style="left:${elapsedPct.toFixed(1)}%">now</span>`;
+        }
+        html+=`<div class="sniff-bar"><div class="sniff-bar-fill" style="width:${pct}%;background:${color}"></div>${nowMark}</div>`;
+        if(remainMs>0){
+          const days=Math.floor(remainMs/86400000);
+          const hrs=Math.floor((remainMs%86400000)/3600000);
+          html+=`<div class="sniff-stat"><span class="label">Week resets in</span><span class="value">${days>0?days+'d '+hrs+'h':hrs+'h'}</span></div>`;
+        }
+      }
+      if(cr){
+        if(cr.unlimited){
+          html+=`<div class="sniff-stat"><span class="label">Credits</span><span class="value" style="color:var(--ok)">Unlimited</span></div>`;
+        }else if(cr.balance!==undefined&&cr.balance!==null&&cr.balance!=='0'){
+          html+=`<div class="sniff-stat"><span class="label">Credits balance</span><span class="value">${cr.balance}</span></div>`;
+        }
+        if(cr.overage_limit_reached)html+=`<div class="sniff-stat"><span class="label">Overage</span><span class="value" style="color:var(--bad)">Reached</span></div>`;
+      }
+      if(cxData.rate_limit_reached_type){
+        html+=`<div class="sniff-stat"><span class="label">Limit reached</span><span class="value" style="color:var(--bad)">${cxData.rate_limit_reached_type.type||'yes'}</span></div>`;
+      }
+      html+=`</div>`;
+    }
+
+    // Gemini (Code Assist) Quota card — buckets per model
+    // Source: https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota
+    // gmData shape: { buckets: [{modelId, remainingAmount, remainingFraction, resetTime, tokenType}] }
+    if(gmData&&Array.isArray(gmData.buckets)&&gmData.buckets.length>0){
+      html+=`<div class="sniff-card"><h3>Gemini Quota <span style="font-size:11px;color:var(--muted);text-transform:none;font-weight:normal">(Code Assist)</span></h3>`;
+      gmData.buckets.forEach(b=>{
+        const model=b.modelId||'unknown';
+        // remainingFraction is 0-1; convert to used-percent
+        const rf=typeof b.remainingFraction==='number'?b.remainingFraction:null;
+        const usedPct=rf!==null?((1-rf)*100):null;
+        const resetMs=b.resetTime?(new Date(b.resetTime).getTime()-Date.now()):0;
+        // Gemini daily reset → 24h window for "now" marker
+        const windowMs=86400000;
+        const color=usedPct!==null?quotaColorRel(usedPct,resetMs,windowMs):'var(--muted)';
+        const remainLabel=b.remainingAmount!==undefined?b.remainingAmount:'—';
+        const tokType=b.tokenType?` <span style="color:var(--muted);font-size:10px">(${b.tokenType})</span>`:'';
+        if(usedPct!==null){
+          html+=`<div class="sniff-stat"><span class="label">${model}${tokType}</span><span class="value" style="color:${color}">${usedPct.toFixed(1)}% used</span></div>`;
+          let nowMark='';
+          if(resetMs>0&&windowMs>0){
+            const elapsedPct=Math.min(100,Math.max(0,((windowMs-resetMs)/windowMs)*100));
+            nowMark=`<span class="tl-now" style="left:${elapsedPct.toFixed(1)}%"></span><span class="tl-now-label" style="left:${elapsedPct.toFixed(1)}%">now</span>`;
+          }
+          html+=`<div class="sniff-bar"><div class="sniff-bar-fill" style="width:${usedPct.toFixed(1)}%;background:${color}"></div>${nowMark}</div>`;
+        }else{
+          html+=`<div class="sniff-stat"><span class="label">${model}${tokType}</span><span class="value">${remainLabel}</span></div>`;
+        }
+        html+=`<div class="sniff-stat"><span class="label" style="padding-left:12px">↳ Remaining</span><span class="value">${remainLabel}</span></div>`;
+        if(resetMs>0){
+          const days=Math.floor(resetMs/86400000);
+          const hrs=Math.floor((resetMs%86400000)/3600000);
+          const mins=Math.floor((resetMs%3600000)/60000);
+          const label=days>0?`${days}d ${hrs}h`:(hrs>0?`${hrs}h ${mins}m`:`${mins}m`);
+          html+=`<div class="sniff-stat"><span class="label" style="padding-left:12px">↳ Resets in</span><span class="value">${label}</span></div>`;
+        }
+      });
+      html+=`</div>`;
+    }else if(gmData&&gmData.configured===false){
+      // Silent: gemini not configured. No card. (Parity with codex behavior.)
     }
 
     // Today's model usage card
