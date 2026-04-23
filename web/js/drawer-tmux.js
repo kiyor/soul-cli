@@ -11,6 +11,17 @@
 // kept as thin wrappers so existing inline onclick / setTimeout bootstrap
 // paths still work without changes.
 
+// Auth token resolver. index.html declares `let TOKEN = ...` which creates a
+// script-global binding shared across <script> tags in the same document,
+// but — unlike `var` — it does NOT attach to `window`. So `window.TOKEN` is
+// always undefined here. Use a lexical lookup (wrapped in try/catch in case
+// this script somehow runs before the main script has initialized TOKEN),
+// with a localStorage fallback.
+function weiranToken() {
+  try { if (typeof TOKEN !== 'undefined') return TOKEN || ''; } catch (_) {}
+  return localStorage.getItem('weiran_token') || '';
+}
+
 document.addEventListener('alpine:init', () => {
   Alpine.store('tmux', {
     // ── reactive state ──
@@ -43,7 +54,7 @@ document.addEventListener('alpine:init', () => {
     async load(forceRefreshPreviews) {
       try {
         const resp = await fetch('/api/tmux/sessions', {
-          headers: { 'Authorization': 'Bearer ' + (window.TOKEN || '') },
+          headers: { 'Authorization': 'Bearer ' + weiranToken() },
         });
         if (!resp.ok) {
           this.error = 'http ' + resp.status;
@@ -114,7 +125,7 @@ document.addEventListener('alpine:init', () => {
       try {
         const resp = await fetch(
           '/api/tmux/capture?target=' + encodeURIComponent(target) + '&lines=80',
-          { headers: { 'Authorization': 'Bearer ' + (window.TOKEN || '') } },
+          { headers: { 'Authorization': 'Bearer ' + weiranToken() } },
         );
         if (!resp.ok) {
           this.previewCache[target] = { error: 'http ' + resp.status };
