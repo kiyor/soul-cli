@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/kiyor/soul-cli/pkg/provider/openai"
 )
 
 // serviceEntry defines a monitored service
@@ -910,7 +912,7 @@ func handleModels() {
 					if prov.ChatURL != "" {
 						return prov.ChatURL
 					}
-					return codexEndpoint
+					return openai.Endpoint
 				}())
 			} else {
 				fmt.Printf("  endpoint: %s\n", prov.BaseURL)

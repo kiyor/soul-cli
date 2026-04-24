@@ -25,6 +25,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsConfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/kiyor/soul-cli/pkg/provider/gemini"
+	"github.com/kiyor/soul-cli/pkg/provider/ollama"
+	"github.com/kiyor/soul-cli/pkg/provider/openai"
 )
 
 //go:embed web/index.html
@@ -60,6 +63,7 @@ type serverConfig struct {
 	Proxy                proxyConfig         `json:"proxy"`
 	SessionReset         sessionResetConfig  `json:"sessionReset"`
 	S3                   s3Config            `json:"s3"`
+	DBExplorer           dbExplorerConfig    `json:"dbExplorer"`
 	DefaultReplaceSoul      bool                `json:"defaultReplaceSoul"`      // 本我模式 default for new sessions
 	DefaultInteractiveModel string              `json:"defaultInteractiveModel"` // default model for new interactive sessions; fallback: opus[1m]
 }
@@ -182,6 +186,7 @@ func loadServerConfig() serverConfig {
 			// Session reset policy (always copy; defaults are filled in by loadResetPolicyFromConfig)
 			cfg.SessionReset = wrapper.Server.SessionReset
 			cfg.S3 = wrapper.Server.S3
+			cfg.DBExplorer = wrapper.Server.DBExplorer
 			if wrapper.Server.Proxy.Port != 0 || wrapper.Server.Proxy.Upstream != "" || wrapper.Server.Proxy.Enabled {
 				if wrapper.Server.Proxy.Enabled {
 					cfg.Proxy.Enabled = true
@@ -453,6 +458,11 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, data)
 	}))
 
+	// Tmux sessions (read-only drawer for Kiyor — he doesn't use tmux himself,
+	// everything shown here is 未然 running long tasks).
+	mux.HandleFunc("GET /api/tmux/sessions", authMiddleware(cfg.Token, handleTmuxSessions))
+	mux.HandleFunc("GET /api/tmux/capture", authMiddleware(cfg.Token, handleTmuxCapture))
+
 	// List configured providers (for UI model dropdown, apiKey redacted)
 	mux.HandleFunc("GET /api/providers", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
 		type providerInfo struct {
@@ -482,8 +492,8 @@ func handleServer(args []string) {
 			http.Error(w, "provider query param required", http.StatusBadRequest)
 			return
 		}
-		provider := resolveProvider(providerName)
-		if provider == nil || provider.Type != "openai" {
+		pcfg := resolveProvider(providerName)
+		if pcfg == nil || pcfg.Type != "openai" {
 			http.Error(w, "provider not found or not openai type", http.StatusNotFound)
 			return
 		}
@@ -492,7 +502,7 @@ func handleServer(args []string) {
 			writeJSON(w, http.StatusOK, map[string]int{"port": cached.(int)})
 			return
 		}
-		port, err := startOpenAIProxy(*provider)
+		port, err := openai.StartProxy(*pcfg)
 		if err != nil {
 			http.Error(w, "start proxy: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -509,8 +519,8 @@ func handleServer(args []string) {
 			http.Error(w, "provider query param required", http.StatusBadRequest)
 			return
 		}
-		provider := resolveProvider(providerName)
-		if provider == nil || provider.Type != "ollama" {
+		pcfg := resolveProvider(providerName)
+		if pcfg == nil || pcfg.Type != "ollama" {
 			http.Error(w, "provider not found or not ollama type", http.StatusNotFound)
 			return
 		}
@@ -518,7 +528,7 @@ func handleServer(args []string) {
 			writeJSON(w, http.StatusOK, map[string]int{"port": cached.(int)})
 			return
 		}
-		port, err := startOllamaProxy(*provider)
+		port, err := ollama.StartProxy(*pcfg)
 		if err != nil {
 			http.Error(w, "start proxy: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -535,8 +545,8 @@ func handleServer(args []string) {
 			http.Error(w, "provider query param required", http.StatusBadRequest)
 			return
 		}
-		provider := resolveProvider(providerName)
-		if provider == nil || provider.Type != "gemini" {
+		pcfg := resolveProvider(providerName)
+		if pcfg == nil || pcfg.Type != "gemini" {
 			http.Error(w, "provider not found or not gemini type", http.StatusNotFound)
 			return
 		}
@@ -544,7 +554,7 @@ func handleServer(args []string) {
 			writeJSON(w, http.StatusOK, map[string]int{"port": cached.(int)})
 			return
 		}
-		port, err := startGeminiProxy(*provider)
+		port, err := gemini.StartProxy(*pcfg)
 		if err != nil {
 			http.Error(w, "start proxy: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1014,35 +1024,75 @@ func handleServer(args []string) {
 		sess.setStatus("running")
 
 		var decision map[string]any
-		if req.Cancelled {
-			decision = map[string]any{
-				"behavior": "deny",
-				"message":  "User cancelled the questions.",
-			}
-		} else {
-			// Convert the answers list into AskUserQuestion's expected shape:
-			// `answers` is a Record<questionText, answerString>. Multi-select
-			// answers are already comma-joined by the frontend.
-			answersMap := make(map[string]string, len(req.Answers))
-			for _, a := range req.Answers {
-				if a.Question == "" {
-					continue
-				}
-				answersMap[a.Question] = a.Answer
-			}
-			// Merge answers into the original input (preserve questions + any
-			// other fields the model supplied).
-			merged := map[string]any{}
-			if len(entry.Input) > 0 {
-				if err := json.Unmarshal(entry.Input, &merged); err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "corrupt pending input: " + err.Error()})
-					return
+		switch entry.Kind {
+		case "permission":
+			// Generic tool permission prompt (Write, Edit, …). The Web UI
+			// synthesized a Yes/No AUQ — we only care which answer came
+			// back, not the question text. Option A is always Yes, option
+			// B is always No (see makeOnCanUseTool).
+			isDeny := req.Cancelled
+			if !isDeny && len(req.Answers) > 0 {
+				ans := strings.TrimSpace(req.Answers[0].Answer)
+				// Frontend sends "A. <label>" / "B. <label>". Treat B or
+				// anything starting with "No" as deny; everything else
+				// (A, empty, unexpected) as allow — biased toward letting
+				// the turn continue.
+				if strings.HasPrefix(ans, "B.") || strings.HasPrefix(strings.ToLower(ans), "no") {
+					isDeny = true
 				}
 			}
-			merged["answers"] = answersMap
-			decision = map[string]any{
-				"behavior":     "allow",
-				"updatedInput": merged,
+			if isDeny {
+				decision = map[string]any{
+					"behavior": "deny",
+					"message":  "User declined this tool call from the Web UI.",
+				}
+			} else {
+				// Pass original tool_input through unchanged. Use RawMessage
+				// so we don't silently reshape the model's arguments.
+				var orig any = map[string]any{}
+				if len(entry.Input) > 0 {
+					if err := json.Unmarshal(entry.Input, &orig); err != nil {
+						writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "corrupt pending input: " + err.Error()})
+						return
+					}
+				}
+				decision = map[string]any{
+					"behavior":     "allow",
+					"updatedInput": orig,
+				}
+			}
+		default:
+			// AskUserQuestion tool (Kind="auq" or legacy empty).
+			if req.Cancelled {
+				decision = map[string]any{
+					"behavior": "deny",
+					"message":  "User cancelled the questions.",
+				}
+			} else {
+				// Convert the answers list into AskUserQuestion's expected shape:
+				// `answers` is a Record<questionText, answerString>. Multi-select
+				// answers are already comma-joined by the frontend.
+				answersMap := make(map[string]string, len(req.Answers))
+				for _, a := range req.Answers {
+					if a.Question == "" {
+						continue
+					}
+					answersMap[a.Question] = a.Answer
+				}
+				// Merge answers into the original input (preserve questions + any
+				// other fields the model supplied).
+				merged := map[string]any{}
+				if len(entry.Input) > 0 {
+					if err := json.Unmarshal(entry.Input, &merged); err != nil {
+						writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "corrupt pending input: " + err.Error()})
+						return
+					}
+				}
+				merged["answers"] = answersMap
+				decision = map[string]any{
+					"behavior":     "allow",
+					"updatedInput": merged,
+				}
 			}
 		}
 
@@ -1519,21 +1569,32 @@ func handleServer(args []string) {
 				cost = meta.Cost
 			}
 
-			items = append(items, map[string]any{
-				"id":            s.ID,
-				"name":          s.Name,
-				"title":         s.Title,
-				"project":       s.Project,
-				"model":         model,
-				"category":      cat,
-				"agent":         agent,
-				"first_msg":     s.FirstMsg,
-				"summary":       s.Summary,
-				"size":          s.Size,
-				"messages":      s.Messages,
-				"mod_time":      s.ModTime.Format(time.RFC3339),
+			item := map[string]any{
+				"id":             s.ID,
+				"name":           s.Name,
+				"title":          s.Title,
+				"project":        s.Project,
+				"model":          model,
+				"category":       cat,
+				"agent":          agent,
+				"first_msg":      s.FirstMsg,
+				"summary":        s.Summary,
+				"size":           s.Size,
+				"messages":       s.Messages,
+				"mod_time":       s.ModTime.Format(time.RFC3339),
 				"proxy_cost_usd": cost,
-			})
+			}
+			// Enrich with DB fields: user_turns, created_at, updated_at
+			if meta.UserTurns > 0 {
+				item["user_turns"] = meta.UserTurns
+			}
+			if meta.CreatedAt != "" {
+				item["created_at"] = meta.CreatedAt
+			}
+			if meta.UpdatedAt != "" {
+				item["updated_at"] = meta.UpdatedAt
+			}
+			items = append(items, item)
 		}
 		writeJSON(w, http.StatusOK, items)
 	}))
@@ -2120,6 +2181,12 @@ func handleServer(args []string) {
 
 	// Register proxy usage API endpoint
 	registerProxyAPI(mux, cfg.Token)
+
+	// Register read-only SQLite explorer (/api/db/*)
+	// Build the source registry from config. Always includes the primary
+	// sessions.db source even if the user didn't configure dbExplorer.sources.
+	dbRegistry = buildDBRegistry(cfg.DBExplorer)
+	registerDBUIAPI(mux, cfg.Token)
 
 	// Start Anthropic API proxy if enabled
 	if cfg.Proxy.Enabled {

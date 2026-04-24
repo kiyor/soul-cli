@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kiyor/soul-cli/pkg/provider"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -555,6 +557,23 @@ func init() {
 	tracePoint("init:appname", traceT0)
 	initWorkspace()
 	tracePoint("init:workspace", traceT0)
+	initProviderPkg()
+	tracePoint("init:provider-pkg", traceT0)
+}
+
+// initProviderPkg wires pkg/provider's injection points to main-package state.
+// Called once at startup so the provider subpackages see the same appName
+// label and the same server address (token + port) main itself uses.
+func initProviderPkg() {
+	provider.AppName = appName
+	provider.LoadServerAddr = func() provider.ServerAddr {
+		c := loadServerConfig()
+		return provider.ServerAddr{
+			Token: c.Token,
+			Host:  c.Host,
+			Port:  c.Port,
+		}
+	}
 }
 
 // tracePoint is a zero-cost timing probe when WEIRAN_HOOK_TRACE is unset.

@@ -1,16 +1,16 @@
-package main
-
-// provider_gemini.go — embedded Anthropic→Gemini (Code Assist) protocol proxy
+// Package gemini is the embedded Anthropic→Gemini (Google Code Assist)
+// protocol proxy.
 //
-// When a provider has Type=="gemini", injectProviderEnv starts a local HTTP
-// server that translates Anthropic /v1/messages requests to Google Code Assist
-// /v1internal:streamGenerateContent. Claude Code talks Anthropic protocol; the
-// proxy silently translates to Gemini via OAuth-personal credentials (same
+// When a provider has Type=="gemini", the soul-cli runtime asks this package
+// for a local HTTP server that translates Anthropic /v1/messages into Google
+// Code Assist /v1internal:streamGenerateContent. Claude Code talks Anthropic;
+// this proxy silently speaks Gemini via OAuth-personal credentials (the same
 // credentials used by gemini-cli).
 //
 // Auth source: ~/.gemini/oauth_creds.json (written by `gemini` first-run login).
 // Project: loadCodeAssist on first request caches cloudaicompanionProject.
 // OAuth client: public installed-app credentials from the gemini-cli source.
+package gemini
 
 import (
 	"bufio"
@@ -27,11 +27,22 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kiyor/soul-cli/pkg/provider"
+)
+
+// CodeAssistEndpoint + CodeAssistVersion are the Google Code Assist host
+// + API version this package proxies to. Exported so server endpoints
+// (e.g. /api/gemini/usage) can build matching URLs without duplicating
+// the constants.
+const (
+	CodeAssistEndpoint = "https://cloudcode-pa.googleapis.com"
+	CodeAssistVersion  = "v1internal"
 )
 
 const (
-	geminiCodeAssistEndpoint = "https://cloudcode-pa.googleapis.com"
-	geminiCodeAssistVersion  = "v1internal"
+	geminiCodeAssistEndpoint = CodeAssistEndpoint
+	geminiCodeAssistVersion  = CodeAssistVersion
 	geminiOAuthTokenURL      = "https://oauth2.googleapis.com/token"
 	geminiAuthFileDefault    = "~/.gemini/oauth_creds.json"
 
@@ -42,6 +53,29 @@ const (
 	geminiClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
 	geminiClientSecret = "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"
 )
+
+// Session is the exported alias for the internal gemini OAuth session.
+// Exposed so server endpoints that need AccessToken / ProjectID / mu can
+// hold a *Session without reaching into the lowercase name.
+type Session = geminiSession
+
+// LoadAuth reads the Gemini OAuth creds (defaults to ~/.gemini/oauth_creds.json
+// when authFile is empty) and returns a Session ready for use with
+// EnsureTokenFresh + ResolveProject. Wraps loadGeminiAuth.
+func LoadAuth(authFile string) (*Session, error) { return loadGeminiAuth(authFile) }
+
+// EnsureTokenFresh refreshes the access token on sess if it's expired, writing
+// the rotated token back to disk when needed. Wraps ensureGeminiTokenFresh.
+func EnsureTokenFresh(sess *Session, authFile string) error {
+	return ensureGeminiTokenFresh(sess, authFile)
+}
+
+// ResolveProject resolves and caches the cloudaicompanionProject on sess so
+// subsequent requests can target the correct billing project. Wraps
+// resolveGeminiProject.
+func ResolveProject(sess *Session, authFile string) error {
+	return resolveGeminiProject(sess, authFile)
+}
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -62,11 +96,20 @@ type geminiSession struct {
 	ProjectID    string // cached after first loadCodeAssist
 }
 
+// Snapshot returns a thread-safe copy of the fields callers need to build
+// outbound Gemini requests. Avoids exposing the internal mutex while still
+// letting external code read AccessToken + ProjectID atomically.
+func (s *geminiSession) Snapshot() (accessToken, projectID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.AccessToken, s.ProjectID
+}
+
 func loadGeminiAuth(authFile string) (*geminiSession, error) {
 	if authFile == "" {
 		authFile = geminiAuthFileDefault
 	}
-	path := expandPath(authFile)
+	path := provider.ExpandPath(authFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w (run: gemini, then complete OAuth login)", authFile, err)
@@ -112,7 +155,7 @@ func writeGeminiAuthToDisk(sess *geminiSession, authFile string) {
 	if authFile == "" {
 		authFile = geminiAuthFileDefault
 	}
-	path := expandPath(authFile)
+	path := provider.ExpandPath(authFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
@@ -181,7 +224,7 @@ func refreshGeminiToken(sess *geminiSession, authFile string) error {
 		// refresh (unlike codex), but the token can be revoked server-side.
 		if bytes.Contains(body, []byte("invalid_grant")) {
 			if reloadGeminiAuthFromDisk(sess, authFile) {
-				fmt.Fprintf(os.Stderr, "[%s] gemini: invalid_grant → reloaded newer token from disk\n", appName)
+				fmt.Fprintf(os.Stderr, "[%s] gemini: invalid_grant → reloaded newer token from disk\n", provider.AppName)
 				return nil
 			}
 		}
@@ -217,7 +260,7 @@ func ensureGeminiTokenFresh(sess *geminiSession, authFile string) error {
 	if exp > 0 && time.Now().Add(30*time.Second).UnixMilli() < exp {
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "[%s] gemini token expired, refreshing...\n", appName)
+	fmt.Fprintf(os.Stderr, "[%s] gemini token expired, refreshing...\n", provider.AppName)
 	return refreshGeminiToken(sess, authFile)
 }
 
@@ -320,7 +363,7 @@ func resolveGeminiProject(sess *geminiSession, authFile string) error {
 		sess.ProjectID = lr.CloudaicompanionProject
 		sess.mu.Unlock()
 		fmt.Fprintf(os.Stderr, "[%s] gemini project: %s (tier=%s)\n",
-			appName, lr.CloudaicompanionProject, tierID(lr.CurrentTier))
+			provider.AppName, lr.CloudaicompanionProject, tierID(lr.CurrentTier))
 		return nil
 	}
 
@@ -360,7 +403,7 @@ func resolveGeminiProject(sess *geminiSession, authFile string) error {
 	sess.mu.Lock()
 	sess.ProjectID = projectID
 	sess.mu.Unlock()
-	fmt.Fprintf(os.Stderr, "[%s] gemini onboarded: project=%s tier=%s\n", appName, projectID, tier.ID)
+	fmt.Fprintf(os.Stderr, "[%s] gemini onboarded: project=%s tier=%s\n", provider.AppName, projectID, tier.ID)
 	return nil
 }
 
@@ -720,7 +763,7 @@ func geminiTranslateTools(tools []any) []geminiTool {
 		diagKey := typ + "|" + name
 		if _, loaded := geminiSeenToolTypes.LoadOrStore(diagKey, struct{}{}); !loaded {
 			fmt.Fprintf(os.Stderr, "[%s] gemini tool seen: type=%q name=%q has_schema=%v\n",
-				appName, typ, name, params != nil)
+				provider.AppName, typ, name, params != nil)
 		}
 
 		if name == "" {
@@ -729,7 +772,7 @@ func geminiTranslateTools(tools []any) []geminiTool {
 		// Strip Anthropic server tools — no upstream equivalent we can wire up.
 		if typ != "" && typ != "custom" && typ != "function" {
 			fmt.Fprintf(os.Stderr, "[%s] gemini: stripping Anthropic server tool type=%q name=%q (no upstream equivalent)\n",
-				appName, typ, name)
+				provider.AppName, typ, name)
 			continue
 		}
 		// Gemini rejects extra keys like "$schema", "additionalProperties" on
@@ -1042,10 +1085,11 @@ func geminiTranslateMessages(messages []geminiAnthropicMessage) []geminiContent 
 
 // ── Proxy server ─────────────────────────────────────────────────────────────
 
-var serverGeminiProxies sync.Map
-
-func detectServerGeminiProxy(providerName string) int {
-	cfg := loadServerConfig()
+// DetectServerProxy checks if the weiran server is running and asks it to
+// start (or reuse) a Gemini proxy for the given provider. Returns 0 when
+// no server is reachable.
+func DetectServerProxy(providerName string) int {
+	cfg := provider.LoadServerAddr()
 	if cfg.Token == "" {
 		return 0
 	}
@@ -1080,15 +1124,18 @@ func detectServerGeminiProxy(providerName string) int {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Port == 0 {
 		return 0
 	}
-	fmt.Fprintf(os.Stderr, "[%s] reusing server gemini proxy on port %d\n", appName, result.Port)
+	fmt.Fprintf(os.Stderr, "[%s] reusing server gemini proxy on port %d\n", provider.AppName, result.Port)
 	return result.Port
 }
 
-// startGeminiProxy starts a local HTTP server that translates Anthropic
+// StartProxy starts a local HTTP server that translates Anthropic
 // /v1/messages to Gemini Code Assist streamGenerateContent. Returns the port
 // the server is listening on.
-func startGeminiProxy(provider providerConfig) (int, error) {
-	authFile := provider.AuthFile
+//
+// After a successful start, provider.ActivePort is set so main knows an
+// embedded proxy is live and avoids syscall.Exec.
+func StartProxy(cfg provider.Config) (int, error) {
+	authFile := cfg.AuthFile
 	sess, err := loadGeminiAuth(authFile)
 	if err != nil {
 		return 0, fmt.Errorf("gemini auth: %w", err)
@@ -1119,12 +1166,12 @@ func startGeminiProxy(provider providerConfig) (int, error) {
 
 	go func() {
 		if err := http.Serve(ln, mux); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] gemini proxy stopped: %v\n", appName, err)
+			fmt.Fprintf(os.Stderr, "[%s] gemini proxy stopped: %v\n", provider.AppName, err)
 		}
 	}()
 
-	activeOpenAIProxyPort = port // reuse the same global to signal "external proxy running" to execClaude
-	fmt.Fprintf(os.Stderr, "[%s] gemini proxy started on http://127.0.0.1:%d\n", appName, port)
+	provider.ActivePort = port // signal "external proxy running" to main's claude launcher
+	fmt.Fprintf(os.Stderr, "[%s] gemini proxy started on http://127.0.0.1:%d\n", provider.AppName, port)
 	return port, nil
 }
 
@@ -1279,7 +1326,7 @@ func handleGeminiMessages(w http.ResponseWriter, r *http.Request, sess *geminiSe
 	// multi-session CC from stampeding the OAuth quota window.
 	if remaining := geminiCooldownRemaining(areq.Model); remaining > 0 {
 		fmt.Fprintf(os.Stderr, "[%s] gemini local cooldown: blocking model=%s for %.0fs (no upstream call)\n",
-			appName, areq.Model, remaining.Seconds())
+			provider.AppName, areq.Model, remaining.Seconds())
 		geminiWriteLocalCooldown(w, areq.Model, remaining)
 		return
 	}
@@ -1408,7 +1455,7 @@ func handleGeminiMessages(w http.ResponseWriter, r *http.Request, sess *geminiSe
 			snippet = snippet[:2000] + "...[truncated]"
 		}
 		fmt.Fprintf(os.Stderr, "[%s] gemini upstream %d for model=%s: %s\n",
-			appName, resp.StatusCode, areq.Model, snippet)
+			provider.AppName, resp.StatusCode, areq.Model, snippet)
 
 		// Pick the Anthropic error type based on HTTP status. CC / SDK clients
 		// branch on `type`: rate_limit_error triggers exponential backoff, while
@@ -1662,7 +1709,7 @@ func handleGeminiMessages(w http.ResponseWriter, r *http.Request, sess *geminiSe
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] gemini SSE scanner error: %v\n", appName, err)
+		fmt.Fprintf(os.Stderr, "[%s] gemini SSE scanner error: %v\n", provider.AppName, err)
 	}
 
 	closeThinkingIfOpen()
@@ -1676,7 +1723,7 @@ func handleGeminiMessages(w http.ResponseWriter, r *http.Request, sess *geminiSe
 	// event is emitted with the right value, or if the upstream never sends
 	// finishReason and hasToolUse tracking is stale.
 	fmt.Fprintf(os.Stderr, "[%s] gemini stop_reason debug model=%s finishReason=%q hasToolUse=%v → stop_reason=%q\n",
-		appName, areq.Model, finalFinishReason, hasToolUse, stopReason)
+		provider.AppName, areq.Model, finalFinishReason, hasToolUse, stopReason)
 	msgDelta := geminiMsgDelta{
 		Type: "message_delta",
 		Usage: geminiAnthropicUsage{

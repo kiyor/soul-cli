@@ -14,6 +14,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/kiyor/soul-cli/pkg/provider"
+	"github.com/kiyor/soul-cli/pkg/provider/gemini"
+	"github.com/kiyor/soul-cli/pkg/provider/ollama"
+	"github.com/kiyor/soul-cli/pkg/provider/openai"
 )
 
 // ── Lock ──
@@ -89,10 +94,11 @@ func execClaude(args []string) {
 		}
 	}
 
-	// If an embedded OpenAI/Codex proxy is running, we cannot use syscall.Exec:
-	// exec replaces the entire process image, killing the proxy goroutine before
-	// Claude Code can establish a connection. Use subprocess mode instead.
-	if activeOpenAIProxyPort > 0 {
+	// If an embedded provider proxy (openai/gemini/ollama) is running, we
+	// cannot use syscall.Exec: exec replaces the entire process image, killing
+	// the proxy goroutine before Claude Code can connect. Subprocess mode
+	// keeps the proxy goroutine alive.
+	if provider.ActivePort > 0 {
 		cmd := exec.Command(bin, args...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -305,21 +311,9 @@ func getModelEndpoint() string {
 	return ""
 }
 
-// providerConfig holds baseURL and apiKey for a model provider.
-type providerConfig struct {
-	BaseURL        string   `json:"baseUrl"`
-	APIKey         string   `json:"apiKey"`
-	AuthEnv        string   `json:"authEnv"`        // env var name for the key, default "ANTHROPIC_AUTH_TOKEN"; use "ANTHROPIC_API_KEY" for MiniMax etc.
-	Models         []string `json:"models"`         // available model names for this provider
-	Type           string   `json:"type"`           // "" or "anthropic" (default, passthrough) or "openai" (needs embedded translation proxy)
-	ChatURL        string   `json:"chatUrl"`        // OpenAI-compatible chat completions endpoint (used when Type=="openai")
-	AuthFile       string   `json:"authFile"`       // path to auth JSON (e.g. ~/.codex/auth.json, used when Type=="openai")
-	SmallFastModel string   `json:"smallFastModel"` // override ANTHROPIC_SMALL_FAST_MODEL for this provider (e.g. "glm-5-turbo")
-}
-
 // resolveProvider looks up a provider's endpoint config from config.json "providers" section.
 // config.json is soul-cli's own config (in data/config.json).
-func resolveProvider(providerName string) *providerConfig {
+func resolveProvider(providerName string) *provider.Config {
 	all, _ := loadAllProviders()
 	if prov, ok := all[providerName]; ok && (prov.BaseURL != "" || prov.Type == "openai" || prov.Type == "ollama" || prov.Type == "gemini") {
 		return &prov
@@ -329,7 +323,7 @@ func resolveProvider(providerName string) *providerConfig {
 
 // loadAllProviders returns every provider from the first config.json found,
 // along with the source path that was read.
-func loadAllProviders() (map[string]providerConfig, string) {
+func loadAllProviders() (map[string]provider.Config, string) {
 	configPaths := []string{
 		filepath.Join(appHome, "data", "config.json"),
 		filepath.Join(workspace, "scripts", appName, "config.json"),
@@ -340,7 +334,7 @@ func loadAllProviders() (map[string]providerConfig, string) {
 			continue
 		}
 		var cfg struct {
-			Providers map[string]providerConfig `json:"providers"`
+			Providers map[string]provider.Config `json:"providers"`
 		}
 		if json.Unmarshal(data, &cfg) == nil && len(cfg.Providers) > 0 {
 			return cfg.Providers, p
@@ -389,8 +383,8 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 
 	providerName := parts[0]
 	modelName := parts[1]
-	provider := resolveProvider(providerName)
-	if provider == nil {
+	pcfg := resolveProvider(providerName)
+	if pcfg == nil {
 		fmt.Fprintf(os.Stderr, "[%s] provider %q not found in config.json (try `%s models`)\n", appName, providerName, appName)
 		return env, false
 	}
@@ -399,9 +393,9 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 	// Some upstreams (like MiniMax) silently fall back to a default model when
 	// an unknown name is passed, which leads to "it runs but with the wrong model".
 	// We warn loudly so typos get caught before the first token is generated.
-	if len(provider.Models) > 0 {
+	if len(pcfg.Models) > 0 {
 		found := false
-		for _, m := range provider.Models {
+		for _, m := range pcfg.Models {
 			if m == modelName {
 				found = true
 				break
@@ -410,7 +404,7 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 		if !found {
 			fmt.Fprintf(os.Stderr, "[%s] ⚠️  model %q not registered under provider %q\n", appName, modelName, providerName)
 			fmt.Fprintf(os.Stderr, "[%s]    available: ", appName)
-			for i, m := range provider.Models {
+			for i, m := range pcfg.Models {
 				if i > 0 {
 					fmt.Fprint(os.Stderr, ", ")
 				}
@@ -432,16 +426,16 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 		filtered = append(filtered, v)
 	}
 
-	if provider.Type == "openai" {
+	if pcfg.Type == "openai" {
 		// Prefer server-managed proxy (server process is long-lived; CLI can use syscall.Exec normally).
 		// Fall back to embedded proxy only when no server is running.
 		var port int
-		if serverPort := detectServerOpenAIProxy(providerName); serverPort > 0 {
+		if serverPort := openai.DetectServerProxy(providerName); serverPort > 0 {
 			port = serverPort
 			fmt.Fprintf(os.Stderr, "[%s] using provider %q → server openai proxy http://127.0.0.1:%d\n", appName, providerName, port)
 		} else {
 			var err error
-			port, err = startOpenAIProxy(*provider)
+			port, err = openai.StartProxy(*pcfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[%s] failed to start openai proxy: %v\n", appName, err)
 				return env, false
@@ -450,15 +444,15 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 		}
 		filtered = append(filtered, fmt.Sprintf("ANTHROPIC_BASE_URL=http://127.0.0.1:%d", port))
 		filtered = append(filtered, "ANTHROPIC_AUTH_TOKEN=dummy")
-	} else if provider.Type == "ollama" {
+	} else if pcfg.Type == "ollama" {
 		// Ollama: start embedded proxy that translates Anthropic → OpenAI chat/completions.
 		var port int
-		if serverPort := detectServerOllamaProxy(providerName); serverPort > 0 {
+		if serverPort := ollama.DetectServerProxy(providerName); serverPort > 0 {
 			port = serverPort
 			fmt.Fprintf(os.Stderr, "[%s] using provider %q → server ollama proxy http://127.0.0.1:%d\n", appName, providerName, port)
 		} else {
 			var err error
-			port, err = startOllamaProxy(*provider)
+			port, err = ollama.StartProxy(*pcfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[%s] failed to start ollama proxy: %v\n", appName, err)
 				return env, false
@@ -467,15 +461,15 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 		}
 		filtered = append(filtered, fmt.Sprintf("ANTHROPIC_BASE_URL=http://127.0.0.1:%d", port))
 		filtered = append(filtered, "ANTHROPIC_AUTH_TOKEN=dummy")
-	} else if provider.Type == "gemini" {
+	} else if pcfg.Type == "gemini" {
 		// Gemini: start embedded proxy that translates Anthropic → Gemini Code Assist.
 		var port int
-		if serverPort := detectServerGeminiProxy(providerName); serverPort > 0 {
+		if serverPort := gemini.DetectServerProxy(providerName); serverPort > 0 {
 			port = serverPort
 			fmt.Fprintf(os.Stderr, "[%s] using provider %q → server gemini proxy http://127.0.0.1:%d\n", appName, providerName, port)
 		} else {
 			var err error
-			port, err = startGeminiProxy(*provider)
+			port, err = gemini.StartProxy(*pcfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[%s] failed to start gemini proxy: %v\n", appName, err)
 				return env, false
@@ -485,23 +479,23 @@ func injectProviderEnv(env []string, model string) ([]string, bool) {
 		filtered = append(filtered, fmt.Sprintf("ANTHROPIC_BASE_URL=http://127.0.0.1:%d", port))
 		filtered = append(filtered, "ANTHROPIC_AUTH_TOKEN=dummy")
 	} else {
-		fmt.Fprintf(os.Stderr, "[%s] using provider %q → %s\n", appName, providerName, provider.BaseURL)
-		filtered = append(filtered, "ANTHROPIC_BASE_URL="+provider.BaseURL)
-		if provider.APIKey != "" {
-			authEnv := provider.AuthEnv
+		fmt.Fprintf(os.Stderr, "[%s] using provider %q → %s\n", appName, providerName, pcfg.BaseURL)
+		filtered = append(filtered, "ANTHROPIC_BASE_URL="+pcfg.BaseURL)
+		if pcfg.APIKey != "" {
+			authEnv := pcfg.AuthEnv
 			if authEnv == "" {
 				authEnv = "ANTHROPIC_AUTH_TOKEN"
 			}
-			filtered = append(filtered, authEnv+"="+provider.APIKey)
+			filtered = append(filtered, authEnv+"="+pcfg.APIKey)
 		}
 	}
 
 	// Inject ANTHROPIC_SMALL_FAST_MODEL if the provider defines one.
 	// This makes Claude Code's internal Haiku calls (session titles, tool summaries,
 	// web fetch, etc.) go through the same provider instead of Anthropic.
-	if provider.SmallFastModel != "" {
-		filtered = append(filtered, "ANTHROPIC_SMALL_FAST_MODEL="+provider.SmallFastModel)
-		fmt.Fprintf(os.Stderr, "[%s] small fast model → %s\n", appName, provider.SmallFastModel)
+	if pcfg.SmallFastModel != "" {
+		filtered = append(filtered, "ANTHROPIC_SMALL_FAST_MODEL="+pcfg.SmallFastModel)
+		fmt.Fprintf(os.Stderr, "[%s] small fast model → %s\n", appName, pcfg.SmallFastModel)
 	}
 
 	// Extend timeout for third-party providers (they can be slower)

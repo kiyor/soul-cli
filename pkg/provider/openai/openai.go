@@ -1,12 +1,12 @@
-package main
-
-// provider_openai.go — embedded Anthropic→Codex protocol proxy
+// Package openai is the embedded Anthropic→Codex protocol proxy.
 //
-// When a provider has Type=="openai", injectProviderEnv starts a local HTTP server
-// that translates Anthropic /v1/messages requests to Codex /codex/responses.
-// Claude Code talks Anthropic protocol; the proxy silently translates to ChatGPT Plus (Codex).
+// When a provider has Type=="openai", the soul-cli runtime asks this package
+// for a local HTTP server that translates Anthropic /v1/messages into the
+// Codex /codex/responses API. Claude Code talks Anthropic; this proxy
+// silently speaks ChatGPT Plus (Codex) on the way out.
 //
-// Auth source: ~/.codex/auth.json (written by `codex login`)
+// Auth source: ~/.codex/auth.json (written by `codex login`).
+package openai
 
 import (
 	"bufio"
@@ -20,11 +20,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kiyor/soul-cli/pkg/provider"
 )
 
 // codexSeenEventTypes tracks unique SSE event types observed across all
@@ -40,12 +41,38 @@ var codexSeenEventTypes sync.Map // map[string]struct{}
 // with no `type` field).
 var codexSeenToolTypes sync.Map // map[string]struct{}
 
+// Endpoint is the Codex Responses API URL this package targets by default
+// when a provider does not set ChatURL explicitly.
+const Endpoint = "https://chatgpt.com/backend-api/codex/responses"
+
 const (
-	codexEndpoint = "https://chatgpt.com/backend-api/codex/responses"
+	codexEndpoint = Endpoint
 	codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 	codexTokenURL = "https://auth.openai.com/oauth/token"
 	codexAuthFile = "~/.codex/auth.json"
 )
+
+// Session is the exported alias for the internal codex OAuth session. Exposed
+// so server endpoints that need AccessToken / AccountID / mu can hold a *Session
+// without the subpackage leaking its internal type name.
+type Session = codexSession
+
+// LoadAuth reads the Codex OAuth auth.json (defaults to ~/.codex/auth.json when
+// authFile is empty) and returns a Session ready for use with EnsureTokenFresh.
+// Wraps the internal loadCodexAuth so main-package code doesn't reach into the
+// lowercase name.
+func LoadAuth(authFile string) (*Session, error) { return loadCodexAuth(authFile) }
+
+// EnsureTokenFresh refreshes the access token on sess if it's expired, writing
+// the rotated token back to disk when needed. Wraps ensureCodexTokenFresh.
+func EnsureTokenFresh(sess *Session, authFile string) error {
+	return ensureCodexTokenFresh(sess, authFile)
+}
+
+// UserAgent returns the User-Agent string this package sends on upstream
+// Codex requests. Exported so server endpoints that mint their own HTTP
+// requests (e.g. /api/codex/usage) match the signature of the embedded proxy.
+func UserAgent() string { return codexUserAgent() }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -68,7 +95,7 @@ func loadCodexAuth(authFile string) (*codexSession, error) {
 	if authFile == "" {
 		authFile = codexAuthFile
 	}
-	path := expandPath(authFile)
+	path := provider.ExpandPath(authFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w (run: codex login)", authFile, err)
@@ -85,18 +112,6 @@ func loadCodexAuth(authFile string) (*codexSession, error) {
 		RefreshToken: f.Tokens.RefreshToken,
 		AccountID:    f.Tokens.AccountID,
 	}, nil
-}
-
-// expandPath expands ~ to the home directory.
-func expandPath(p string) string {
-	if !strings.HasPrefix(p, "~") {
-		return p
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return p
-	}
-	return filepath.Join(home, p[1:])
 }
 
 // decodeJWTExp extracts the exp claim from a JWT without signature validation.
@@ -153,7 +168,7 @@ func writeCodexAuthToDisk(sess *codexSession, authFile string) {
 	if authFile == "" {
 		authFile = codexAuthFile
 	}
-	path := expandPath(authFile)
+	path := provider.ExpandPath(authFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
@@ -213,7 +228,7 @@ func refreshCodexToken(sess *codexSession, authFile string) error {
 		// rotated it). Try reloading from disk as a fallback.
 		if bytes.Contains(body, []byte("refresh_token_reused")) || bytes.Contains(body, []byte("already been used")) {
 			if reloadCodexAuthFromDisk(sess, authFile) {
-				fmt.Fprintf(os.Stderr, "[%s] codex: refresh_token_reused → reloaded newer token from disk\n", appName)
+				fmt.Fprintf(os.Stderr, "[%s] codex: refresh_token_reused → reloaded newer token from disk\n", provider.AppName)
 				return nil
 			}
 		}
@@ -244,7 +259,7 @@ func ensureCodexTokenFresh(sess *codexSession, authFile string) error {
 	if ok && time.Now().Before(exp.Add(-30*time.Second)) {
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "[%s] codex token expired, refreshing...\n", appName)
+	fmt.Fprintf(os.Stderr, "[%s] codex token expired, refreshing...\n", provider.AppName)
 	return refreshCodexToken(sess, authFile)
 }
 
@@ -372,7 +387,7 @@ type codexReasoningConfig struct {
 //
 // Anthropic has three thinking types:
 //   - "adaptive":  let the model decide (Opus/Sonnet 4.6+ default) → effort:"high"
-//   - "enabled":   explicit budget N in tokens → bucket into low/medium/high
+//   - "enabled":   explicit budget N in tokens → bucket into low/medium/high/xhigh
 //   - "disabled":  or field absent → effort:"minimal" with no summary
 //
 // Rationale for summary="auto" even at minimal effort: CC's JSONL still
@@ -382,7 +397,13 @@ type codexReasoningConfig struct {
 //
 // Budget bucket thresholds match Anthropic's own internal guidance: <2048 is
 // a light reasoning pass (formatting, short plans); 2048-9999 is medium
-// (multi-step reasoning); 10000+ is deep/ultrathink territory.
+// (multi-step reasoning); 10000-19999 is deep thinking; 20000+ is
+// ultrathink territory and maps to xhigh on gpt-5.4+ (older models without
+// an xhigh tier are normalized back to high by normalizeCodexEffortForModel).
+//
+// Adaptive stays at "high" intentionally: Claude Code's default thinking is
+// adaptive, and bumping that to xhigh would silently overbuy reasoning on
+// every request. xhigh only unlocks when the caller sets an explicit budget.
 func anthropicThinkingToCodexReasoning(th *codexAnthropicThinking) *codexReasoningConfig {
 	if th == nil || th.Type == "" || th.Type == "disabled" {
 		return &codexReasoningConfig{Effort: "minimal"}
@@ -400,8 +421,12 @@ func anthropicThinkingToCodexReasoning(th *codexAnthropicThinking) *codexReasoni
 		effort = "low"
 	case th.BudgetTokens < 10000:
 		effort = "medium"
-	default:
+	case th.BudgetTokens < 20000:
 		effort = "high"
+	default:
+		// 20000+ → ultrathink. Only gpt-5.4+ honours xhigh; older models get
+		// normalized back to high by normalizeCodexEffortForModel.
+		effort = "xhigh"
 	}
 	return &codexReasoningConfig{Summary: "auto", Effort: effort}
 }
@@ -413,28 +438,65 @@ func anthropicThinkingToCodexReasoning(th *codexAnthropicThinking) *codexReasoni
 //	Unsupported value: 'minimal' is not supported with the 'gpt-5.4' model.
 //	Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.
 //
+// The same constraint applies to gpt-5.5 (and presumably any future
+// gpt-5.N with N>=4) — the tier rename happened once and sticks.
+//
 // This matters most for subagent (Agent tool) dispatch: Claude Code spawns
 // subagents without a `thinking` field, which falls through to
-// anthropicThinkingToCodexReasoning → Effort:"minimal" → 400 on gpt-5.4.
+// anthropicThinkingToCodexReasoning → Effort:"minimal" → 400 on gpt-5.4+.
 // Subagents cannot configure their own effort, so the proxy has to normalize.
 func codexModelSupportsMinimalEffort(model string) bool {
-	// gpt-5.4 and gpt-5.4-mini (and any gpt-5.4-* variants) reject "minimal".
-	// Older families (gpt-5.3, gpt-5.2) still accept it.
-	if strings.HasPrefix(model, "gpt-5.4") {
-		return false
+	// Parse the minor version for gpt-5.N models; 5.4+ rejects minimal.
+	// Older families (gpt-5.3, gpt-5.2, o-series) still accept it.
+	if rest, ok := strings.CutPrefix(model, "gpt-5."); ok {
+		minor := 0
+		for i := 0; i < len(rest); i++ {
+			if rest[i] < '0' || rest[i] > '9' {
+				break
+			}
+			minor = minor*10 + int(rest[i]-'0')
+		}
+		if minor >= 4 {
+			return false
+		}
 	}
 	return true
 }
 
+// codexModelSupportsXHighEffort reports whether the target codex model
+// accepts reasoning.effort="xhigh". Only gpt-5.4+ exposes this tier;
+// older gpt-5.N and o-series cap out at "high".
+func codexModelSupportsXHighEffort(model string) bool {
+	if rest, ok := strings.CutPrefix(model, "gpt-5."); ok {
+		minor := 0
+		for i := 0; i < len(rest); i++ {
+			if rest[i] < '0' || rest[i] > '9' {
+				break
+			}
+			minor = minor*10 + int(rest[i]-'0')
+		}
+		if minor >= 4 {
+			return true
+		}
+	}
+	return false
+}
+
 // normalizeCodexEffortForModel rewrites effort values that the target model
-// does not accept. Today only one rewrite is needed: "minimal" → "none" for
-// the gpt-5.4 family. The function is nil-safe and idempotent.
+// does not accept. Two rewrites are needed today:
+//   - "minimal" → "none" for gpt-5.4+ (the zero-reasoning tier was renamed)
+//   - "xhigh"   → "high" for anything other than gpt-5.4+ (tier doesn't exist)
+//
+// The function is nil-safe and idempotent.
 func normalizeCodexEffortForModel(cfg *codexReasoningConfig, model string) {
 	if cfg == nil {
 		return
 	}
 	if cfg.Effort == "minimal" && !codexModelSupportsMinimalEffort(model) {
 		cfg.Effort = "none"
+	}
+	if cfg.Effort == "xhigh" && !codexModelSupportsXHighEffort(model) {
+		cfg.Effort = "high"
 	}
 }
 
@@ -555,7 +617,7 @@ func codexTranslateTools(tools []any) []codexToolSpec {
 		diagKey := typ + "|" + name
 		if _, loaded := codexSeenToolTypes.LoadOrStore(diagKey, struct{}{}); !loaded {
 			fmt.Fprintf(os.Stderr, "[%s] codex tool seen: type=%q name=%q has_schema=%v\n",
-				appName, typ, name, params != nil)
+				provider.AppName, typ, name, params != nil)
 		}
 
 		if name == "" {
@@ -567,7 +629,7 @@ func codexTranslateTools(tools []any) []codexToolSpec {
 		// computer_*. If Anthropic adds more, they'll match here too.
 		if typ != "" && typ != "custom" && typ != "function" {
 			fmt.Fprintf(os.Stderr, "[%s] codex: stripping Anthropic server tool type=%q name=%q (no upstream equivalent)\n",
-				appName, typ, name)
+				provider.AppName, typ, name)
 			continue
 		}
 		// Client tools must have a schema — Codex requires `parameters` to
@@ -771,14 +833,14 @@ func codexVerbosityFor(maxTokens int) string {
 
 // ── Server proxy delegation ───────────────────────────────────────────────────
 
-// detectServerOpenAIProxy checks if the weiran server is running and asks it to
+// DetectServerProxy checks if the weiran server is running and asks it to
 // start (or reuse) an OpenAI proxy for the given provider. Returns the proxy port,
 // or 0 if the server is not available or does not support the provider.
 //
 // When the server manages the proxy, CLI can use syscall.Exec normally (the proxy
 // goroutine lives in the long-running server process, not the ephemeral CLI process).
-func detectServerOpenAIProxy(providerName string) int {
-	cfg := loadServerConfig()
+func DetectServerProxy(providerName string) int {
+	cfg := provider.LoadServerAddr()
 	if cfg.Token == "" {
 		return 0
 	}
@@ -820,27 +882,25 @@ func detectServerOpenAIProxy(providerName string) int {
 		return 0
 	}
 
-	fmt.Fprintf(os.Stderr, "[%s] reusing server openai proxy on port %d\n", appName, result.Port)
+	fmt.Fprintf(os.Stderr, "[%s] reusing server openai proxy on port %d\n", provider.AppName, result.Port)
 	return result.Port
 }
 
 // ── Embedded proxy ────────────────────────────────────────────────────────────
 
-// activeOpenAIProxyPort is non-zero when an embedded OpenAI proxy is running.
-// Used by execClaude() to detect that syscall.Exec cannot be used (exec replaces
-// the process image, killing the proxy goroutine). CLI modes must use subprocess.
-var activeOpenAIProxyPort int
-
-// startOpenAIProxy starts a local HTTP server that translates Anthropic /v1/messages
+// StartProxy starts a local HTTP server that translates Anthropic /v1/messages
 // to Codex /codex/responses. Returns the port the server is listening on.
-func startOpenAIProxy(provider providerConfig) (int, error) {
-	authFile := provider.AuthFile
+//
+// After a successful start, provider.ActivePort is set so the main package
+// knows to avoid syscall.Exec (which would kill the proxy goroutine).
+func StartProxy(cfg provider.Config) (int, error) {
+	authFile := cfg.AuthFile
 	sess, err := loadCodexAuth(authFile)
 	if err != nil {
 		return 0, fmt.Errorf("codex auth: %w", err)
 	}
 
-	chatURL := provider.ChatURL
+	chatURL := cfg.ChatURL
 	if chatURL == "" {
 		chatURL = codexEndpoint
 	}
@@ -865,12 +925,12 @@ func startOpenAIProxy(provider providerConfig) (int, error) {
 
 	go func() {
 		if err := http.Serve(ln, mux); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] codex proxy stopped: %v\n", appName, err)
+			fmt.Fprintf(os.Stderr, "[%s] codex proxy stopped: %v\n", provider.AppName, err)
 		}
 	}()
 
-	activeOpenAIProxyPort = port
-	fmt.Fprintf(os.Stderr, "[%s] codex proxy started on http://127.0.0.1:%d\n", appName, port)
+	provider.ActivePort = port
+	fmt.Fprintf(os.Stderr, "[%s] codex proxy started on http://127.0.0.1:%d\n", provider.AppName, port)
 	return port, nil
 }
 
@@ -924,7 +984,7 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 	if !strings.HasPrefix(targetModel, "gpt-") {
 		fmt.Fprintf(os.Stderr,
 			"[%s] codex proxy: model %q does not have gpt- prefix; codex endpoint may reject\n",
-			appName, targetModel)
+			provider.AppName, targetModel)
 	}
 
 	// Map Anthropic's thinking config onto Codex's reasoning config so
@@ -984,7 +1044,7 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 			snippet = snippet[:2000] + "...[truncated]"
 		}
 		fmt.Fprintf(os.Stderr, "[%s] codex upstream %d for model=%s: %s\n",
-			appName, resp.StatusCode, targetModel, snippet)
+			provider.AppName, resp.StatusCode, targetModel, snippet)
 
 		// Map upstream HTTP status to Anthropic-shaped error type. CC/SDK
 		// clients branch on `error.type`: rate_limit_error triggers exponential
@@ -1185,7 +1245,7 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 			if len(snip) > 200 {
 				snip = snip[:200]
 			}
-			fmt.Fprintf(os.Stderr, "[%s] codex event type seen: %s | %s\n", appName, eventType, string(snip))
+			fmt.Fprintf(os.Stderr, "[%s] codex event type seen: %s | %s\n", provider.AppName, eventType, string(snip))
 		}
 
 		switch eventType {
@@ -1547,7 +1607,7 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] codex SSE scanner error: %v\n", appName, err)
+		fmt.Fprintf(os.Stderr, "[%s] codex SSE scanner error: %v\n", provider.AppName, err)
 	}
 
 	// Close any blocks that were left open (text, or tool_use blocks that
@@ -1580,7 +1640,7 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 	// Diagnostic: log the inputs + mapping so we can see why downstream CC
 	// sometimes records an empty stop_reason.
 	fmt.Fprintf(os.Stderr, "[%s] codex stop_reason debug finishReason=%q incompleteReason=%q hasToolUse=%v → stop_reason=%q\n",
-		appName, finishReason, incompleteReason, hasToolUse, stopReason)
+		provider.AppName, finishReason, incompleteReason, hasToolUse, stopReason)
 
 	msgDelta := codexMsgDelta{Type: "message_delta", Usage: codexAnthropicUsage{OutputTokens: outputTokens}}
 	msgDelta.Delta.StopReason = stopReason

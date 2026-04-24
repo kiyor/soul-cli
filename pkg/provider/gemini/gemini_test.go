@@ -1,4 +1,4 @@
-package main
+package gemini
 
 // provider_gemini_test.go — regression tests for every Gemini integration pitfall
 // we hit during bring-up. Each test documents the exact upstream 400/429 symptom

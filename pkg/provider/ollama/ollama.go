@@ -1,11 +1,10 @@
-package main
-
-// provider_ollama.go — embedded Anthropic→Ollama protocol proxy
+// Package ollama is the embedded Anthropic→Ollama protocol proxy.
 //
-// When a provider has Type=="ollama", injectProviderEnv starts a local HTTP server
-// that translates Anthropic /v1/messages requests to Ollama /v1/chat/completions
-// (standard OpenAI-compatible format).
-// Claude Code talks Anthropic protocol; the proxy silently translates to Ollama.
+// When a provider has Type=="ollama", the soul-cli runtime asks this package
+// for a local HTTP server that translates Anthropic /v1/messages into the
+// standard OpenAI-compatible Ollama /v1/chat/completions format. Claude Code
+// talks Anthropic; this proxy silently speaks Ollama on the way out.
+package ollama
 
 import (
 	"bufio"
@@ -19,8 +18,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/kiyor/soul-cli/pkg/provider"
 )
 
 // ── Ollama (OpenAI-compatible) request types ──────────────────────────────────
@@ -369,10 +369,11 @@ func ollamaTranslateMessages(messages []ollamaAnthropicMsg) []ollamaChatMessage 
 
 // ── Server proxy delegation ───────────────────────────────────────────────────
 
-var serverOllamaProxies sync.Map
-
-func detectServerOllamaProxy(providerName string) int {
-	cfg := loadServerConfig()
+// DetectServerProxy checks if the weiran server is running and asks it to
+// start (or reuse) an Ollama proxy for the given provider. Returns 0 when
+// no server is reachable.
+func DetectServerProxy(providerName string) int {
+	cfg := provider.LoadServerAddr()
 	if cfg.Token == "" {
 		return 0
 	}
@@ -407,16 +408,28 @@ func detectServerOllamaProxy(providerName string) int {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Port == 0 {
 		return 0
 	}
-	fmt.Fprintf(os.Stderr, "[%s] reusing server ollama proxy on port %d\n", appName, result.Port)
+	fmt.Fprintf(os.Stderr, "[%s] reusing server ollama proxy on port %d\n", provider.AppName, result.Port)
 	return result.Port
+}
+
+// writeJSON mirrors the main-package helper; inlined here to keep the
+// ollama subpackage self-contained.
+func writeJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 // ── Embedded proxy ────────────────────────────────────────────────────────────
 
-var activeOllamaProxyPort int
-
-func startOllamaProxy(provider providerConfig) (int, error) {
-	baseURL := strings.TrimRight(provider.BaseURL, "")
+// StartProxy starts a local HTTP server that translates Anthropic /v1/messages
+// to Ollama /v1/chat/completions (OpenAI-compatible). Returns the port the
+// server is listening on.
+//
+// After a successful start, provider.ActivePort is set so main knows an
+// embedded proxy is live and avoids syscall.Exec.
+func StartProxy(cfg provider.Config) (int, error) {
+	baseURL := strings.TrimRight(cfg.BaseURL, "")
 	if baseURL == "" {
 		baseURL = "http://localhost:11434"
 	}
@@ -442,12 +455,12 @@ func startOllamaProxy(provider providerConfig) (int, error) {
 
 	go func() {
 		if err := http.Serve(ln, mux); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] ollama proxy stopped: %v\n", appName, err)
+			fmt.Fprintf(os.Stderr, "[%s] ollama proxy stopped: %v\n", provider.AppName, err)
 		}
 	}()
 
-	activeOllamaProxyPort = port
-	fmt.Fprintf(os.Stderr, "[%s] ollama proxy started on http://127.0.0.1:%d → %s\n", appName, port, chatURL)
+	provider.ActivePort = port
+	fmt.Fprintf(os.Stderr, "[%s] ollama proxy started on http://127.0.0.1:%d → %s\n", provider.AppName, port, chatURL)
 	return port, nil
 }
 
@@ -545,7 +558,7 @@ func handleOllamaMessages(w http.ResponseWriter, r *http.Request, chatURL string
 			snippet = snippet[:2000] + "...[truncated]"
 		}
 		fmt.Fprintf(os.Stderr, "[%s] ollama upstream %d for model=%s: %s\n",
-			appName, resp.StatusCode, modelName, snippet)
+			provider.AppName, resp.StatusCode, modelName, snippet)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		errMsg, _ := json.Marshal(map[string]any{
@@ -755,7 +768,7 @@ func handleOllamaMessages(w http.ResponseWriter, r *http.Request, chatURL string
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] ollama SSE scanner error: %v\n", appName, err)
+		fmt.Fprintf(os.Stderr, "[%s] ollama SSE scanner error: %v\n", provider.AppName, err)
 	}
 
 	// Close remaining text block

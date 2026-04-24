@@ -1,44 +1,17 @@
-package main
+package ollama
 
 import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestResolveProvider_AllowsOllamaWithoutBaseURL(t *testing.T) {
-	dir := t.TempDir()
-	cfg := `{
-		"providers": {
-			"ollama": {
-				"type": "ollama",
-				"models": ["llama3.2"]
-			}
-		}
-	}`
-	if err := os.MkdirAll(filepath.Join(dir, "data"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "data", "config.json"), []byte(cfg), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	origAppHome := appHome
-	appHome = dir
-	defer func() { appHome = origAppHome }()
-
-	prov := resolveProvider("ollama")
-	if prov == nil {
-		t.Fatal("resolveProvider(ollama) = nil, want provider")
-	}
-	if prov.Type != "ollama" {
-		t.Fatalf("resolveProvider(ollama) type = %q, want ollama", prov.Type)
-	}
-}
+// Note: TestResolveProvider_AllowsOllamaWithoutBaseURL lived here historically
+// but tests main-package resolveProvider + appHome, so it moved to
+// resolve_provider_test.go in the main package when the ollama proxy was
+// split out into this subpackage.
 
 func TestHandleOllamaMessages_NonStreamReturnsAnthropicJSON(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

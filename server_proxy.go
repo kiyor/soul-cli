@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -12,11 +13,15 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kiyor/soul-cli/pkg/provider/gemini"
+	"github.com/kiyor/soul-cli/pkg/provider/openai"
 )
 
 // ── Anthropic API Proxy ──
@@ -1631,6 +1636,165 @@ func registerProxyAPI(mux *http.ServeMux, token string) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(body)
 	}))
+
+	// GET /api/codex/usage — Codex (ChatGPT/OpenAI) plan usage & rate limits.
+	// Reads ~/.codex/auth.json (OAuth access_token + account_id), refreshes if
+	// expired, then calls https://chatgpt.com/backend-api/wham/usage. Returns
+	// {configured: false} when codex auth file is missing/empty.
+	mux.HandleFunc("GET /api/codex/usage", authMiddleware(token, func(w http.ResponseWriter, r *http.Request) {
+		sess, err := openai.LoadAuth("")
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"configured": false,
+				"reason":     err.Error(),
+			})
+			return
+		}
+		if err := openai.EnsureTokenFresh(sess, ""); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error": "codex token refresh failed: " + err.Error(),
+			})
+			return
+		}
+
+		req, err := http.NewRequestWithContext(r.Context(), "GET",
+			"https://chatgpt.com/backend-api/wham/usage", nil)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+sess.AccessToken)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", openai.UserAgent())
+		if sess.AccountID != "" {
+			req.Header.Set("ChatGPT-Account-Id", sess.AccountID)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Codex request failed: " + err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+	}))
+
+	// GET /api/gemini/usage — Gemini (Code Assist) per-model quota.
+	// Reads ~/.gemini/oauth_creds.json (OAuth access_token), refreshes if expired,
+	// resolves/caches the cloudaicompanionProject, then calls
+	// https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota.
+	// Response shape: { buckets: [ { modelId, remainingAmount, remainingFraction, resetTime, tokenType } ] }
+	// Returns {configured: false} when the gemini auth file is missing/empty.
+	mux.HandleFunc("GET /api/gemini/usage", authMiddleware(token, func(w http.ResponseWriter, r *http.Request) {
+		sess, err := gemini.LoadAuth("")
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"configured": false,
+				"reason":     err.Error(),
+			})
+			return
+		}
+		if err := gemini.EnsureTokenFresh(sess, ""); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error": "gemini token refresh failed: " + err.Error(),
+			})
+			return
+		}
+		if err := gemini.ResolveProject(sess, ""); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error": "gemini project resolve failed: " + err.Error(),
+			})
+			return
+		}
+
+		tok, projectID := sess.Snapshot()
+
+		reqBody, _ := json.Marshal(map[string]string{"project": projectID})
+		quotaURL := fmt.Sprintf("%s/%s:retrieveUserQuota", gemini.CodeAssistEndpoint, gemini.CodeAssistVersion)
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, quotaURL, bytes.NewReader(reqBody))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gemini request failed: " + err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+	}))
+
+	// GET /api/anthropic/usage — Claude.ai subscription utilization.
+	// Calls https://api.anthropic.com/api/oauth/usage (the same endpoint Claude
+	// Code's own `/status` reads from). Uses the OAuth token stored in keychain
+	// and proactively refreshes if near expiry. Returns richer data than the
+	// header-scraped `rate_limit` in /api/proxy/usage, including per-model
+	// 7-day buckets (opus / sonnet) and extra_usage / overage info.
+	//
+	// Response shape (from Claude Code source src/services/api/usage.ts):
+	//   {
+	//     five_hour?: { utilization, resets_at },
+	//     seven_day?: { utilization, resets_at },
+	//     seven_day_oauth_apps?: { utilization, resets_at },
+	//     seven_day_opus?: { utilization, resets_at },
+	//     seven_day_sonnet?: { utilization, resets_at },
+	//     extra_usage?: { is_enabled, monthly_limit, used_credits, utilization }
+	//   }
+	// Returns {configured: false} when no OAuth token is available.
+	mux.HandleFunc("GET /api/anthropic/usage", authMiddleware(token, func(w http.ResponseWriter, r *http.Request) {
+		creds := readClaudeKeychainCreds()
+		if creds == nil || creds.AccessToken == "" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"configured": false,
+				"reason":     "keychain unreachable or empty; run `claude login` in a GUI session",
+			})
+			return
+		}
+		// Proactively warm if near expiry (same pattern as /api/oauth/token handler).
+		remaining := time.UnixMilli(creds.ExpiresAt).Sub(time.Now())
+		if remaining < warmThreshold {
+			ensureFreshClaudeCreds()
+			if fresh := readClaudeKeychainCreds(); fresh != nil {
+				creds = fresh
+			}
+		}
+
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
+			"https://api.anthropic.com/api/oauth/usage", nil)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+creds.AccessToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		// Mimic Claude Code UA so the endpoint treats us the same way.
+		req.Header.Set("User-Agent", "claude-cli/1.0.0 (external, cli)")
+		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Anthropic request failed: " + err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+	}))
 }
 
 // intParam parses an integer query parameter with a default.
@@ -1650,9 +1814,15 @@ func intParam(q url.Values, key string, def int) int {
 // In CLI mode, detects if weiran server proxy is running.
 var activeProxyPort int // set when proxy starts in server process
 
-// serverOpenAIProxies caches per-provider OpenAI proxy ports started in server process.
-// Key: provider name (string), Value: port (int). Used by /api/proxy/openai endpoint.
-var serverOpenAIProxies sync.Map
+// serverOpenAIProxies / serverGeminiProxies / serverOllamaProxies cache
+// per-provider proxy ports started in the server process. Key: provider
+// name, Value: port. Consumed by the /api/proxy/{openai,gemini,ollama}
+// endpoints to dedupe proxy starts across repeat hits.
+var (
+	serverOpenAIProxies sync.Map
+	serverGeminiProxies sync.Map
+	serverOllamaProxies sync.Map
+)
 
 var (
 	detectedProxyPort int
@@ -1661,38 +1831,109 @@ var (
 	oauthTokenOnce    sync.Once
 )
 
-// oauthToken returns the cached CLAUDE_CODE_OAUTH_TOKEN.
-// Priority: env var > workspace/.oauth-token file > config.json server.oauthToken
-//           > local weiran server /api/oauth/token (CLI mode only)
-// If the token fails validation (expired / invalid), it is NOT cached so the
-// process falls back to its own auth (keychain-based OAuth). This prevents
-// a stale workspace file from breaking all spawned processes.
+// readDynamicOAuthToken executes workspace/.oauth-token.cmd as a shell script
+// and returns its stdout as the token. The file contains a shell command whose
+// stdout is captured as the OAuth token, e.g.:
 //
-// The server-IPC fallback only runs when `isServerMode == false` — i.e. we're
-// a CLI invocation like `weiran -p "..."` or `weiran token`. The server itself
-// runs under launchd and has native keychain access, so it shouldn't IPC to
-// itself (would loop and is redundant anyway).
+//	weiran token 2>/dev/null
+//
+// This is the "shell-mode token" pattern — fresh token fetched on every call,
+// bypassing the sync.Once cache. Intended for instances (like hengzhun) that
+// delegate token fetching to another binary (`weiran token`) instead of
+// maintaining their own keychain credentials.
+//
+// Returns "" if the file doesn't exist, the command fails, times out (5s), or
+// produces an invalid/expired token. Caller should fall through to the cached
+// static-token chain in that case.
+func readDynamicOAuthToken() string {
+	cmdFile := workspace + "/.oauth-token.cmd"
+	data, err := os.ReadFile(cmdFile)
+	if err != nil {
+		return ""
+	}
+	script := strings.TrimSpace(string(data))
+	if script == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "sh", "-c", script).Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from %s: exec failed: %v\n", appName, cmdFile, err)
+		return ""
+	}
+	tok := strings.TrimSpace(string(out))
+	if tok == "" {
+		return ""
+	}
+	// Intentionally NOT calling validateOAuthToken() here: /v1/models returns 401
+	// for all OAuth tokens (Anthropic only accepts OAuth on /v1/messages), which
+	// would false-positive every fresh token. Shell-mode treats the upstream
+	// command as authoritative — if the command returns a non-empty string, we
+	// trust it. Bad tokens will surface as 401 from claude itself; the next
+	// spawn re-evaluates the script and gets a new one.
+	fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from %s\n", appName, cmdFile)
+	return tok
+}
+
+// oauthToken returns the CLAUDE_CODE_OAUTH_TOKEN for injection into spawned
+// claude processes.
+//
+// Priority:
+//  0. workspace/.oauth-token.cmd — shell script, re-eval every call (NO CACHE)
+//  1. Env var CLAUDE_CODE_OAUTH_TOKEN                  ┐
+//  2. workspace/.oauth-token (static file)             │
+//  3. config.json server.oauthToken                    │ cached by sync.Once
+//  4. Local weiran server IPC (CLI mode only)          │
+//  5. macOS keychain                                   │
+//  6. ~/.claude/.credentials.json                      ┘
+//
+// The shell-mode (priority 0) is for instances that delegate token fetching to
+// another process (e.g. hengzhun → `weiran token`). It bypasses the cache so
+// every spawn gets a fresh token. Steps 1-6 are cached via sync.Once to
+// prevent a stale fallback from breaking everything.
+//
+// If the token fails validation (expired / invalid) at steps 2/5, it is NOT
+// cached so the process falls back to its own auth. The server-IPC fallback
+// only runs when `isServerMode == false` — i.e. CLI invocations like
+// `weiran -p "..."` or `weiran token`. The server itself runs under launchd
+// and has native keychain access, so it shouldn't IPC to itself.
 func oauthToken() string {
+	// Priority 0: shell-mode — fresh token every call, bypasses cache
+	if tok := readDynamicOAuthToken(); tok != "" {
+		return tok
+	}
+
 	oauthTokenOnce.Do(func() {
+		tried := []string{}
+
 		// 1. Environment variable
 		if tok := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); tok != "" {
 			cachedOAuthToken = tok
 			fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from env\n", appName)
 			return
 		}
+		tried = append(tried, "env")
+
 		// 2. File: workspace/.oauth-token
 		tokenFile := workspace + "/.oauth-token"
 		if data, err := os.ReadFile(tokenFile); err == nil {
 			if t := strings.TrimSpace(string(data)); t != "" {
 				if !validateOAuthToken(t) {
 					fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from %s: INVALID/EXPIRED — skipping\n", appName, tokenFile)
+					tried = append(tried, "file:expired")
 				} else {
 					cachedOAuthToken = t
 					fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from %s (validated)\n", appName, tokenFile)
 					return
 				}
+			} else {
+				tried = append(tried, "file:empty")
 			}
+		} else {
+			tried = append(tried, "file:missing")
 		}
+
 		// 3. config.json server.oauthToken
 		type oauthCfg struct {
 			Server struct {
@@ -1706,7 +1947,11 @@ func oauthToken() string {
 				fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from config.json\n", appName)
 				return
 			}
+			tried = append(tried, "config:empty")
+		} else {
+			tried = append(tried, "config:missing")
 		}
+
 		// 4. Local weiran server /api/oauth/token (CLI mode only — prevents self-loop).
 		// This is the SSH path: the server (launchd) reads keychain on our behalf.
 		if !isServerMode {
@@ -1715,7 +1960,38 @@ func oauthToken() string {
 				fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from local server\n", appName)
 				return
 			}
+			tried = append(tried, "server:fail")
+		} else {
+			tried = append(tried, "server:skipped(isServerMode)")
 		}
+
+		// 5. macOS keychain (GUI session only — SSH cannot unlock login keychain)
+		if creds := readClaudeKeychainCreds(); creds != nil && creds.AccessToken != "" {
+			// Respect expiry if we know it
+			if creds.ExpiresAt == 0 || time.UnixMilli(creds.ExpiresAt).After(time.Now()) {
+				cachedOAuthToken = creds.AccessToken
+				fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from keychain\n", appName)
+				return
+			}
+			tried = append(tried, "keychain:expired")
+		} else {
+			tried = append(tried, "keychain:miss")
+		}
+
+		// 6. ~/.claude/.credentials.json (CC's own fallback file — may be stale
+		// since CC deletes it after a successful keychain write, but worth trying).
+		if tok := readClaudeCredentialsFile(func(string, ...any) {}); tok != "" {
+			cachedOAuthToken = tok
+			fmt.Fprintf(os.Stderr, "[%s] CLAUDE_CODE_OAUTH_TOKEN from ~/.claude/.credentials.json\n", appName)
+			return
+		}
+		tried = append(tried, "credsfile:miss")
+
+		// All paths failed — warn loudly. Previously this was silent, which made
+		// stale-token 401s look like a bug in claude rather than a weiran
+		// injection failure.
+		fmt.Fprintf(os.Stderr, "[%s] ⚠️  oauthToken: all paths failed [%s] — claude will fall back to its own auth (likely 401 if keychain also stale)\n",
+			appName, strings.Join(tried, ", "))
 	})
 	return cachedOAuthToken
 }

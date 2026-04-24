@@ -1,4 +1,4 @@
-package main
+package openai
 
 import (
 	"encoding/json"
@@ -419,7 +419,9 @@ func TestAnthropicThinkingToCodexReasoning(t *testing.T) {
 		{"enabled budget=7999 → medium (CC haiku)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 7999}, "medium", "auto"},
 		{"enabled budget=9999 → medium (edge)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 9999}, "medium", "auto"},
 		{"enabled budget=10000 → high (edge)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 10000}, "high", "auto"},
-		{"enabled budget=31999 → high (CC haiku)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 31999}, "high", "auto"},
+		{"enabled budget=19999 → high (edge before xhigh)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 19999}, "high", "auto"},
+		{"enabled budget=20000 → xhigh (edge)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 20000}, "xhigh", "auto"},
+		{"enabled budget=31999 → xhigh (CC haiku ultrathink)", &codexAnthropicThinking{Type: "enabled", BudgetTokens: 31999}, "xhigh", "auto"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -437,10 +439,12 @@ func TestAnthropicThinkingToCodexReasoning(t *testing.T) {
 	}
 }
 
-// TestNormalizeCodexEffortForModel covers the gpt-5.4 minimal→none shim.
-// gpt-5.4 rejects effort="minimal" (only accepts none/low/medium/high/xhigh),
-// so subagent spawns (which default to thinking=disabled → effort=minimal)
-// would 400 without this normalization.
+// TestNormalizeCodexEffortForModel covers the two per-model shims:
+//   - gpt-5.4+ rejects effort="minimal" (the tier was renamed to "none"),
+//     so subagent spawns (which default to thinking=disabled → effort=minimal)
+//     would 400 without this normalization.
+//   - only gpt-5.4+ accepts effort="xhigh"; older models need it downgraded
+//     back to "high" so the ultrathink budget bucket still routes somewhere.
 func TestNormalizeCodexEffortForModel(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -458,6 +462,18 @@ func TestNormalizeCodexEffortForModel(t *testing.T) {
 			name:       "gpt-5.4-mini minimal → none",
 			in:         &codexReasoningConfig{Effort: "minimal"},
 			model:      "gpt-5.4-mini",
+			wantEffort: "none",
+		},
+		{
+			name:       "gpt-5.5 minimal → none (same family as 5.4)",
+			in:         &codexReasoningConfig{Effort: "minimal"},
+			model:      "gpt-5.5",
+			wantEffort: "none",
+		},
+		{
+			name:       "gpt-5.5-codex minimal → none",
+			in:         &codexReasoningConfig{Effort: "minimal"},
+			model:      "gpt-5.5-codex",
 			wantEffort: "none",
 		},
 		{
@@ -482,6 +498,30 @@ func TestNormalizeCodexEffortForModel(t *testing.T) {
 			name:       "gpt-5.4 high unchanged",
 			in:         &codexReasoningConfig{Effort: "high", Summary: "auto"},
 			model:      "gpt-5.4",
+			wantEffort: "high",
+		},
+		{
+			name:       "gpt-5.4 xhigh unchanged (supported)",
+			in:         &codexReasoningConfig{Effort: "xhigh", Summary: "auto"},
+			model:      "gpt-5.4",
+			wantEffort: "xhigh",
+		},
+		{
+			name:       "gpt-5.5 xhigh unchanged (supported)",
+			in:         &codexReasoningConfig{Effort: "xhigh", Summary: "auto"},
+			model:      "gpt-5.5",
+			wantEffort: "xhigh",
+		},
+		{
+			name:       "gpt-5.3 xhigh → high (tier does not exist)",
+			in:         &codexReasoningConfig{Effort: "xhigh", Summary: "auto"},
+			model:      "gpt-5.3-codex",
+			wantEffort: "high",
+		},
+		{
+			name:       "gpt-5.2 xhigh → high",
+			in:         &codexReasoningConfig{Effort: "xhigh", Summary: "auto"},
+			model:      "gpt-5.2",
 			wantEffort: "high",
 		},
 		{
