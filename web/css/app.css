@@ -566,6 +566,33 @@ body{
   padding:12px;background:rgba(var(--accent-r),.04);margin:10px 0;
 }
 .auq-container.submitted{opacity:.6}
+
+/* Permission requests (Bash/Edit/Write tool approvals) — visually distinct
+   so they stand out from regular AskUserQuestion. Amber-warning accent + a
+   header banner + sticky-ish nudge so they don't get auto-dismissed by the
+   user typing a new message without realizing it was a permission ask. */
+.auq-container[data-kind="permission"]{
+  border:1.5px solid rgba(217,119,6,.55);
+  background:rgba(217,119,6,.06);
+  box-shadow:0 0 0 1px rgba(217,119,6,.15) inset, 0 2px 12px rgba(217,119,6,.08);
+}
+.auq-permission-banner{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:4px 10px;border-radius:99px;
+  background:rgba(217,119,6,.18);color:#f59e0b;
+  font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;
+  margin-bottom:10px;
+}
+.auq-permission-banner code{
+  background:rgba(0,0,0,.25);color:#fbbf24;
+  padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600;
+  text-transform:none;letter-spacing:0;
+}
+.auq-container[data-kind="permission"].auq-dismissed{
+  border-color:rgba(239,68,68,.6);
+  background:rgba(239,68,68,.06);
+}
+
 .auq-question{margin-bottom:14px}
 .auq-question:last-of-type{margin-bottom:8px}
 .auq-header{
@@ -586,6 +613,57 @@ body{
 }
 .auq-cancel:hover{color:var(--text);border-color:rgba(255,255,255,.2)}
 .auq-cancel:disabled{opacity:.3;pointer-events:none}
+
+/* Plan approval dialog */
+.plan-approval{
+  border:1px solid rgba(129,140,248,.3);border-radius:var(--radius2);
+  padding:14px;background:rgba(129,140,248,.06);margin:10px 0;
+}
+.plan-approval.submitted{opacity:.6}
+.plan-approval .plan-header{
+  display:flex;align-items:center;gap:8px;margin-bottom:10px;
+}
+.plan-approval .plan-badge{
+  display:inline-block;padding:2px 8px;border-radius:6px;
+  background:rgba(129,140,248,.2);color:#a5b4fc;
+  font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;
+}
+.plan-approval .plan-file{
+  font-size:11px;color:var(--muted2);font-family:var(--mono);
+}
+.plan-approval .plan-content{
+  max-height:400px;overflow-y:auto;padding:10px 12px;
+  border:1px solid rgba(255,255,255,.06);border-radius:var(--radius);
+  background:rgba(0,0,0,.15);margin-bottom:10px;font-size:13px;line-height:1.6;
+}
+.plan-approval .plan-content .md{color:var(--text)}
+.plan-approval .plan-content h1,.plan-approval .plan-content h2,.plan-approval .plan-content h3{margin-top:8px}
+.plan-approval .plan-content::-webkit-scrollbar{width:5px}
+.plan-approval .plan-content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:3px}
+.plan-approval .plan-feedback{
+  width:100%;padding:8px 10px;border:1px solid rgba(255,255,255,.1);
+  border-radius:var(--radius);background:rgba(0,0,0,.2);
+  color:var(--text);font-size:12px;font-family:var(--sans);
+  resize:vertical;min-height:36px;max-height:120px;margin-bottom:10px;
+}
+.plan-approval .plan-feedback::placeholder{color:var(--muted2)}
+.plan-approval .plan-footer{display:flex;gap:8px;align-items:center}
+.plan-approval .plan-approve{
+  flex:1;padding:10px 14px;border-radius:var(--radius2);cursor:pointer;
+  border:1px solid rgba(129,140,248,.3);background:rgba(129,140,248,.15);
+  color:#c7d2fe;font-size:13px;font-weight:600;font-family:var(--sans);
+  transition:all .15s var(--spring);
+}
+.plan-approval .plan-approve:hover{background:rgba(129,140,248,.25);color:#e0e7ff}
+.plan-approval .plan-approve:disabled{opacity:.4;pointer-events:none}
+.plan-approval .plan-reject{
+  padding:10px 14px;border-radius:var(--radius2);cursor:pointer;
+  border:1px solid rgba(255,255,255,.1);background:transparent;
+  color:var(--muted2);font-size:12px;font-family:var(--sans);
+  transition:all .15s var(--spring);
+}
+.plan-approval .plan-reject:hover{color:#fca5a5;border-color:rgba(252,165,165,.3)}
+.plan-approval .plan-reject:disabled{opacity:.3;pointer-events:none}
 
 /* Quick reply chips */
 .chips-container{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
@@ -830,12 +908,26 @@ body{
 @keyframes todoBarGlint{0%{left:-50%}100%{left:150%}}
 .todo-drawer-body .todo-pct{font-size:11px;color:var(--muted2);font-family:var(--mono);min-width:32px;text-align:right}
 .todo-drawer-empty{padding:20px;text-align:center;color:var(--muted2);font-size:12px}
-.todo-tab{
+/* ── Right-edge adaptive tab stack ── */
+/* All drawer tabs (Todo/Agents/Tasks/tmux) live inside .right-tabs-stack.
+   Flexbox centers the group on viewport; display:none tabs naturally drop
+   out of flow, so visible count (1..4) is handled automatically.
+   max-height + gap adapt to short windows (no overlap, no silly gaps). */
+.right-tabs-stack{
   position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:29;
+  display:flex;flex-direction:column;gap:6px;
+  max-height:calc(100vh - var(--topbar-h, 48px) - 16px);
+  pointer-events:none; /* container itself is just layout; children get events */
+}
+.right-tabs-stack > *{pointer-events:auto}
+/* Squeeze gap if vertical space is tight */
+@media (max-height:700px){.right-tabs-stack{gap:3px}}
+@media (max-height:560px){.right-tabs-stack{gap:1px}}
+.todo-tab{
   writing-mode:vertical-rl;text-orientation:mixed;
   padding:10px 5px;border-radius:8px 0 0 8px;
   background:var(--accent2);color:#fff;font-size:11px;font-weight:700;
-  cursor:pointer;opacity:.7;transition:opacity .2s,right .3s var(--spring);
+  cursor:pointer;opacity:.7;transition:opacity .2s;
   letter-spacing:1px;display:none;
 }
 .todo-tab:hover{opacity:1}
@@ -871,7 +963,7 @@ body{
 .todo-session-group:hover{background:var(--bg3,var(--bg2))}
 .todo-session-group.active{border-left:3px solid var(--accent2);padding-left:5px}
 .todo-session-header{display:flex;justify-content:space-between;align-items:center;padding-bottom:4px;margin-bottom:4px;border-bottom:1px solid rgba(128,128,128,.15)}
-.todo-session-name{font-size:11px;font-weight:600;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px}
+.todo-session-name{font-size:11px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px}
 .todo-session-pct{font-size:10px;color:var(--muted2);font-family:var(--mono)}
 @media(max-width:768px){
   .todo-drawer{width:min(280px,80vw)}
@@ -901,11 +993,10 @@ body{
 .subagent-drawer-body{flex:1;padding:8px 12px;overflow-y:auto}
 .subagent-drawer-empty{padding:20px;text-align:center;color:var(--muted2);font-size:12px}
 .subagent-tab{
-  position:fixed;right:0;top:calc(50% + 44px);transform:translateY(-50%);z-index:29;
   writing-mode:vertical-rl;text-orientation:mixed;
   padding:10px 5px;border-radius:8px 0 0 8px;
   background:#a855f7;color:#fff;font-size:11px;font-weight:700;
-  cursor:pointer;opacity:.7;transition:opacity .2s,right .3s var(--spring);
+  cursor:pointer;opacity:.7;transition:opacity .2s;
   letter-spacing:1px;display:none;
 }
 .subagent-tab:hover{opacity:1}
@@ -960,11 +1051,10 @@ body{
 .tasks-drawer-body{flex:1;padding:8px 12px;overflow-y:auto}
 .tasks-drawer-empty{padding:20px;text-align:center;color:var(--muted2);font-size:12px}
 .tasks-tab{
-  position:fixed;right:0;top:calc(50% + 88px);transform:translateY(-50%);z-index:29;
   writing-mode:vertical-rl;text-orientation:mixed;
   padding:10px 5px;border-radius:8px 0 0 8px;
   background:#0ea5e9;color:#fff;font-size:11px;font-weight:700;
-  cursor:pointer;opacity:.7;transition:opacity .2s,right .3s var(--spring);
+  cursor:pointer;opacity:.7;transition:opacity .2s;
   letter-spacing:1px;display:none;
 }
 .tasks-tab:hover{opacity:1}
@@ -986,7 +1076,7 @@ body{
 .task-card-status .dot.cancelled{background:#9ca3af}
 .task-card-desc{font-size:12px;font-weight:600;color:var(--text);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .task-card-meta{font-size:10px;color:var(--muted2);font-family:var(--mono);display:flex;justify-content:space-between;gap:6px}
-.task-card-event{margin-top:6px;padding:6px 8px;background:var(--bg);border-radius:6px;font-size:10.5px;color:var(--muted);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-card-event{margin-top:6px;padding:6px 8px;background:var(--bg0);border-radius:6px;font-size:10.5px;color:var(--muted);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .task-card-output{margin-top:6px;font-size:10.5px}
 .task-card-output a{color:#0ea5e9;text-decoration:none}
 .task-card-output a:hover{text-decoration:underline}
@@ -1011,38 +1101,51 @@ body{
 .tmux-drawer-body{flex:1;padding:8px 12px;overflow-y:auto}
 .tmux-drawer-empty{padding:20px;text-align:center;color:var(--muted2);font-size:12px;line-height:1.6}
 .tmux-tab{
-  position:fixed;right:0;top:calc(50% + 132px);transform:translateY(-50%);z-index:29;
   writing-mode:vertical-rl;text-orientation:mixed;
   padding:10px 5px;border-radius:8px 0 0 8px;
   background:#10b981;color:#fff;font-size:11px;font-weight:700;
-  cursor:pointer;opacity:.7;transition:opacity .2s,right .3s var(--spring);
+  cursor:pointer;opacity:.7;transition:opacity .2s;
   letter-spacing:1px;display:none;width:28px;box-sizing:border-box;text-align:center;
 }
 .tmux-tab:hover{opacity:1}
 .tmux-tab.visible{display:block}
-.tmux-tab .tmux-badge{display:inline-block;background:#fff;color:#10b981;border-radius:99px;font-size:9px;padding:1px 4px;margin-left:2px;font-weight:800}
+.tmux-tab .tmux-badge{display:inline-block;background:var(--panel);color:var(--good);border-radius:99px;font-size:9px;padding:1px 4px;margin-left:2px;font-weight:800;border:1px solid var(--border)}
 .tmux-session-card{
   padding:10px 12px;margin:4px 0;border-radius:8px;background:var(--bg2);
-  border-left:3px solid #10b981;transition:background .2s;cursor:pointer;
+  border-left:3px solid var(--good);transition:background .2s;cursor:pointer;
 }
 .tmux-session-card:hover{background:var(--bg3,var(--bg2))}
-.tmux-session-card.attached{border-left-color:#f59e0b}
+.tmux-session-card.attached{border-left-color:var(--warn)}
 .tmux-session-top{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:4px}
 .tmux-session-name{font-size:12px;font-weight:700;color:var(--text);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tmux-session-name.copyable{cursor:copy;padding:1px 4px;margin:-1px -4px;border-radius:4px;transition:background .15s,color .15s}
+.tmux-session-name.copyable:hover{background:rgba(var(--accent-r),.12);color:var(--accent)}
+.tmux-session-name.copied{background:rgba(var(--diff-add-r),.18);color:var(--good)}
 .tmux-session-badges{display:flex;gap:4px;flex-shrink:0}
-.tmux-badge-pill{font-size:9px;font-weight:700;padding:1px 5px;border-radius:99px;background:rgba(16,185,129,.12);color:#10b981;letter-spacing:.3px}
-.tmux-badge-pill.attached{background:rgba(245,158,11,.15);color:#f59e0b}
+.tmux-badge-pill{font-size:9px;font-weight:700;padding:1px 5px;border-radius:99px;background:rgba(var(--diff-add-r),.14);color:var(--good);letter-spacing:.3px;border:1px solid rgba(var(--diff-add-r),.30)}
+.tmux-badge-pill.attached{background:var(--bg3);color:var(--warn);border-color:var(--border2)}
 .tmux-session-meta{font-size:10px;color:var(--muted2);font-family:var(--mono);display:flex;justify-content:space-between;gap:6px;margin-bottom:6px}
-.tmux-window-row{display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:5px;font-size:11px;background:var(--bg);margin-bottom:3px;font-family:var(--mono)}
-.tmux-window-row.active{background:rgba(16,185,129,.10)}
-.tmux-window-row.web{background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25)}
-.tmux-window-row.web.active{background:rgba(99,102,241,.18);border-color:rgba(99,102,241,.45)}
-.tmux-web-badge{flex:1;color:#6366f1;font-size:10px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tmux-web-open{display:inline-block;padding:2px 8px;background:#6366f1;color:#fff!important;text-decoration:none;border-radius:4px;font-size:10px;font-weight:700;flex-shrink:0}
-.tmux-web-open:hover{background:#4f46e5}
+.tmux-window-row{display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:5px;font-size:11px;background:var(--bg0);margin-bottom:3px;font-family:var(--mono)}
+.tmux-window-row.active{background:rgba(var(--diff-add-r),.10)}
+.tmux-window-row.web{background:rgba(var(--accent-r),.08);border:1px solid rgba(var(--accent-r),.25)}
+.tmux-window-row.web.active{background:rgba(var(--accent-r),.18);border-color:rgba(var(--accent-r),.45)}
+.tmux-web-badge{flex:1;color:var(--accent2);font-size:10px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tmux-web-open{display:inline-block;padding:2px 8px;background:var(--accent2);color:#fff!important;text-decoration:none;border-radius:4px;font-size:10px;font-weight:700;flex-shrink:0;filter:brightness(1)}
+.tmux-web-open:hover{filter:brightness(.88)}
+.tmux-labels-row{display:flex;flex-wrap:wrap;gap:4px;padding:2px 6px 4px 26px}
+.tmux-label-pill{
+  display:inline-block;padding:1px 6px;border-radius:8px;
+  font-size:9px;font-weight:600;white-space:nowrap;
+  background:rgba(var(--accent-r),.14);
+  color:var(--accent);
+  border:1px solid rgba(var(--accent-r),.35);
+}
+.tmux-label-pill.copyable{cursor:copy;transition:background .15s,border-color .15s,color .15s}
+.tmux-label-pill.copyable:hover{background:rgba(var(--accent-r),.28);border-color:rgba(var(--accent-r),.6)}
+.tmux-label-pill.copied{background:rgba(var(--diff-add-r),.22);color:var(--good);border-color:rgba(var(--diff-add-r),.55)}
 .tmux-window-idx{color:var(--muted2);min-width:20px;text-align:right}
 .tmux-window-name{color:var(--text);font-weight:600;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tmux-window-cmd{color:#10b981;font-size:10px}
+.tmux-window-cmd{color:var(--good);font-size:10px}
 .tmux-window-path{flex:1;color:var(--muted2);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;direction:rtl}
 .tmux-preview{
   margin-top:6px;padding:8px 10px;background:#000;color:#d1d5db;
@@ -1050,7 +1153,7 @@ body{
   white-space:pre;overflow-x:auto;max-height:260px;overflow-y:auto;line-height:1.35;
 }
 .tmux-preview.loading{color:var(--muted2)}
-.tmux-preview.error{color:#f87171;white-space:pre-wrap}
+.tmux-preview.error{color:var(--bad);white-space:pre-wrap}
 @media(max-width:768px){.tmux-drawer{width:min(340px,92vw)}}
 
 /* ── Output file viewer modal ── */
@@ -1330,7 +1433,11 @@ body{
   padding:10px;padding-bottom:calc(10px + var(--statusbar-h) + var(--safe-b));
   padding-left:calc(10px + var(--safe-l));padding-right:calc(10px + var(--safe-r));
 }
-.composer.disabled{opacity:.35;pointer-events:none}
+/* When no session is active the composer is fully hidden — `opacity:.35` left
+   a fake-looking input box pinned to the bottom on mobile (placeholder visible
+   but uninteractive). `display:none` removes it from layout entirely; the
+   welcome screen takes over. */
+.composer.disabled{display:none}
 .composer .inner{max-width:min(90%, 1400px);margin:0 auto;display:flex;gap:8px;align-items:flex-end}
 .inputwrap{
   flex:1;border-radius:var(--radius);border:1px solid var(--border2);
@@ -1415,7 +1522,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   outline:none;margin-bottom:14px;min-height:44px;
   transition:border-color .2s,box-shadow .2s;
 }
-.sheet input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(var(--accent-rgb,.5),0.08)}
+.sheet input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(var(--accent-r,139,92,246),0.08)}
 .sheet .toggle{display:flex;align-items:center;gap:10px;margin-bottom:16px;font-size:13px;color:var(--muted)}
 .sheet .toggle input{width:auto;margin:0}
 /* 3-way session mode selector (weiran / benwo / cc) — segmented control */
@@ -1452,7 +1559,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   cursor:pointer;display:flex;align-items:center;gap:6px;
 }
 .path-complete-dropdown .pc-item:hover,
-.path-complete-dropdown .pc-item.active{background:rgba(var(--accent-rgb,.5),.1);color:var(--accent)}
+.path-complete-dropdown .pc-item.active{background:rgba(var(--accent-r,139,92,246),.1);color:var(--accent)}
 .path-complete-dropdown .pc-item::before{content:'📁';font-size:12px}
 @keyframes shake{
   0%,100%{transform:translateX(0)}
@@ -1471,7 +1578,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   background:none;border:none;font-size:18px;cursor:pointer;padding:4px 6px;
   border-radius:6px;line-height:1;z-index:2;opacity:.7;transition:opacity .15s;
 }
-.path-browse-btn:hover,.path-browse-btn:active{opacity:1;background:rgba(var(--accent-rgb,.5),.1)}
+.path-browse-btn:hover,.path-browse-btn:active{opacity:1;background:rgba(var(--accent-r,139,92,246),.1)}
 
 /* ── Path Browser Panel ── */
 .path-browser{
@@ -1483,7 +1590,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
 .pb-header{
   display:flex;align-items:center;justify-content:space-between;
   padding:10px 14px;border-bottom:1px solid var(--border2);
-  background:rgba(var(--accent-rgb,.5),.05);
+  background:rgba(var(--accent-r,139,92,246),.05);
 }
 .pb-path{
   font-family:var(--mono);font-size:12px;color:var(--muted);
@@ -1494,18 +1601,18 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;
   padding:2px 6px;border-radius:6px;margin-left:8px;flex-shrink:0;
 }
-.pb-close:hover{color:var(--text);background:rgba(var(--accent-rgb,.5),.1)}
+.pb-close:hover{color:var(--text);background:rgba(var(--accent-r,139,92,246),.1)}
 .pb-list{max-height:260px;overflow-y:auto;padding:4px 0}
 .pb-item{
   display:flex;align-items:center;padding:10px 14px;gap:10px;
   font-size:13px;font-family:var(--mono);color:var(--text);cursor:pointer;
   transition:background .1s;
 }
-.pb-item:active,.pb-item:hover{background:rgba(var(--accent-rgb,.5),.08)}
+.pb-item:active,.pb-item:hover{background:rgba(var(--accent-r,139,92,246),.08)}
 .pb-item-icon{font-size:14px;flex-shrink:0}
 .pb-item-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pb-item-select{
-  font-size:11px;color:var(--accent);background:rgba(var(--accent-rgb,.5),.1);
+  font-size:11px;color:var(--accent);background:rgba(var(--accent-r,139,92,246),.1);
   border:none;border-radius:6px;padding:4px 10px;cursor:pointer;flex-shrink:0;
   opacity:0;transition:opacity .15s;
 }

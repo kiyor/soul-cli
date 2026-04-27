@@ -198,15 +198,13 @@ func buildSkillIndex() string {
 
 	var b strings.Builder
 	b.WriteString("## Available Skills\n\n")
-	b.WriteString("| Skill | Description |\n|-------|-------------|\n")
+	b.WriteString(fmt.Sprintf("Read `%s/skills/<name>/SKILL.md` for full usage and trigger conditions.\n\n", appHome))
+	names := make([]string, 0, len(skills))
 	for _, s := range skills {
-		b.WriteString("| ")
-		b.WriteString(s.Name)
-		b.WriteString(" | ")
-		b.WriteString(s.Description)
-		b.WriteString(" |\n")
+		names = append(names, s.Name)
 	}
-	b.WriteString(fmt.Sprintf("\nRead `%s/skills/<name>/SKILL.md` for full usage.\n", appHome))
+	b.WriteString(strings.Join(names, " · "))
+	b.WriteString("\n")
 	return b.String()
 }
 

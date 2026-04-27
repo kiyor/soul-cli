@@ -2,7 +2,9 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +90,59 @@ func TestWeeklyPreScan(t *testing.T) {
 	}
 	if !strings.Contains(task, "weekly-scan.md") {
 		t.Error("missing weekly-scan.md output instruction")
+	}
+}
+
+// TestEvolveTaskAwkExtractsSummaryJSON guards against a regression where the
+// awk pipeline used to persist the cycle-summary JSON to SQLite never
+// flipped its `f` flag on, so it produced empty output and `db evolve-log -`
+// failed with the usage error. The evolve cycle would silently lose its
+// summary row.
+func TestEvolveTaskAwkExtractsSummaryJSON(t *testing.T) {
+	if _, err := exec.LookPath("awk"); err != nil {
+		t.Skip("awk not available")
+	}
+	task := evolveTask()
+
+	// Pull the awk command out of the rendered task text. It's the only
+	// `awk '...'` line in the template.
+	re := regexp.MustCompile(`awk '([^']+)'`)
+	m := re.FindStringSubmatch(task)
+	if m == nil {
+		t.Fatal("could not find awk command in evolve task text")
+	}
+	awkScript := m[1]
+
+	// Synthesize a minimal report with the same structure as the template.
+	report := strings.Join([]string{
+		"🧬 Evolution report (2026-04-27):",
+		"",
+		"## Summary (structured — for automation)",
+		"```json",
+		`{"cycle_date":"2026-04-27","status":"evolved"}`,
+		"```",
+		"",
+		"## Narrative",
+		"- nothing to see here",
+		"```json",
+		`{"this":"should","not":"be","extracted":true}`,
+		"```",
+		"",
+	}, "\n")
+
+	tmp := filepath.Join(t.TempDir(), "report.md")
+	if err := os.WriteFile(tmp, []byte(report), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command("awk", awkScript, tmp).Output()
+	if err != nil {
+		t.Fatalf("awk failed: %v", err)
+	}
+	got := strings.TrimSpace(string(out))
+	want := `{"cycle_date":"2026-04-27","status":"evolved"}`
+	if got != want {
+		t.Fatalf("awk extraction wrong:\nwant: %s\ngot:  %s", want, got)
 	}
 }
 

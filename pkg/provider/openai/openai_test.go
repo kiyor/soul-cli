@@ -550,6 +550,98 @@ func TestNormalizeCodexEffortForModel(t *testing.T) {
 	})
 }
 
+// startCapturingCodexUpstream returns a mock server that records the JSON
+// request body it received, then emits the canned SSE events. Use this when
+// the test needs to assert which fields the proxy actually sent upstream
+// (vs. just verifying the response translation).
+func startCapturingCodexUpstream(t *testing.T, events []string, captured *map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Decode body before responding so the assertion can fail fast.
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("upstream failed to decode request body: %v", err)
+		}
+		*captured = body
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		for _, ev := range events {
+			_, _ = w.Write([]byte("data: " + ev + "\n\n"))
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+}
+
+// TestHandleCodexMessages_InjectsIncludeAndServiceTier verifies the two
+// fingerprint fields the proxy must send to keep multi-turn reasoning alive
+// and to match codex-cli's wire signature:
+//
+//   - include: ["reasoning.encrypted_content"] — required because Store=false
+//     leaves no server-side state, so the only way to keep GPT-5 / o-series
+//     reasoning context across turns is to round-trip the encrypted blob.
+//   - service_tier: "priority" — Plus/Pro entitlement; ChatGPT backend
+//     gracefully ignores it for free accounts.
+//
+// Regression target: cc-switch parity (PR title "weiran codex: include
+// reasoning.encrypted_content + service_tier=priority").
+func TestHandleCodexMessages_InjectsIncludeAndServiceTier(t *testing.T) {
+	events := []string{
+		`{"type":"response.output_text.delta","delta":"hi"}`,
+		`{"type":"response.completed","response":{"usage":{"output_tokens":1}}}`,
+	}
+	var captured map[string]any
+	upstream := startCapturingCodexUpstream(t, events, &captured)
+	defer upstream.Close()
+
+	body := `{"model":"gpt-5.4","stream":true,"max_tokens":256,"messages":[{"role":"user","content":"ping"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handleCodexMessages(rec, req, fakeCodexSession(), upstream.URL, "")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if captured == nil {
+		t.Fatalf("upstream never received a body")
+	}
+
+	// service_tier must be "priority" — codex-cli fingerprint match.
+	if got, _ := captured["service_tier"].(string); got != "priority" {
+		t.Errorf("service_tier = %q, want %q", got, "priority")
+	}
+
+	// include must contain "reasoning.encrypted_content" — required for
+	// multi-turn reasoning under Store=false.
+	rawInclude, ok := captured["include"].([]any)
+	if !ok {
+		t.Fatalf("include missing or wrong type: %T %v", captured["include"], captured["include"])
+	}
+	var foundEncryptedContent bool
+	for _, v := range rawInclude {
+		if s, _ := v.(string); s == "reasoning.encrypted_content" {
+			foundEncryptedContent = true
+			break
+		}
+	}
+	if !foundEncryptedContent {
+		t.Errorf("include does not contain \"reasoning.encrypted_content\": %v", rawInclude)
+	}
+
+	// Sanity: store must remain false. If this ever flips to true, the include
+	// field becomes meaningless (the upstream stores reasoning server-side and
+	// we no longer need to round-trip encrypted blobs).
+	if got, _ := captured["store"].(bool); got {
+		t.Errorf("store = true, want false (Codex OAuth path requires Store=false)")
+	}
+}
+
 // TestCodexTranslateTools_BackfillsEmptyParams ensures tools missing an
 // input_schema get a valid empty-object schema so Codex accepts them.
 func TestCodexTranslateTools_BackfillsEmptyParams(t *testing.T) {

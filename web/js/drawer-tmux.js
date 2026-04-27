@@ -22,7 +22,36 @@ function weiranToken() {
   return localStorage.getItem('weiran_token') || '';
 }
 
+// Server-injected feature flag. When the operator sets `disableTmuxDrawer: true`
+// in config.json's `server` block, hide the drawer entirely: never poll, never
+// open, count stays 0 so the tab also stays invisible (CSS in index.html does
+// the layout-level hiding too). Detect via the lexical SERVER_CONFIG binding
+// declared by the main inline script (same script-global trick as TOKEN above).
+function tmuxDrawerDisabled() {
+  try { if (typeof SERVER_CONFIG !== 'undefined') return !!(SERVER_CONFIG && SERVER_CONFIG.disableTmuxDrawer); } catch (_) {}
+  return false;
+}
+
 document.addEventListener('alpine:init', () => {
+  if (tmuxDrawerDisabled()) {
+    // Register a no-op store so any x-bind references in index.html resolve to
+    // safe defaults (tab stays hidden because available=false and count=0).
+    Alpine.store('tmux', {
+      open: false, available: false, sessions: [], expanded: {}, previewCache: {},
+      error: '', lastFetch: 0, copiedName: '', copiedLabel: '', pollTimer: null,
+      get count() { return 0; },
+      toggle() {}, load() { return Promise.resolve(); },
+      toggleSession() {}, isExpanded() { return false; },
+      previewFor() { return { loading: false }; },
+      previewText() { return ''; }, previewClass() { return {}; },
+      loadPreview() { return Promise.resolve(); },
+      fmtAge() { return ''; }, shortPath() { return ''; },
+      webUrlFor() { return ''; }, webLabelFor() { return ''; },
+      parsedLabels() { return []; },
+      copyName() { return Promise.resolve(); }, copyLabel() { return Promise.resolve(); },
+    });
+    return;
+  }
   Alpine.store('tmux', {
     // ── reactive state ──
     open: false,           // is the drawer open?
@@ -32,6 +61,8 @@ document.addEventListener('alpine:init', () => {
     previewCache: {},      // target ("sess:idx") -> {loading|content|error}
     error: '',             // top-level error message
     lastFetch: 0,
+    copiedName: '',        // session name briefly flashed after click-to-copy
+    copiedLabel: '',       // composite "sess:winIdx:labelKey" briefly flashed after label copy
     // ── non-reactive ──
     pollTimer: null,
 
@@ -165,6 +196,62 @@ document.addEventListener('alpine:init', () => {
     webLabelFor(w) {
       return w.web_label || ('port ' + (w.web_port || '?'));
     },
+
+    // Generic labels from tmux @user-options. Backend sends labels as
+    // a map[string]string (JSON object). Returns [{key,value}] for template.
+    parsedLabels(w) {
+      if (!w.labels || typeof w.labels !== 'object') return [];
+      return Object.entries(w.labels).map(([k, v]) => ({ key: k, value: v }));
+    },
+
+    // Internal: write text to clipboard, with execCommand fallback for
+    // non-secure contexts (http://). Returns true on success.
+    async _copyToClipboard(text) {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (_) { /* fall through */ }
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch (_) { return false; }
+    },
+
+    // Click-to-copy session name as `tmux:<name>` so 主人 can paste into chat
+    // and tell 未然 which tmux session to operate on. Briefly flashes the
+    // pill via `copiedName` so the user gets visual confirmation.
+    async copyName(name) {
+      const ok = await this._copyToClipboard('tmux:' + name);
+      if (ok) {
+        this.copiedName = name;
+        setTimeout(() => { if (this.copiedName === name) this.copiedName = ''; }, 1200);
+      }
+    },
+
+    // Click-to-copy a label pill. Copies the value alone (not key=value) —
+    // typical use is grabbing customer name / instance id / cluster name to
+    // paste into another tool. If the label is a bare flag (no value), copy
+    // the key. flashKey ties the visual flash to one specific pill in one
+    // specific window of one specific session, so multiple identical keys
+    // (e.g. two sessions both labeled `env=prod`) don't all light up.
+    async copyLabel(sessName, winIdx, key, value) {
+      const text = (value === undefined || value === null || value === '') ? key : value;
+      const ok = await this._copyToClipboard(text);
+      if (ok) {
+        const flashKey = sessName + ':' + winIdx + ':' + key;
+        this.copiedLabel = flashKey;
+        setTimeout(() => { if (this.copiedLabel === flashKey) this.copiedLabel = ''; }, 1200);
+      }
+    },
   });
 });
 
@@ -172,6 +259,7 @@ document.addEventListener('alpine:init', () => {
 // tmux tab appear (or stay hidden) based on server availability even before
 // the user opens the drawer. Replaces the old setTimeout(1200ms) bootstrap.
 document.addEventListener('alpine:initialized', () => {
+  if (tmuxDrawerDisabled()) return;
   Alpine.store('tmux').load(false).catch(() => {});
 });
 

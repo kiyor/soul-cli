@@ -51,21 +51,22 @@ var jsFS embed.FS
 // ── Server Config ──
 
 type serverConfig struct {
-	Token                string              `json:"token"`
-	Host                 string              `json:"host"`
-	Port                 int                 `json:"port"`
-	MaxSessions          int                 `json:"maxSessions"`
-	IdleTimeoutMin       int                 `json:"idleTimeoutMin"`
-	MaxLifetimeHrs       int                 `json:"maxLifetimeHours"`
-	RateLimitPerMin      int                 `json:"rateLimitPerMin"`
-	MaxInteractionRounds int                 `json:"maxInteractionRounds"`
-	Telegram             telegramBotConfig   `json:"telegram"`
-	Proxy                proxyConfig         `json:"proxy"`
-	SessionReset         sessionResetConfig  `json:"sessionReset"`
-	S3                   s3Config            `json:"s3"`
-	DBExplorer           dbExplorerConfig    `json:"dbExplorer"`
-	DefaultReplaceSoul      bool                `json:"defaultReplaceSoul"`      // 本我模式 default for new sessions
-	DefaultInteractiveModel string              `json:"defaultInteractiveModel"` // default model for new interactive sessions; fallback: opus[1m]
+	Token                   string             `json:"token"`
+	Host                    string             `json:"host"`
+	Port                    int                `json:"port"`
+	MaxSessions             int                `json:"maxSessions"`
+	IdleTimeoutMin          int                `json:"idleTimeoutMin"`
+	MaxLifetimeHrs          int                `json:"maxLifetimeHours"`
+	RateLimitPerMin         int                `json:"rateLimitPerMin"`
+	MaxInteractionRounds    int                `json:"maxInteractionRounds"`
+	Telegram                telegramBotConfig  `json:"telegram"`
+	Proxy                   proxyConfig        `json:"proxy"`
+	SessionReset            sessionResetConfig `json:"sessionReset"`
+	S3                      s3Config           `json:"s3"`
+	DBExplorer              dbExplorerConfig   `json:"dbExplorer"`
+	DefaultReplaceSoul      bool               `json:"defaultReplaceSoul"`      // 本我模式 default for new sessions
+	DefaultInteractiveModel string             `json:"defaultInteractiveModel"` // default model for new interactive sessions; fallback: opus[1m]
+	DisableTmuxDrawer       bool               `json:"disableTmuxDrawer"`       // hide the tmux drawer/tab in the web UI
 }
 
 // s3Config holds Wasabi/S3 upload settings for image hosting.
@@ -154,53 +155,73 @@ func loadServerConfig() serverConfig {
 		if err != nil {
 			continue
 		}
-		var wrapper struct {
-			Server serverConfig `json:"server"`
+		var root map[string]json.RawMessage
+		if json.Unmarshal(data, &root) != nil {
+			break
 		}
-		if json.Unmarshal(data, &wrapper) == nil && (wrapper.Server.Token != "" || wrapper.Server.Port != 0 || wrapper.Server.Telegram.Enabled) {
-			if wrapper.Server.Token != "" {
-				cfg.Token = wrapper.Server.Token
+		serverRaw, ok := root["server"]
+		if !ok {
+			break
+		}
+		var serverFields map[string]json.RawMessage
+		_ = json.Unmarshal(serverRaw, &serverFields)
+		var srv serverConfig
+		if json.Unmarshal(serverRaw, &srv) == nil {
+			if srv.Token != "" {
+				cfg.Token = srv.Token
 			}
-			if wrapper.Server.Host != "" {
-				cfg.Host = wrapper.Server.Host
+			if srv.Host != "" {
+				cfg.Host = srv.Host
 			}
-			if wrapper.Server.Port != 0 {
-				cfg.Port = wrapper.Server.Port
+			if srv.Port != 0 {
+				cfg.Port = srv.Port
 			}
-			if wrapper.Server.MaxSessions > 0 {
-				cfg.MaxSessions = wrapper.Server.MaxSessions
+			if srv.MaxSessions > 0 {
+				cfg.MaxSessions = srv.MaxSessions
 			}
-			if wrapper.Server.IdleTimeoutMin > 0 {
-				cfg.IdleTimeoutMin = wrapper.Server.IdleTimeoutMin
+			if srv.IdleTimeoutMin > 0 {
+				cfg.IdleTimeoutMin = srv.IdleTimeoutMin
 			}
-			if wrapper.Server.MaxLifetimeHrs > 0 {
-				cfg.MaxLifetimeHrs = wrapper.Server.MaxLifetimeHrs
+			if srv.MaxLifetimeHrs > 0 {
+				cfg.MaxLifetimeHrs = srv.MaxLifetimeHrs
 			}
-			if wrapper.Server.RateLimitPerMin > 0 {
-				cfg.RateLimitPerMin = wrapper.Server.RateLimitPerMin
+			if srv.RateLimitPerMin > 0 {
+				cfg.RateLimitPerMin = srv.RateLimitPerMin
 			}
-			if wrapper.Server.MaxInteractionRounds > 0 {
-				cfg.MaxInteractionRounds = wrapper.Server.MaxInteractionRounds
+			if srv.MaxInteractionRounds > 0 {
+				cfg.MaxInteractionRounds = srv.MaxInteractionRounds
 			}
-			cfg.Telegram = wrapper.Server.Telegram
+			cfg.Telegram = srv.Telegram
 			// Session reset policy (always copy; defaults are filled in by loadResetPolicyFromConfig)
-			cfg.SessionReset = wrapper.Server.SessionReset
-			cfg.S3 = wrapper.Server.S3
-			cfg.DBExplorer = wrapper.Server.DBExplorer
-			if wrapper.Server.Proxy.Port != 0 || wrapper.Server.Proxy.Upstream != "" || wrapper.Server.Proxy.Enabled {
-				if wrapper.Server.Proxy.Enabled {
+			cfg.SessionReset = srv.SessionReset
+			cfg.S3 = srv.S3
+			if _, ok := serverFields["dbExplorer"]; ok {
+				cfg.DBExplorer = srv.DBExplorer
+				if dbRaw, ok := serverFields["dbExplorer"]; ok {
+					var dbFields map[string]json.RawMessage
+					if json.Unmarshal(dbRaw, &dbFields) == nil {
+						_, cfg.DBExplorer.enabledSet = dbFields["enabled"]
+					}
+				}
+			}
+			if _, ok := serverFields["defaultReplaceSoul"]; ok {
+				cfg.DefaultReplaceSoul = srv.DefaultReplaceSoul
+			}
+			cfg.DisableTmuxDrawer = srv.DisableTmuxDrawer
+			if srv.Proxy.Port != 0 || srv.Proxy.Upstream != "" || srv.Proxy.Enabled {
+				if srv.Proxy.Enabled {
 					cfg.Proxy.Enabled = true
 				}
-				if wrapper.Server.Proxy.Port != 0 {
-					cfg.Proxy.Port = wrapper.Server.Proxy.Port
+				if srv.Proxy.Port != 0 {
+					cfg.Proxy.Port = srv.Proxy.Port
 				}
-				if wrapper.Server.Proxy.Upstream != "" {
-					cfg.Proxy.Upstream = wrapper.Server.Proxy.Upstream
+				if srv.Proxy.Upstream != "" {
+					cfg.Proxy.Upstream = srv.Proxy.Upstream
 				}
 			}
 			// Default interactive model
-			if wrapper.Server.DefaultInteractiveModel != "" {
-				cfg.DefaultInteractiveModel = wrapper.Server.DefaultInteractiveModel
+			if srv.DefaultInteractiveModel != "" {
+				cfg.DefaultInteractiveModel = srv.DefaultInteractiveModel
 			}
 		}
 		break
@@ -360,6 +381,7 @@ func handleServer(args []string) {
 			"rate_limit":                cfg.RateLimitPerMin,
 			"default_replace_soul":      cfg.DefaultReplaceSoul,
 			"default_interactive_model": cfg.DefaultInteractiveModel,
+			"disable_tmux_drawer":       cfg.DisableTmuxDrawer,
 			"workspace":                 workspace,
 			"claude_bin":                claudeBin,
 		})
@@ -1025,6 +1047,44 @@ func handleServer(args []string) {
 
 		var decision map[string]any
 		switch entry.Kind {
+		case "plan_approval":
+			// ExitPlanMode plan approval. The frontend sends:
+			//   answers[0].answer = "approve" | "reject"
+			//   answers[0].question = feedback text (optional)
+			isDeny := req.Cancelled
+			feedback := ""
+			if len(req.Answers) > 0 {
+				ans := strings.TrimSpace(req.Answers[0].Answer)
+				feedback = strings.TrimSpace(req.Answers[0].Question) // repurposed as feedback
+				if ans == "reject" {
+					isDeny = true
+				}
+			}
+			if isDeny {
+				msg := "User rejected the plan from the Web UI."
+				if feedback != "" {
+					msg = "User rejected the plan with feedback: " + feedback
+				}
+				decision = map[string]any{
+					"behavior": "deny",
+					"message":  msg,
+				}
+			} else {
+				// Pass original tool_input through unchanged (contains plan
+				// injected by normalizeToolInput). Claude Code's ExitPlanMode
+				// call() will read the plan from input or fall back to disk.
+				var orig any = map[string]any{}
+				if len(entry.Input) > 0 {
+					if err := json.Unmarshal(entry.Input, &orig); err != nil {
+						writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "corrupt pending input: " + err.Error()})
+						return
+					}
+				}
+				decision = map[string]any{
+					"behavior":     "allow",
+					"updatedInput": orig,
+				}
+			}
 		case "permission":
 			// Generic tool permission prompt (Write, Edit, …). The Web UI
 			// synthesized a Yes/No AUQ — we only care which answer came
@@ -1176,11 +1236,11 @@ func handleServer(args []string) {
 		buf := make([]byte, maxRead)
 		n, _ := f.Read(buf)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"path":       clean,
-			"size":       size,
-			"offset":     offset,
-			"truncated":  size > maxRead,
-			"content":    string(buf[:n]),
+			"path":      clean,
+			"size":      size,
+			"offset":    offset,
+			"truncated": size > maxRead,
+			"content":   string(buf[:n]),
 		})
 	}))
 
@@ -1222,13 +1282,10 @@ func handleServer(args []string) {
 		}
 		defer file.Close()
 
-		// Validate file type (images + PDF documents)
+		// All file types allowed — single-user authenticated upload, files are
+		// served back from /uploads/ behind the same auth middleware. The
+		// 32 MB ParseMultipartForm cap above is the only size guard.
 		ext := strings.ToLower(filepath.Ext(header.Filename))
-		allowedExts := map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".svg": true, ".pdf": true}
-		if !allowedExts[ext] {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported file type: " + ext})
-			return
-		}
 
 		// Ensure content-type matches
 		ct := header.Header.Get("Content-Type")
@@ -1630,6 +1687,29 @@ func handleServer(args []string) {
 
 		messages := parseSessionMessages(path, limit)
 		writeJSON(w, http.StatusOK, messages)
+	}))
+
+	// Native Claude Code Agent subagent backfill: scan the full JSONL and
+	// rebuild lifecycle of every Agent (Task) tool call, so the Web UI's
+	// subagent drawer can restore state after reload / session switch.
+	mux.HandleFunc("GET /api/sessions/{id}/subagents", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.PathValue("id")
+		path := findSessionJSONL(sessionID)
+		if path == "" {
+			if sess := sm.getSession(sessionID); sess != nil {
+				if sess.ClaudeSID != "" {
+					path = findSessionJSONL(sess.ClaudeSID)
+				}
+				if path == "" && sess.ResumedFrom != "" {
+					path = findSessionJSONL(sess.ResumedFrom)
+				}
+			}
+		}
+		if path == "" {
+			writeJSON(w, http.StatusOK, []subagentRecord{})
+			return
+		}
+		writeJSON(w, http.StatusOK, parseSessionSubagents(path))
 	}))
 
 	// Resume a historical session (creates a server session wrapping --resume)
@@ -2045,8 +2125,8 @@ func handleServer(args []string) {
 			appName, shortID(req.SessionID))
 
 		writeJSON(w, http.StatusOK, map[string]string{
-			"status":           "prepared",
-			"session_id":       req.SessionID,
+			"status":            "prepared",
+			"session_id":        req.SessionID,
 			"claude_session_id": claudeSID,
 		})
 	}))
@@ -2097,6 +2177,10 @@ func handleServer(args []string) {
 			return
 		}
 		filePath := filepath.Join(uploadsDir, name)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if isActiveUploadExt(filepath.Ext(name)) {
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(name)))
+		}
 		http.ServeFile(w, r, filePath)
 	}))
 
@@ -2153,6 +2237,15 @@ func handleServer(args []string) {
 	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DefaultReplaceSoulChecked}}", replaceSoulChecked)
 	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DefaultReplaceSoul}}", fmt.Sprintf("%t", cfg.DefaultReplaceSoul))
 	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DefaultInteractiveModel}}", safeModel)
+	// Tmux drawer hide: when disabled, inject a CSS rule that removes the
+	// tab + drawer from the layout (display:none). Also exposes the flag
+	// to JS via SERVER_CONFIG so drawer-tmux.js can short-circuit polling.
+	tmuxDrawerHideCSS := ""
+	if cfg.DisableTmuxDrawer {
+		tmuxDrawerHideCSS = ".tmux-tab,#tmux-drawer{display:none!important}"
+	}
+	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.TmuxDrawerHideCSS}}", tmuxDrawerHideCSS)
+	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DisableTmuxDrawer}}", fmt.Sprintf("%t", cfg.DisableTmuxDrawer))
 	renderedIndexBytes := []byte(renderedIndex)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -2185,8 +2278,10 @@ func handleServer(args []string) {
 	// Register read-only SQLite explorer (/api/db/*)
 	// Build the source registry from config. Always includes the primary
 	// sessions.db source even if the user didn't configure dbExplorer.sources.
-	dbRegistry = buildDBRegistry(cfg.DBExplorer)
-	registerDBUIAPI(mux, cfg.Token)
+	if dbExplorerEnabled(cfg.DBExplorer) {
+		dbRegistry = buildDBRegistry(cfg.DBExplorer)
+		registerDBUIAPI(mux, cfg.Token)
+	}
 
 	// Start Anthropic API proxy if enabled
 	if cfg.Proxy.Enabled {
@@ -2296,6 +2391,15 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+func isActiveUploadExt(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".html", ".htm", ".js", ".mjs", ".css", ".svg", ".xml", ".xhtml":
+		return true
+	default:
+		return false
+	}
 }
 
 // ── S3 Upload ──

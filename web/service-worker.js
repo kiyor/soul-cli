@@ -1,19 +1,29 @@
 // Weiran PWA Service Worker
 // Strategy: Network-first with cache fallback (chat app needs real-time data)
 
-const CACHE_NAME = 'weiran-v1';
+// Bump CACHE_NAME whenever SHELL_ASSETS/CDN_ASSETS change so old caches get evicted.
+const CACHE_NAME = 'weiran-v2';
 const SHELL_ASSETS = [
   '/',
   '/manifest.json',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
   '/icons/apple-touch-icon.png',
+  // Local app assets actually loaded by index.html — must match exactly so
+  // offline / CDN-down fallback keeps the UI usable.
+  '/css/app.css',
+  '/js/components.js',
+  '/js/drawer-tmux.js',
 ];
+// CDN_ASSETS must mirror the <script>/<link> tags in index.html. Out-of-sync
+// entries here = pre-cached files we never use, and missing entries = blank UI
+// when the CDN is unreachable.
 const CDN_ASSETS = [
   'https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css',
+  'https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css',
   'https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/highlight.min.js',
-  'https://cdn.jsdelivr.net/npm/marked/marked.min.js',
-  'https://cdn.jsdelivr.net/npm/marked-highlight/lib/index.umd.js',
+  'https://cdn.jsdelivr.net/npm/marked@12.0.1/marked.min.js',
+  'https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js',
 ];
 
 // Install: pre-cache shell assets

@@ -194,7 +194,7 @@ func serveSSE(w http.ResponseWriter, r *http.Request, broadcaster *sseBroadcaste
 // Web UI through an ask_user_question SSE event. If the callback is nil
 // or returns false, bridgeStdout auto-allows the tool (preserving prior
 // bypassPermissions behavior for tools that unexpectedly reach this path).
-func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage), onMemoryAudit func(*memoryAuditEntry), onCanUseTool func(json.RawMessage) bool, onTask func(event string, raw json.RawMessage)) {
+func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage), onMemoryAudit func(*memoryAuditEntry), onCanUseTool func(json.RawMessage) bool, onTask func(event string, raw json.RawMessage), onUsage func(total int64)) {
 	// Track pending memory tool_use ops waiting for their tool_result
 	pendingMemOps := make(map[string]*pendingMemoryOp)
 
@@ -231,6 +231,17 @@ func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(
 		// Detect TodoWrite tool_use and extract todos for cross-session broadcast
 		if event == "tool_use" && onTodos != nil {
 			extractTodoWrite(raw, onTodos)
+		}
+
+		// Track peak context tokens from assistant message usage. This mirrors
+		// the frontend's handleAssistant() total calculation so the server can
+		// surface peak usage in session snapshots (survives resume/page reload/
+		// session switch). Fires for both "assistant" and "tool_use" mapped
+		// events — both are assistant messages with usage.
+		if onUsage != nil && msgType == "assistant" {
+			if total := extractAssistantContextTotal(raw); total > 0 {
+				onUsage(total)
+			}
 		}
 
 		// Forward tool_use / tool_result to the per-session task tracker so it
@@ -312,6 +323,31 @@ func handleCanUseTool(proc *claudeProcess, raw json.RawMessage, onCanUseTool fun
 	if err := proc.sendPermissionDecision(peek.RequestID, decision); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] auto-allow permission failed for %s: %v\n", appName, peek.RequestID, err)
 	}
+}
+
+// extractAssistantContextTotal reads message.usage from an assistant stream-json
+// event and returns input_tokens + cache_creation_input_tokens +
+// cache_read_input_tokens (0 when usage is absent or malformed). This matches
+// the total the Web UI uses to drive the context bar.
+func extractAssistantContextTotal(raw json.RawMessage) int64 {
+	var peek struct {
+		Message struct {
+			Usage struct {
+				InputTokens              int64 `json:"input_tokens"`
+				CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &peek); err != nil {
+		return 0
+	}
+	u := peek.Message.Usage
+	total := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	if total < 0 {
+		return 0
+	}
+	return total
 }
 
 // extractTodoWrite parses a tool_use event for TodoWrite and calls onTodos with the todos array.

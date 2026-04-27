@@ -552,11 +552,15 @@ func isProviderModel(model string) bool {
 // nativeModelAliases maps short names to full Anthropic model IDs.
 // These are handled by Claude Code directly (no provider injection needed).
 var nativeModelAliases = map[string]string{
-	"opus":       "claude-opus-4-7",
-	"opus[1m]":   "claude-opus-4-7[1m]",
-	"sonnet":     "claude-sonnet-4-6",
-	"sonnet[1m]": "claude-sonnet-4-6[1m]",
-	"haiku":      "claude-haiku-4-5-20251001",
+	"opus":         "claude-opus-4-7",
+	"opus[1m]":     "claude-opus-4-7[1m]",
+	"opus-4-6":     "claude-opus-4-6",
+	"opus-4-6[1m]": "claude-opus-4-6[1m]",
+	"opus-4-7":     "claude-opus-4-7",
+	"opus-4-7[1m]": "claude-opus-4-7[1m]",
+	"sonnet":       "claude-sonnet-4-6",
+	"sonnet[1m]":   "claude-sonnet-4-6[1m]",
+	"haiku":        "claude-haiku-4-5-20251001",
 }
 
 // resolveFuzzyModel takes a user-supplied --model value and resolves it to a

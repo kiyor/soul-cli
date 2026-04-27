@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 )
 
 // ── IPC CLI: weiran session list/send/read/search ──
@@ -127,36 +129,212 @@ func ipcRequest(method, path string, body io.Reader) (*http.Response, error) {
 	return http.DefaultClient.Do(req)
 }
 
-// ipcList lists all active sessions.
+// ipcList lists active sessions + historical sessions from the last 24h.
+// Shows ID, TURNS, CREATED, LAST_ACTIVE, NAME, STATUS, MODEL, CATEGORY.
 func ipcList() {
+	// 1. Fetch active sessions
 	resp, err := ipcRequest("GET", "/api/sessions", nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
+	var activeSessions []map[string]any
+	json.NewDecoder(resp.Body).Decode(&activeSessions)
+	resp.Body.Close()
 
-	var sessions []map[string]any
-	json.NewDecoder(resp.Body).Decode(&sessions)
+	// 2. Fetch history (last 50, all categories) for 24h window
+	resp2, err := ipcRequest("GET", "/api/history?limit=50&category=all", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	var historySessions []map[string]any
+	json.NewDecoder(resp2.Body).Decode(&historySessions)
+	resp2.Body.Close()
 
+	// 3. Build dedup map: active sessions take priority
 	_, _, myID := ipcEnv()
+	seen := make(map[string]bool)    // track by weiran session ID
+	seenCC := make(map[string]bool)  // track by claude_session_id
+	var rows []map[string]any
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tCC_SID\tNAME\tSTATUS\tMODEL\tCATEGORY")
-	for _, s := range sessions {
+	// Add active sessions first
+	for _, s := range activeSessions {
 		id := fmt.Sprintf("%v", s["id"])
-		ccSID := ""
-		if v, ok := s["claude_session_id"]; ok && v != nil && fmt.Sprintf("%v", v) != "" {
-			ccSID = shortID(fmt.Sprintf("%v", v))
+		ccSID, _ := s["claude_session_id"].(string)
+		seen[id] = true
+		if ccSID != "" {
+			seenCC[ccSID] = true
+		}
+		rows = append(rows, s)
+	}
+
+	// Add history sessions not already covered, filter to 24h
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for _, s := range historySessions {
+		// History entries use claude_session_id as "id"
+		ccSID := fmt.Sprintf("%v", s["id"])
+
+		// Dedup by ccSID or by looking at weiran session ID
+		if seenCC[ccSID] {
+			continue
+		}
+		// Also check if there's a weiran SID in the data
+		if weiranSID, ok := s["weiran_id"]; ok {
+			wsID := fmt.Sprintf("%v", weiranSID)
+			if seen[wsID] {
+				continue
+			}
+		}
+
+		// Filter to 24h by mod_time
+		modTimeStr, _ := s["mod_time"].(string)
+		if modTimeStr == "" {
+			continue
+		}
+		modTime, err := time.Parse(time.RFC3339, modTimeStr)
+		if err != nil || modTime.Before(cutoff) {
+			continue
+		}
+
+		rows = append(rows, s)
+	}
+
+	// 4. Sort: active first (by last_active desc), then history (by mod_time desc)
+	sort.Slice(rows, func(i, j int) bool {
+		iActive := isSessionActive(rows[i])
+		jActive := isSessionActive(rows[j])
+		if iActive != jActive {
+			return iActive // active before inactive
+		}
+		return getSessionTime(rows[i]).After(getSessionTime(rows[j]))
+	})
+
+	// 5. Render table
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tTURNS\tCREATED\tLAST_ACTIVE\tNAME\tSTATUS\tMODEL\tCAT")
+	for _, s := range rows {
+		id := fmt.Sprintf("%v", s["id"])
+		short := shortID(id)
+
+		// Turns: num_turns (active) or user_turns (history) or messages count
+		turns := "-"
+		if v, ok := s["num_turns"]; ok && v != nil {
+			turns = fmt.Sprintf("%v", v)
+		} else if v, ok := s["user_turns"]; ok && v != nil {
+			turns = fmt.Sprintf("%v", v)
+		} else if v, ok := s["messages"]; ok && v != nil {
+			n := 0
+			switch val := v.(type) {
+			case float64:
+				n = int(val)
+			case int:
+				n = val
+			}
+			if n > 0 {
+				turns = fmt.Sprintf("~%d", n)
+			}
+		}
+
+		// Created time
+		created := "-"
+		if v, ok := s["created_at"].(string); ok && v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				created = t.Local().Format("01/02 15:04")
+			}
+		}
+
+		// Last active time
+		lastActive := "-"
+		if v, ok := s["last_active"].(string); ok && v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				lastActive = t.Local().Format("15:04")
+			}
+		}
+		// For history sessions, try updated_at then mod_time
+		if lastActive == "-" {
+			if v, ok := s["updated_at"].(string); ok && v != "" {
+				if t, err := time.Parse(time.RFC3339, v); err == nil {
+					lastActive = t.Local().Format("01/02 15:04")
+				}
+			}
+		}
+		if lastActive == "-" {
+			if v, ok := s["mod_time"].(string); ok && v != "" {
+				if t, err := time.Parse(time.RFC3339, v); err == nil {
+					lastActive = t.Local().Format("01/02 15:04")
+				}
+			}
+		}
+
+		name := strVal(s, "name")
+		if name == "" {
+			name = strVal(s, "title")
+		}
+		if name == "" {
+			// Use first_msg as fallback, truncated
+			if fm := strVal(s, "first_msg"); fm != "" {
+				if len(fm) > 30 {
+					name = fm[:27] + "..."
+				} else {
+					name = fm
+				}
+			}
 		}
 		marker := ""
 		if id == myID {
 			marker = " (me)"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%v%s\t%v\t%v\t%v\n",
-			shortID(id), ccSID, s["name"], marker, s["status"], s["model"], s["category"])
+		// Truncate long names
+		if len(name) > 30 {
+			name = name[:27] + "..."
+		}
+
+		status := strVal(s, "status")
+		if status == "" {
+			status = "ended"
+		}
+		model := strVal(s, "model")
+		cat := strVal(s, "category")
+		if cat == "" {
+			cat = "-"
+		}
+
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s%s\t%s\t%s\t%s\n",
+			short, turns, created, lastActive, name, marker, status, model, cat)
 	}
 	w.Flush()
+}
+
+// strVal safely extracts a string from a map[string]any, returning "" for nil or non-string.
+func strVal(m map[string]any, key string) string {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return fmt.Sprintf("%v", v)
+	}
+	return s
+}
+
+// isSessionActive returns true if the session snapshot looks like an active session.
+func isSessionActive(s map[string]any) bool {
+	status, _ := s["status"].(string)
+	return status == "active" || status == "idle" || status == "running" || status == "busy"
+}
+
+// getSessionTime returns the best available timestamp for sorting.
+func getSessionTime(s map[string]any) time.Time {
+	for _, key := range []string{"last_active", "updated_at", "mod_time", "created_at"} {
+		if v, ok := s[key].(string); ok && v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				return t
+			}
+		}
+	}
+	return time.Time{}
 }
 
 // ipcSend sends a message from this session to a target session.

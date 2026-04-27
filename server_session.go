@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -104,6 +105,13 @@ type serverSession struct {
 	Todos         json.RawMessage `json:"todos,omitempty"`     // latest TodoWrite state (broadcast to all clients)
 	SpawnedBy     string          `json:"spawned_by,omitempty"` // parent session ID that spawned this one
 
+	// PeakContextTokens tracks the high-water mark of input tokens consumed by
+	// this session (input + cache_creation + cache_read). Updated every time
+	// an assistant message arrives with usage data. Surfaced in snapshot() so
+	// the Web UI can restore the context bar percentage on resume / page
+	// reload / session switch, rather than flashing 0% until the next turn.
+	PeakContextTokens int64 `json:"peak_context_tokens,omitempty"`
+
 	process     *claudeProcess
 	broadcaster *sseBroadcaster
 	bridgeDone  chan struct{} // closed when the current bridgeStdout goroutine exits
@@ -133,13 +141,21 @@ type serverSession struct {
 	mu          sync.Mutex
 }
 
-// pendingAUQEntry remembers enough about an in-flight AskUserQuestion
-// control_request to answer it later with the user's choices.
+// pendingAUQEntry remembers enough about an in-flight can_use_tool
+// control_request to answer it later with the user's choices. Covers two
+// kinds:
+//   - Kind="auq": an AskUserQuestion tool call. The answer map is merged
+//     into the tool's updatedInput (legacy behavior).
+//   - Kind="permission": any other tool's permission prompt (Write, Edit,
+//     …). We synthesize a Yes/No AUQ payload for the Web UI; on allow we
+//     pass the original Input back unchanged; on deny we send behavior=deny.
 type pendingAUQEntry struct {
 	RequestID string          // control_request.request_id from claude
 	ToolUseID string          // tool_use_id from the can_use_tool payload (for UI dedupe)
-	Input     json.RawMessage // original input — must be echoed back in updatedInput
+	Input     json.RawMessage // original input — echoed back in updatedInput (AUQ merges answers; permission passes through)
 	CreatedAt time.Time
+	Kind      string // "auq" or "permission"
+	ToolName  string // tool_name from the request; used by permission path
 }
 
 // recordPendingAUQ stores a pending AskUserQuestion by request_id.
@@ -166,19 +182,50 @@ func (s *serverSession) takePendingAUQ(requestID string) *pendingAUQEntry {
 }
 
 // snapshotPendingAUQ returns a JSON-safe copy of all pending AUQ entries.
+//
+// For Kind="permission" entries, the stored Input is the *original* tool
+// input (e.g. {"file_path": "...", "content": "..."}), not the synthetic
+// {"questions": [...]} payload that was broadcast live. The Web UI's
+// loadSessionState path expects an AUQ-shaped input it can render directly,
+// so we re-synthesize the Yes/No questions here. Without this, refreshing
+// the page (or switching sessions) while a permission prompt is pending
+// leaves the subprocess blocked with no UI to approve/deny it.
 func (s *serverSession) snapshotPendingAUQ() []map[string]any {
 	s.pendingAUQMu.Lock()
 	defer s.pendingAUQMu.Unlock()
 	out := make([]map[string]any, 0, len(s.pendingAUQ))
 	for _, e := range s.pendingAUQ {
+		var input any = e.Input
+		if e.Kind == "permission" {
+			input = synthesizePermissionAUQInput(e.ToolName, e.Input)
+		}
 		out = append(out, map[string]any{
 			"request_id":  e.RequestID,
 			"tool_use_id": e.ToolUseID,
-			"input":       e.Input,
+			"input":       input,
 			"created_at":  e.CreatedAt.Format(time.RFC3339),
+			"kind":        e.Kind,
+			"tool_name":   e.ToolName,
 		})
 	}
 	return out
+}
+
+// synthesizePermissionAUQInput builds the Yes/No questions payload the Web UI
+// expects for a permission prompt. Kept in sync with the live broadcast in
+// makeOnCanUseTool (server_session.go ~line 854) so refresh-time rehydration
+// renders an identical card.
+func synthesizePermissionAUQInput(toolName string, rawInput json.RawMessage) map[string]any {
+	return map[string]any{
+		"questions": []map[string]any{{
+			"question": fmt.Sprintf("Do you want to let Claude run %s?", toolName),
+			"options": []map[string]any{
+				{"label": "Yes, this time", "description": permissionInputPreview(rawInput)},
+				{"label": "No, cancel", "description": "Claude will be told you declined this tool call."},
+			},
+			"multiSelect": false,
+		}},
+	}
 }
 
 // dismissAllPendingAUQ atomically clears all pending AUQ entries and returns them.
@@ -226,6 +273,25 @@ func (s *serverSession) touch() {
 	s.mu.Lock()
 	s.LastActive = time.Now()
 	s.mu.Unlock()
+}
+
+// updatePeakContext raises PeakContextTokens to total if total is larger.
+// Notifies the WS hub when the value changes so sidebars stay in sync.
+// Safe to call concurrently.
+func (s *serverSession) updatePeakContext(total int64) {
+	if total <= 0 {
+		return
+	}
+	s.mu.Lock()
+	changed := total > s.PeakContextTokens
+	if changed {
+		s.PeakContextTokens = total
+	}
+	hub := s.hub
+	s.mu.Unlock()
+	if changed && hub != nil {
+		hub.notifySessions()
+	}
 }
 
 // setTodos stores the latest TodoWrite state and broadcasts session list update.
@@ -292,28 +358,30 @@ func (s *serverSession) snapshot() map[string]any {
 		copy(todosSnap, s.Todos)
 	}
 	spawnedBy := s.SpawnedBy
+	peakCtx := s.PeakContextTokens
 	snap := map[string]any{
-		"id":                id,
-		"name":              s.Name,
-		"project":           s.Project,
-		"model":             s.Model,
-		"status":            s.Status,
-		"category":          s.Category,
-		"tags":              tags,
-		"created_at":        s.CreatedAt.Format(time.RFC3339),
-		"last_active":       s.LastActive.Format(time.RFC3339),
-		"total_cost_usd":    s.TotalCost,
-		"num_turns":         s.NumTurns,
-		"claude_session_id": s.ClaudeSID,
-		"resumed_from":      s.ResumedFrom,
-		"stream_url":        s.StreamURL,
-		"agent":             "main",
-		"soul_enabled":      s.SoulEnabled,
-		"chrome_enabled":    s.ChromeEnabled,
-		"replace_soul":      s.ReplaceSoul,
-		"mode":              flagsToMode(s.SoulEnabled, s.ReplaceSoul),
-		"first_msg":         s.FirstMsg,
-		"spawned_by":        spawnedBy,
+		"id":                   id,
+		"name":                 s.Name,
+		"project":              s.Project,
+		"model":                s.Model,
+		"status":               s.Status,
+		"category":             s.Category,
+		"tags":                 tags,
+		"created_at":           s.CreatedAt.Format(time.RFC3339),
+		"last_active":          s.LastActive.Format(time.RFC3339),
+		"total_cost_usd":       s.TotalCost,
+		"num_turns":            s.NumTurns,
+		"claude_session_id":    s.ClaudeSID,
+		"resumed_from":         s.ResumedFrom,
+		"stream_url":           s.StreamURL,
+		"agent":                "main",
+		"soul_enabled":         s.SoulEnabled,
+		"chrome_enabled":       s.ChromeEnabled,
+		"replace_soul":         s.ReplaceSoul,
+		"mode":                 flagsToMode(s.SoulEnabled, s.ReplaceSoul),
+		"first_msg":            s.FirstMsg,
+		"spawned_by":           spawnedBy,
+		"peak_context_tokens":  peakCtx,
 	}
 	if todosSnap != nil {
 		snap["todos"] = todosSnap
@@ -487,6 +555,18 @@ func watchExit(proc *claudeProcess, sess *serverSession) {
 			return
 		}
 
+		// Log exit diagnostics so we can see why CC died (esp. for resume flows
+		// that fail with init timeout / immediate reap).
+		stderrTail := proc.stderrTail.String()
+		if stderrTail != "" {
+			// Trim to last 400 chars to avoid log flooding.
+			if len(stderrTail) > 400 {
+				stderrTail = "…" + stderrTail[len(stderrTail)-400:]
+			}
+		}
+		fmt.Fprintf(os.Stderr, "[%s] server: session %s process exited code=%d stderr=%q\n",
+			appName, shortID(sess.ID), proc.exitCode, stderrTail)
+
 		if proc.exitCode != 0 {
 			sess.setStatus("error")
 		} else {
@@ -637,7 +717,9 @@ func attachProcessBridge(proc *claudeProcess, sess *serverSession, source string
 	go func() {
 		bridgeStdout(proc, sess.broadcaster, makeOnInit(sess, source), makeOnResult(sess, fullSync), func(todos json.RawMessage) {
 			sess.setTodos(todos)
-		}, makeOnMemoryAudit(sess), makeOnCanUseTool(sess), makeOnTask(sess))
+		}, makeOnMemoryAudit(sess), makeOnCanUseTool(sess), makeOnTask(sess), func(total int64) {
+			sess.updatePeakContext(total)
+		})
 		// Process exited: invalidate pending AUQ (the control_request is gone
 		// with the subprocess) and mark in-flight tasks cancelled so the UI
 		// stops showing them as still running.
@@ -724,28 +806,130 @@ func makeOnCanUseTool(sess *serverSession) func(json.RawMessage) bool {
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			return false
 		}
-		if payload.Request.ToolName != "AskUserQuestion" {
-			return false
+
+		// AskUserQuestion: the tool already carries the questions/options
+		// schema, so forward the raw input to the Web UI unchanged.
+		if payload.Request.ToolName == "AskUserQuestion" {
+			entry := &pendingAUQEntry{
+				RequestID: payload.RequestID,
+				ToolUseID: payload.Request.ToolUseID,
+				Input:     append(json.RawMessage(nil), payload.Request.Input...),
+				CreatedAt: time.Now(),
+				Kind:      "auq",
+				ToolName:  payload.Request.ToolName,
+			}
+			sess.recordPendingAUQ(entry)
+
+			evt, _ := json.Marshal(map[string]any{
+				"request_id":  payload.RequestID,
+				"tool_use_id": payload.Request.ToolUseID,
+				"input":       payload.Request.Input,
+				"kind":        "auq",
+				"tool_name":   payload.Request.ToolName,
+			})
+			sess.broadcaster.broadcast(sseEvent{Event: "ask_user_question", Data: evt})
+			return true
 		}
 
+		// ExitPlanMode: plan approval dialog. Claude Code injects plan
+		// content into the tool input via normalizeToolInput. Surface the
+		// full plan to the Web UI so the user can review, optionally add
+		// feedback, and approve/reject — instead of the generic Yes/No.
+		if payload.Request.ToolName == "ExitPlanMode" {
+			entry := &pendingAUQEntry{
+				RequestID: payload.RequestID,
+				ToolUseID: payload.Request.ToolUseID,
+				Input:     append(json.RawMessage(nil), payload.Request.Input...),
+				CreatedAt: time.Now(),
+				Kind:      "plan_approval",
+				ToolName:  "ExitPlanMode",
+			}
+			sess.recordPendingAUQ(entry)
+
+			// Extract plan/planFilePath/allowedPrompts from the normalized input.
+			var pi struct {
+				Plan           string          `json:"plan"`
+				PlanFilePath   string          `json:"planFilePath"`
+				AllowedPrompts json.RawMessage `json:"allowedPrompts"`
+			}
+			_ = json.Unmarshal(payload.Request.Input, &pi)
+
+			evt, _ := json.Marshal(map[string]any{
+				"request_id":      payload.RequestID,
+				"tool_use_id":     payload.Request.ToolUseID,
+				"plan":            pi.Plan,
+				"plan_file_path":  pi.PlanFilePath,
+				"allowed_prompts": pi.AllowedPrompts,
+			})
+			sess.broadcaster.broadcast(sseEvent{Event: "plan_approval", Data: evt})
+			return true
+		}
+
+		// Non-AUQ permission prompt (Write, Edit, Bash, …). Claude Code
+		// normally runs with --dangerously-skip-permissions, so these only
+		// surface for tools the harness can't silently approve (e.g. skill
+		// bootstrap creating SKILL.md). Mirror the TUI behavior: surface
+		// Yes/No to the user instead of auto-allowing in the background.
 		entry := &pendingAUQEntry{
 			RequestID: payload.RequestID,
 			ToolUseID: payload.Request.ToolUseID,
 			Input:     append(json.RawMessage(nil), payload.Request.Input...),
 			CreatedAt: time.Now(),
+			Kind:      "permission",
+			ToolName:  payload.Request.ToolName,
 		}
 		sess.recordPendingAUQ(entry)
 
-		// Broadcast as an SSE event so the Web UI can render the panel.
-		// The frontend listens for event type "ask_user_question".
-		evt, _ := json.Marshal(map[string]any{
+		synthetic, _ := json.Marshal(map[string]any{
 			"request_id":  payload.RequestID,
 			"tool_use_id": payload.Request.ToolUseID,
-			"input":       payload.Request.Input,
+			"kind":        "permission",
+			"tool_name":   payload.Request.ToolName,
+			"input":       synthesizePermissionAUQInput(payload.Request.ToolName, payload.Request.Input),
 		})
-		sess.broadcaster.broadcast(sseEvent{Event: "ask_user_question", Data: evt})
+		sess.broadcaster.broadcast(sseEvent{Event: "ask_user_question", Data: synthetic})
 		return true
 	}
+}
+
+// permissionInputPreview renders tool_input as a short, human-readable
+// preview for the Yes option's description. Truncates to 240 chars so
+// the AUQ card stays compact.
+func permissionInputPreview(input json.RawMessage) string {
+	const maxLen = 240
+	if len(input) == 0 {
+		return "(no arguments)"
+	}
+	// Try to pretty-print known key=value shapes; fall back to raw JSON.
+	var obj map[string]any
+	if err := json.Unmarshal(input, &obj); err == nil && len(obj) > 0 {
+		keys := make([]string, 0, len(obj))
+		for k := range obj {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var b strings.Builder
+		for i, k := range keys {
+			if i > 0 {
+				b.WriteString("  ")
+			}
+			val, _ := json.Marshal(obj[k])
+			fmt.Fprintf(&b, "%s=%s", k, string(val))
+			if b.Len() >= maxLen {
+				break
+			}
+		}
+		s := b.String()
+		if len(s) > maxLen {
+			s = s[:maxLen] + "…"
+		}
+		return s
+	}
+	s := string(input)
+	if len(s) > maxLen {
+		s = s[:maxLen] + "…"
+	}
+	return s
 }
 
 // ── Session Manager ──
@@ -939,6 +1123,13 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 	if opts.Model != "" {
 		setSessionModel(id, opts.Model)
 	}
+	// Persist the project (cwd) so resume can relaunch CC in the same dir and
+	// find the transcript. Without this, spawn sessions created outside the
+	// default workspace can't be resumed — CC launches in workspace, fails to
+	// find the JSONL in the matching project dir, and exits immediately.
+	if opts.Project != "" {
+		setSessionProject(id, opts.Project)
+	}
 	if opts.SpawnedBy != "" {
 		updateSpawnedBy(id, opts.SpawnedBy)
 	}
@@ -1110,7 +1301,9 @@ func (sm *sessionManager) setMode(id, mode string) error {
 			promptFile = existingPromptFile
 		} else {
 			initSessionDir()
-			promptFile = writePromptForSession(id, buildPromptWithOverrides(promptOverrides{}))
+			// Mode switch / rehydrate on existing CC session — skip CC summaries
+			// since --resume <ccID> will restore full conversation history.
+			promptFile = writePromptForSession(id, buildPromptWithOverrides(promptOverrides{SkipCCSessions: true}))
 		}
 	}
 
@@ -1474,6 +1667,30 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 	// Inherit first_msg from original session (jsonl lookup uses cc id).
 	inheritedFirstMsg := getFirstMsgFromJSONL(ccID)
 
+	// Resolve the project (cwd) to relaunch CC in. Priority:
+	//   1. server_sessions.project column (persisted on create)
+	//   2. cwd recorded in the JSONL (backfill for pre-migration sessions)
+	//   3. workspace default (brand-new sessions without transcripts)
+	// Without this, sessions spawned outside the default workspace die on
+	// resume: CC launches in workspace, can't find the transcript in the
+	// matching ~/.claude/projects/<encoded-cwd>/<cc>.jsonl path, and exits.
+	resolvedProject := getSessionProject(id)
+	projectSource := "db"
+	if resolvedProject == "" {
+		if jp := getProjectFromJSONL(ccID); jp != "" {
+			resolvedProject = jp
+			projectSource = "jsonl-backfill"
+			// Backfill the DB so subsequent resumes hit the fast path.
+			setSessionProject(id, jp)
+		}
+	}
+	if resolvedProject == "" {
+		resolvedProject = workspace
+		projectSource = "workspace-default"
+	}
+	fmt.Fprintf(os.Stderr, "[%s] server: resumeSession project=%q (source=%s weiran=%s cc=%s)\n",
+		appName, resolvedProject, projectSource, shortID(id), shortID(ccID))
+
 	sess := &serverSession{
 		ID:       id,
 		Name:     displayName,
@@ -1483,7 +1700,7 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 		// with persisted data and for future --fork-session support.
 		ResumedFrom: "",
 		ClaudeSID:   ccID, // pre-populate; init message will confirm (same value expected)
-		Project:     workspace,
+		Project:     resolvedProject,
 		Model:       model,
 		Status:      "starting",
 		Category:    resolvedCategory,
@@ -1539,17 +1756,43 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 	// Skip entirely when resuming a bare/CC-mode session (SystemPromptFile="").
 	var promptFile string
 	if resolvedSoulEnabled {
-		promptFile = writePromptForSession(id, buildPromptWithOverrides(promptOverrides{}))
+		// Resume path — CC --resume <ccID> restores full history, so skip
+		// the "Recent Claude Code session summaries" injection. Stacking the
+		// summary on every resume is what caused prompt bloat. relay/review
+		// skills spawn fresh sessions via createSession and still get the
+		// summary there (they have no CC history to resume from).
+		promptFile = writePromptForSession(id, buildPromptWithOverrides(promptOverrides{SkipCCSessions: true}))
 		sess.promptFile = promptFile
 	}
 
+	// Decide whether an auto-wake ping is needed BEFORE spawning CC.
+	// Running transcriptNeedsWake after spawnClaude races with CC's own
+	// writes to the transcript: CC --resume immediately begins appending
+	// init/system records, and in rare cases a real response, so reading
+	// the transcript mid-spawn can observe a half-written state or CC's
+	// own new records rather than the pre-resume snapshot. Moving the
+	// decision here guarantees we judge the transcript as it was at the
+	// moment resume was requested.
+	// Auto-wake disabled: injecting "." on resume still has bugs
+	// (e.g. CC sometimes treats it as a real user turn, or doesn't
+	// actually unstick the conversation). Leaving message empty —
+	// callers must explicitly send a kickoff message if needed.
+	autoWoken := false
+	_ = autoWoken
+	_ = transcriptNeedsWake // keep helper alive for future re-enable
+
 	// Spawn Claude Code with --resume <ccID>
+	// WorkDir MUST be the original project path — CC looks up the transcript
+	// via cwd-encoded project dir (~/.claude/projects/<encoded-cwd>/<ccID>.jsonl).
+	// Without this, spawn sessions created outside the default workspace fail
+	// with "No conversation found with session ID: <ccID>".
 	proc, err := spawnClaude(sessionOpts{
 		SystemPromptFile: promptFile,
 		Model:            model,
 		ResumeID:         ccID,
 		ReplaceSoul:      resolvedReplaceSoul,
 		ServerSessionID:  id,
+		WorkDir:          resolvedProject,
 	})
 	if err != nil {
 		cleanup()
@@ -1570,6 +1813,11 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 	if model != "" {
 		setSessionModel(id, model)
 	}
+	// Persist the resolved project so subsequent resumes (and rehydrate after
+	// server restart) reuse the same cwd without repeating JSONL lookup.
+	if resolvedProject != "" && resolvedProject != workspace {
+		setSessionProject(id, resolvedProject)
+	}
 	if resolvedReplaceSoul {
 		setReplaceSoulEnabled(id, true)
 	}
@@ -1582,12 +1830,19 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 
 	// Send initial message if provided — wait for Claude Code to emit init
 	// before writing to stdin (consistent with createSession's waitInit pattern).
+	// The auto-wake decision was made above (before spawnClaude) and may have
+	// promoted an empty message to "." with autoWoken=true.
 	if message != "" {
-		sess.mu.Lock()
-		if sess.FirstMsg == "" {
-			sess.FirstMsg = message
+		// Only promote a real caller message to FirstMsg. Auto-wake pings
+		// must not overwrite FirstMsg — that field is used as a session
+		// label / summary and "." would be meaningless.
+		if !autoWoken {
+			sess.mu.Lock()
+			if sess.FirstMsg == "" {
+				sess.FirstMsg = message
+			}
+			sess.mu.Unlock()
 		}
-		sess.mu.Unlock()
 		if !proc.waitInit(30 * time.Second) {
 			fmt.Fprintf(os.Stderr, "[%s] server: init timeout for resume %s, sending message anyway\n", appName, shortID(sess.ID))
 		}
@@ -1596,11 +1851,23 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 			"message": map[string]any{"role": "user", "content": message},
 		})
 		sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
-		proc.sendMessage(message)
+		// Log sendMessage failures instead of silently dropping them. A
+		// silent drop on an auto-wake makes it look like resume succeeded
+		// while CC actually never received the ping — masking whether the
+		// underlying "resume self-exits" bug is still present.
+		if err := proc.sendMessage(message); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] server: resume sendMessage failed weiran=%s auto_wake=%v err=%v\n",
+				appName, shortID(sess.ID), autoWoken, err)
+		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[%s] server: resumed weiran=%s cc=%s\n",
-		appName, shortID(id), shortID(ccID))
+	if autoWoken {
+		fmt.Fprintf(os.Stderr, "[%s] server: resumed weiran=%s cc=%s (auto-woken: transcript closed)\n",
+			appName, shortID(id), shortID(ccID))
+	} else {
+		fmt.Fprintf(os.Stderr, "[%s] server: resumed weiran=%s cc=%s\n",
+			appName, shortID(id), shortID(ccID))
+	}
 	return sess, nil
 }
 
@@ -1673,11 +1940,16 @@ func (sm *sessionManager) rehydrateSessions() {
 		//   model knows it was interrupted and won't hallucinate completed tool calls
 		resumeMsg := s.RehydrateMsg
 		if resumeMsg == "" {
-			resumeMsg = "⚠️ Server was restarted. Your previous session was interrupted — " +
-				"any in-flight tool calls (Bash, etc.) were killed and did NOT complete. " +
-				"Do NOT assume they succeeded. Report your current status and wait for instructions. " +
-				"IMPORTANT: If YOU triggered this restart (e.g. via `make restart`, `launchctl stop/start`, or similar), " +
-				"do NOT restart again — it already happened."
+			// Bystander path: this session did NOT trigger the restart. Some
+			// other session ran `make server-restart` (in which case the
+			// mark_restart_initiator tool-hook tagged THAT session and it
+			// gets a custom message instead) or an external actor restarted
+			// launchd. Either way, in-flight tool calls in THIS session did
+			// not complete.
+			resumeMsg = "⚠️ Server was restarted by another session or an external action — " +
+				"NOT by you. Any in-flight tool calls (Bash, etc.) you had running were killed " +
+				"and did NOT complete. Do NOT assume they succeeded. Report your current status " +
+				"and wait for instructions. Do NOT trigger another restart."
 		}
 
 		fmt.Fprintf(os.Stderr, "[%s] server: rehydrate: restoring weiran=%s cc=%s model=%q\n",
@@ -1962,42 +2234,187 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 	return all
 }
 
-// extractImages finds base64 image blocks in user message content (tool_result responses).
+// subagentRecord describes a native Claude Code Agent subagent (Task) call,
+// reconstructed from a session's JSONL transcript so the Web UI can backfill
+// the subagent drawer when switching sessions or after a page reload.
+type subagentRecord struct {
+	ToolUseID    string `json:"tool_use_id"`
+	Description  string `json:"description"`
+	SubagentType string `json:"subagent_type"`
+	Model        string `json:"model,omitempty"`
+	Status       string `json:"status"`             // running | completed | error
+	StartedAt    string `json:"started_at"`         // RFC3339 timestamp
+	EndedAt      string `json:"ended_at,omitempty"` // RFC3339 timestamp
+}
+
+// parseSessionSubagents scans the JSONL and extracts all Agent tool_use launches
+// plus their matching tool_result completions, regardless of the message limit
+// applied to the chat history. The drawer needs the full lifecycle of every
+// subagent ever spawned in this session so completion state is correct on
+// reload / session switch.
+func parseSessionSubagents(path string) []subagentRecord {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	// id → record (preserve insertion order via separate slice)
+	byID := make(map[string]*subagentRecord)
+	var order []string
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var ev struct {
+			Type      string `json:"type"`
+			Timestamp string `json:"timestamp"`
+			Message   struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+
+		switch ev.Type {
+		case "assistant":
+			var blocks []struct {
+				Type  string `json:"type"`
+				Name  string `json:"name"`
+				ID    string `json:"id"`
+				Input struct {
+					Description  string `json:"description"`
+					SubagentType string `json:"subagent_type"`
+					Model        string `json:"model"`
+				} `json:"input"`
+			}
+			if json.Unmarshal(ev.Message.Content, &blocks) != nil {
+				continue
+			}
+			for _, b := range blocks {
+				if b.Type != "tool_use" || b.Name != "Agent" || b.ID == "" {
+					continue
+				}
+				if _, ok := byID[b.ID]; ok {
+					continue
+				}
+				rec := &subagentRecord{
+					ToolUseID:    b.ID,
+					Description:  b.Input.Description,
+					SubagentType: b.Input.SubagentType,
+					Model:        b.Input.Model,
+					Status:       "running",
+					StartedAt:    ev.Timestamp,
+				}
+				if rec.SubagentType == "" {
+					rec.SubagentType = "general-purpose"
+				}
+				if rec.Description == "" {
+					rec.Description = "Agent task"
+				}
+				byID[b.ID] = rec
+				order = append(order, b.ID)
+			}
+		case "user":
+			// tool_result blocks live inside user content arrays
+			var blocks []struct {
+				Type      string          `json:"type"`
+				ToolUseID string          `json:"tool_use_id"`
+				IsError   bool            `json:"is_error"`
+				Content   json.RawMessage `json:"content"`
+			}
+			if json.Unmarshal(ev.Message.Content, &blocks) != nil {
+				continue
+			}
+			for _, b := range blocks {
+				if b.Type != "tool_result" || b.ToolUseID == "" {
+					continue
+				}
+				rec := byID[b.ToolUseID]
+				if rec == nil {
+					continue
+				}
+				if b.IsError {
+					rec.Status = "error"
+				} else {
+					rec.Status = "completed"
+				}
+				rec.EndedAt = ev.Timestamp
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] subagent scanner error for %s: %v\n", appName, filepath.Base(path), err)
+	}
+
+	out := make([]subagentRecord, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	return out
+}
+
+// extractImages finds base64 image blocks in user message content. Handles
+// both top-level image blocks (user uploads sent directly as content) and
+// images nested inside tool_result blocks (Read tool / bash screenshots).
 func extractImages(raw json.RawMessage) []historyImage {
 	if len(raw) == 0 {
 		return nil
 	}
-	// content is an array of blocks like [{type:"tool_result", content:[{type:"image", source:{...}}]}]
+	// Top-level blocks: either {type:"image",source:{...}} (user upload) or
+	// {type:"tool_result", content:[...]} wrapping an image (tool output).
 	var blocks []struct {
 		Type    string          `json:"type"`
 		Content json.RawMessage `json:"content"`
+		Source  struct {
+			Type      string `json:"type"`
+			MediaType string `json:"media_type"`
+			Data      string `json:"data"`
+		} `json:"source"`
 	}
 	if json.Unmarshal(raw, &blocks) != nil {
 		return nil
 	}
 	var images []historyImage
 	for _, b := range blocks {
-		if b.Type != "tool_result" {
-			continue
-		}
-		// content can be string or array
-		var items []struct {
-			Type   string `json:"type"`
-			Source struct {
-				Type      string `json:"type"`
-				MediaType string `json:"media_type"`
-				Data      string `json:"data"`
-			} `json:"source"`
-		}
-		if json.Unmarshal(b.Content, &items) != nil {
-			continue
-		}
-		for _, item := range items {
-			if item.Type == "image" && item.Source.Type == "base64" && item.Source.Data != "" {
+		switch b.Type {
+		case "image":
+			// User-uploaded image sent directly in the user message content
+			// (produced by resolveImageBlock for ![alt](url) markdown, or by
+			// native multimodal clients that post image blocks as-is).
+			if b.Source.Type == "base64" && b.Source.Data != "" {
 				images = append(images, historyImage{
-					MediaType: item.Source.MediaType,
-					Data:      item.Source.Data,
+					MediaType: b.Source.MediaType,
+					Data:      b.Source.Data,
 				})
+			}
+		case "tool_result":
+			// Tool output containing images (e.g. Read of a .png, bash screenshot).
+			var items []struct {
+				Type   string `json:"type"`
+				Source struct {
+					Type      string `json:"type"`
+					MediaType string `json:"media_type"`
+					Data      string `json:"data"`
+				} `json:"source"`
+			}
+			if json.Unmarshal(b.Content, &items) != nil {
+				continue
+			}
+			for _, item := range items {
+				if item.Type == "image" && item.Source.Type == "base64" && item.Source.Data != "" {
+					images = append(images, historyImage{
+						MediaType: item.Source.MediaType,
+						Data:      item.Source.Data,
+					})
+				}
 			}
 		}
 	}

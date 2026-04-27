@@ -138,6 +138,11 @@ func openDB() (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("fts schema failed: %w", err)
 	}
+	// evolve_cycles table: structured log of self-evolution cycles.
+	if err := ensureEvolveSchemas(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("evolve schema failed: %w", err)
+	}
 	return db, nil
 }
 
@@ -726,6 +731,21 @@ func handleDB(args []string) {
 		// weiran db search-fts <query> [--scope=daily|session|content|both] [--limit=N] [--json]
 		handleFTSSearch(args[1:])
 
+	case "evolve-log":
+		// weiran db evolve-log '<json>' | -
+		// Insert one evolve cycle (JSON matches tasks.go wrap-up Summary).
+		handleEvolveLog(db, args[1:])
+
+	case "evolve-list":
+		// weiran db evolve-list [N]
+		// Show the last N cycles (default 10).
+		handleEvolveList(db, args[1:])
+
+	case "evolve-backfill":
+		// weiran db evolve-backfill [--days N] [--dry-run]
+		// Parse past daily notes and import any evolve Summary JSON blocks.
+		handleEvolveBackfill(db, args[1:])
+
 	case "events":
 		// weiran db events [--since=24h] [--mode=cron] [--type=timeout] [--notify]
 		handleEventLog(args[1:])
@@ -882,7 +902,7 @@ func handleDB(args []string) {
 		}
 
 	default:
-		fmt.Printf("unknown subcommand: %s\nusage: %s db <recall|pending|summarized|save|save-batch|list|stats|search|search-fts|fts-index|fts-index-sessions|fts-rebuild|gc|add-source|remove-source|list-sources|migrate-session|patterns|pattern-save|pattern-save-batch|feedback|cultivate|pattern-reject|events>\n", args[0], appName)
+		fmt.Printf("unknown subcommand: %s\nusage: %s db <recall|pending|summarized|save|save-batch|list|stats|search|search-fts|fts-index|fts-index-sessions|fts-rebuild|gc|add-source|remove-source|list-sources|migrate-session|patterns|pattern-save|pattern-save-batch|feedback|cultivate|pattern-reject|events|evolve-log|evolve-list|evolve-backfill>\n", args[0], appName)
 	}
 }
 

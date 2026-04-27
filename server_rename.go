@@ -76,6 +76,14 @@ func openServerDB() (*sql.DB, error) {
 		// Migration: add spawned_by for parent-child session tracking
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN spawned_by TEXT NOT NULL DEFAULT ''`)
 
+		// Migration: add project — the cwd the session was created with. Required
+		// for resume so `claude --resume` launches in the right project dir and
+		// can find the transcript. Without this, resume falls back to workspace
+		// and CC exits immediately with "transcript closed" when the JSONL lives
+		// in a different project dir (e.g. spawn sessions created from outside
+		// the default workspace).
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN project TEXT NOT NULL DEFAULT ''`)
+
 		// Migration: session_interactions table for IPC anti-loop tracking
 		serverDB.Exec(`CREATE TABLE IF NOT EXISTS session_interactions (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -589,6 +597,9 @@ type sessionMeta struct {
 	Category  string
 	Model     string
 	Cost      float64
+	UserTurns int
+	CreatedAt string
+	UpdatedAt string
 }
 
 // batchLoadSessionMeta loads metadata for the given session IDs only (matched against
@@ -614,7 +625,8 @@ func batchLoadSessionMeta(ids []string) map[string]sessionMeta {
 	// Duplicate for the second IN clause
 	allArgs := append(args, args...)
 	rows, err := db.Query(fmt.Sprintf(
-		`SELECT session_id, claude_session_id, COALESCE(category,''), COALESCE(model,''), COALESCE(total_cost_usd,0)
+		`SELECT session_id, claude_session_id, COALESCE(category,''), COALESCE(model,''), COALESCE(total_cost_usd,0),
+		        COALESCE(user_turns,0), COALESCE(created_at,''), COALESCE(updated_at,'')
 		 FROM server_sessions WHERE session_id IN (%s) OR claude_session_id IN (%s)`, in, in), allArgs...)
 	if err != nil {
 		return nil
@@ -622,10 +634,11 @@ func batchLoadSessionMeta(ids []string) map[string]sessionMeta {
 	defer rows.Close()
 	m := make(map[string]sessionMeta, len(ids))
 	for rows.Next() {
-		var sid, csid, cat, model string
+		var sid, csid, cat, model, createdAt, updatedAt string
 		var cost float64
-		if rows.Scan(&sid, &csid, &cat, &model, &cost) == nil {
-			meta := sessionMeta{WeiranSID: sid, Category: cat, Model: model, Cost: cost}
+		var turns int
+		if rows.Scan(&sid, &csid, &cat, &model, &cost, &turns, &createdAt, &updatedAt) == nil {
+			meta := sessionMeta{WeiranSID: sid, Category: cat, Model: model, Cost: cost, UserTurns: turns, CreatedAt: createdAt, UpdatedAt: updatedAt}
 			if csid != "" {
 				m[csid] = meta
 			}
@@ -655,6 +668,66 @@ func setSessionModel(sessionID, model string) {
 	now := time.Now().Format(time.RFC3339)
 	db.Exec(`UPDATE server_sessions SET model=?, updated_at=? WHERE session_id=?`,
 		model, now, sessionID)
+}
+
+// getSessionProject returns the persisted cwd for a session, or "" if not set.
+// Accepts either weiran id or cc id.
+func getSessionProject(id string) string {
+	db, err := openServerDB()
+	if err != nil {
+		return ""
+	}
+	var project string
+	db.QueryRow(`SELECT COALESCE(project,'') FROM server_sessions WHERE session_id=? OR claude_session_id=?`, id, id).Scan(&project)
+	return project
+}
+
+// setSessionProject persists the cwd a session was created with, so resume can
+// relaunch claude in the same dir and find the transcript.
+func setSessionProject(sessionID, project string) {
+	if project == "" {
+		return
+	}
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	now := time.Now().Format(time.RFC3339)
+	db.Exec(`UPDATE server_sessions SET project=?, updated_at=? WHERE session_id=?`,
+		project, now, sessionID)
+}
+
+// getProjectFromJSONL reads `cwd` from the first record in a session's JSONL
+// that carries one (type=user/assistant/attachment records all include cwd).
+// Used as a fallback when the server_sessions.project column is empty — e.g.
+// for sessions created before the project column migration.
+func getProjectFromJSONL(ccID string) string {
+	if ccID == "" {
+		return ""
+	}
+	path := findSessionJSONL(ccID)
+	if path == "" {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
+	// Scan up to 200 lines — cwd usually appears by line 3, but some init
+	// frames (queue-operation, system) may precede it.
+	for i := 0; i < 200 && scanner.Scan(); i++ {
+		var ev struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &ev) == nil && ev.Cwd != "" {
+			return ev.Cwd
+		}
+	}
+	return ""
 }
 
 // getModelFromJSONL extracts the model from a session's JSONL init message.
@@ -712,6 +785,94 @@ func getFirstMsgFromJSONL(sessionID string) string {
 		}
 	}
 	return ""
+}
+
+// transcriptNeedsWake reports whether a resumed session needs an explicit
+// wake-up message to keep the Claude Code subprocess alive.
+//
+// Background: weiran spawns CC in agent mode (-p --input-format stream-json).
+// In that mode, when the resumed transcript's last real turn is an assistant
+// message with a completion stop_reason (end_turn/max_tokens/stop_sequence),
+// CC considers the conversation "closed", has no prompt to respond to, and
+// exits immediately. The reaper then sweeps the dead process. This doesn't
+// happen with native interactive `claude --resume <id>` (no -p flag → TUI
+// stays alive waiting for keyboard input).
+//
+// STRICT whitelist: we only wake when stop_reason is unambiguously a
+// completion marker. An empty/unknown stop_reason is NOT enough, because
+// CC writes JSONL with an empty stop_reason for most normal turns (see
+// provider_gemini.go:1674 for the same observation on the provider side).
+// The previous "safe default = wake" policy caused systematic false wakes
+// — nearly every resume injected a spurious "." because most assistant
+// turns in the transcript had no stop_reason recorded.
+//
+// Returns false on safe defaults:
+//   - JSONL missing/unreadable (preserve existing resume behavior)
+//   - empty transcript (CC waits for first input on its own)
+//   - last real turn is a user message (CC will process it on resume)
+//   - last assistant turn has stop_reason=tool_use (mid-tool state, expects
+//     a tool_result user turn next — not a text wake ping)
+//   - last assistant turn has empty/unknown stop_reason (CC often omits it
+//     for normal turns; waking here injects spurious "." on every resume)
+//
+// Returns true only when stop_reason is explicitly end_turn, max_tokens,
+// or stop_sequence — the documented Anthropic completion markers.
+func transcriptNeedsWake(ccID string) bool {
+	if ccID == "" {
+		return false
+	}
+	path := findSessionJSONL(ccID)
+	if path == "" {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
+
+	var lastRole string
+	var lastStopReason string
+	for scanner.Scan() {
+		var ev struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role       string `json:"role"`
+				StopReason string `json:"stop_reason"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &ev) != nil {
+			continue
+		}
+		// Only conversational turns count. Skip system/init, last-prompt,
+		// summary, and other metadata records.
+		if ev.Type != "user" && ev.Type != "assistant" {
+			continue
+		}
+		lastRole = ev.Type
+		lastStopReason = ev.Message.StopReason
+	}
+	if scanner.Err() != nil {
+		return false
+	}
+	if lastRole != "assistant" {
+		// Empty transcript or last turn is user input → no wake needed.
+		return false
+	}
+	// Strict whitelist: only explicit completion markers trigger wake.
+	// An empty or unknown stop_reason is treated as "don't wake" because
+	// CC frequently records an empty stop_reason on normal assistant turns,
+	// and false-positive wakes pollute the transcript with synthetic "."
+	// turns on every resume.
+	switch lastStopReason {
+	case "end_turn", "max_tokens", "stop_sequence":
+		return true
+	default:
+		return false
+	}
 }
 
 // setRehydrateMessage marks a session to be woken with a message after server restart.

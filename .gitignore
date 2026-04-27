@@ -1,5 +1,7 @@
 sessions.db
 server_sessions.db
+build/
+coverage.out
 config.json
 services.json
 metrics.jsonl

@@ -14,6 +14,7 @@
 <title>Weiran</title>
 <link rel="stylesheet" id="hljs-theme" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
 <link rel="stylesheet" href="/css/app.css">
+<style id="server-injected-css">{{.TmuxDrawerHideCSS}}</style>
 </head>
 <body>
 
@@ -46,6 +47,7 @@
         <button class="sniff-dropdown-item" onclick="setHash('usage');showSniffUsage();closeSniffMenu()">📈 Usage</button>
         <button class="sniff-dropdown-item" onclick="setHash('logs');showSniffLogs();closeSniffMenu()">📋 Logs</button>
         <button class="sniff-dropdown-item" onclick="setHash('memory');showSniffMemory();closeSniffMenu()">🧠 Memory</button>
+        <button class="sniff-dropdown-item" onclick="openDBExplorer();closeSniffMenu()">🗄️ DB</button>
         <button class="sniff-dropdown-item" onclick="setHash('telemetry');showSniffTelemetry();closeSniffMenu()">📡 Telemetry</button>
       </div>
     </div>
@@ -123,6 +125,8 @@
           <option value="">—</option>
           <option value="opus">Opus 4.7</option>
           <option value="opus[1m]">Opus 4.7 (1M)</option>
+          <option value="opus-4-6">Opus 4.6</option>
+          <option value="opus-4-6[1m]">Opus 4.6 (1M)</option>
           <option value="sonnet">Sonnet 4.6</option>
           <option value="sonnet[1m]">Sonnet 4.6 (1M)</option>
           <option value="haiku">Haiku 4.5</option>
@@ -167,8 +171,8 @@
     <div class="composer disabled" id="composer">
       <div class="slash-dropdown" id="slash-dropdown"></div>
       <div class="inner">
-        <input type="file" id="file-input" accept="image/*,application/pdf,.pdf" multiple hidden onchange="handleFileSelect(this.files)">
-        <button class="attach-btn" title="Attach image or PDF" onclick="document.getElementById('file-input').click()">&#128206;</button>
+        <input type="file" id="file-input" accept="*/*" multiple hidden onchange="handleFileSelect(this.files)">
+        <button class="attach-btn" title="Attach any file" onclick="document.getElementById('file-input').click()">&#128206;</button>
         <div class="inputwrap">
           <div class="upload-preview" id="upload-preview"></div>
           <textarea id="input" placeholder="Send a message... (/ for commands)" rows="1"></textarea>
@@ -188,7 +192,22 @@
   <div class="st-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg></div>
   <div class="st-label">SESSIONS</div>
 </div>
+<!-- Right-edge tab stack (adaptive: flexbox centered on viewport, shrinks when tabs hidden) -->
+<div class="right-tabs-stack" id="right-tabs-stack">
 <div class="todo-tab" id="todo-tab" onclick="toggleTodoDrawer()">📋 Todo</div>
+<div class="subagent-tab" id="subagent-tab" onclick="toggleSubagentDrawer()">🔗 Agents <span class="subagent-badge" id="subagent-badge" style="display:none">0</span></div>
+<div class="tasks-tab" id="tasks-tab" onclick="toggleTasksDrawer()">📡 Tasks <span class="tasks-badge" id="tasks-badge" style="display:none">0</span></div>
+<div class="tmux-tab" id="tmux-tab" x-data
+     :class="{ visible: $store.tmux.available }"
+     @click="$store.tmux.toggle()">
+  🖥️ tmux
+  <span class="tmux-badge"
+        x-show="$store.tmux.count > 0"
+        x-text="$store.tmux.count"
+        x-cloak></span>
+</div>
+</div>
+
 <div class="todo-drawer" id="todo-drawer">
   <div class="todo-drawer-header">
     <h3>📋 Tasks</h3>
@@ -199,8 +218,7 @@
   </div>
 </div>
 
-<!-- Subagent Drawer -->
-<div class="subagent-tab" id="subagent-tab" onclick="toggleSubagentDrawer()">🔗 Agents <span class="subagent-badge" id="subagent-badge" style="display:none">0</span></div>
+<!-- Subagent Drawer (tab moved to .right-tabs-stack above) -->
 <div class="subagent-drawer" id="subagent-drawer">
   <div class="subagent-drawer-header">
     <h3>🔗 Subagents</h3>
@@ -211,8 +229,7 @@
   </div>
 </div>
 
-<!-- Tasks Drawer (Bash run_in_background, Monitor, async Agent) -->
-<div class="tasks-tab" id="tasks-tab" onclick="toggleTasksDrawer()">📡 Tasks <span class="tasks-badge" id="tasks-badge" style="display:none">0</span></div>
+<!-- Tasks Drawer (tab moved to .right-tabs-stack above) -->
 <div class="tasks-drawer" id="tasks-drawer">
   <div class="tasks-drawer-header">
     <h3>📡 Background Tasks</h3>
@@ -227,15 +244,6 @@
      Declarative / reactive — state lives in Alpine.store('tmux'), defined in
      /js/drawer-tmux.js. No more manual innerHTML rebuilds on every tick. -->
 <div x-data>
-  <div class="tmux-tab" id="tmux-tab"
-       :class="{ visible: $store.tmux.available }"
-       @click="$store.tmux.toggle()">
-    🖥️ tmux
-    <span class="tmux-badge"
-          x-show="$store.tmux.count > 0"
-          x-text="$store.tmux.count"
-          x-cloak></span>
-  </div>
   <div class="tmux-drawer" id="tmux-drawer" :class="{ open: $store.tmux.open }">
     <div class="tmux-drawer-header">
       <h3>🖥️ tmux sessions</h3>
@@ -265,7 +273,11 @@
              :class="{ attached: s.attached }"
              @click="$store.tmux.toggleSession(s.name)">
           <div class="tmux-session-top">
-            <span class="tmux-session-name" x-text="s.name"></span>
+            <span class="tmux-session-name copyable"
+                  :class="{ copied: $store.tmux.copiedName === s.name }"
+                  :title="'点击复制 tmux:' + s.name"
+                  @click.stop="$store.tmux.copyName(s.name)"
+                  x-text="$store.tmux.copiedName === s.name ? '✓ tmux:' + s.name : s.name"></span>
             <span class="tmux-session-badges">
               <span class="tmux-badge-pill" x-text="(s.windows || []).length + 'w'"></span>
               <span class="tmux-badge-pill attached" x-show="s.attached">attached</span>
@@ -278,26 +290,52 @@
           <!-- Window rows (web vs plain) -->
           <template x-for="w in (s.windows || [])" :key="w.index">
             <template x-if="w.web_port || w.web_url">
-              <div class="tmux-window-row web" :class="{ active: w.active }">
-                <span class="tmux-window-idx" x-text="w.index"></span>
-                <span class="tmux-window-name" x-text="w.name || ''"></span>
-                <span class="tmux-web-badge" x-text="'🌐 ' + $store.tmux.webLabelFor(w)"></span>
-                <a class="tmux-web-open"
-                   :href="$store.tmux.webUrlFor(w)"
-                   target="_blank" rel="noopener"
-                   @click.stop>Open ↗</a>
+              <div>
+                <div class="tmux-window-row web" :class="{ active: w.active }">
+                  <span class="tmux-window-idx" x-text="w.index"></span>
+                  <span class="tmux-window-name" x-text="w.name || ''"></span>
+                  <span class="tmux-web-badge" x-text="'🌐 ' + $store.tmux.webLabelFor(w)"></span>
+                  <a class="tmux-web-open"
+                     :href="$store.tmux.webUrlFor(w)"
+                     target="_blank" rel="noopener"
+                     @click.stop>Open ↗</a>
+                </div>
+                <div class="tmux-labels-row" x-show="$store.tmux.parsedLabels(w).length > 0">
+                  <template x-for="lbl in $store.tmux.parsedLabels(w)" :key="lbl.key">
+                    <span class="tmux-label-pill copyable"
+                          :class="{ copied: $store.tmux.copiedLabel === s.name + ':' + w.index + ':' + lbl.key }"
+                          :title="lbl.value ? '点击复制: ' + lbl.value : '点击复制: ' + lbl.key"
+                          @click.stop="$store.tmux.copyLabel(s.name, w.index, lbl.key, lbl.value)"
+                          x-text="$store.tmux.copiedLabel === s.name + ':' + w.index + ':' + lbl.key
+                                  ? '✓ ' + (lbl.value || lbl.key)
+                                  : (lbl.value ? lbl.key + '=' + lbl.value : lbl.key)"></span>
+                  </template>
+                </div>
               </div>
             </template>
           </template>
           <template x-for="w in (s.windows || [])" :key="'plain-' + w.index">
             <template x-if="!(w.web_port || w.web_url)">
-              <div class="tmux-window-row" :class="{ active: w.active }">
-                <span class="tmux-window-idx" x-text="w.index"></span>
-                <span class="tmux-window-name" x-text="w.name || ''"></span>
-                <span class="tmux-window-cmd" x-text="w.current_command || ''"></span>
-                <span class="tmux-window-path"
-                      :title="w.current_path || ''"
-                      x-text="$store.tmux.shortPath(w.current_path || '')"></span>
+              <div>
+                <div class="tmux-window-row" :class="{ active: w.active }">
+                  <span class="tmux-window-idx" x-text="w.index"></span>
+                  <span class="tmux-window-name" x-text="w.name || ''"></span>
+                  <span class="tmux-window-cmd" x-text="w.current_command || ''"></span>
+                  <span class="tmux-window-path"
+                        :title="w.current_path || ''"
+                        x-text="$store.tmux.shortPath(w.current_path || '')"></span>
+                </div>
+                <div class="tmux-labels-row" x-show="$store.tmux.parsedLabels(w).length > 0">
+                  <template x-for="lbl in $store.tmux.parsedLabels(w)" :key="lbl.key">
+                    <span class="tmux-label-pill copyable"
+                          :class="{ copied: $store.tmux.copiedLabel === s.name + ':' + w.index + ':' + lbl.key }"
+                          :title="lbl.value ? '点击复制: ' + lbl.value : '点击复制: ' + lbl.key"
+                          @click.stop="$store.tmux.copyLabel(s.name, w.index, lbl.key, lbl.value)"
+                          x-text="$store.tmux.copiedLabel === s.name + ':' + w.index + ':' + lbl.key
+                                  ? '✓ ' + (lbl.value || lbl.key)
+                                  : (lbl.value ? lbl.key + '=' + lbl.value : lbl.key)"></span>
+                  </template>
+                </div>
               </div>
             </template>
           </template>
@@ -350,6 +388,8 @@
     <option value="">— Default ({{.DefaultInteractiveModel}}) —</option>
     <option value="opus">Opus 4.7</option>
     <option value="opus[1m]">Opus 4.7 (1M)</option>
+    <option value="opus-4-6">Opus 4.6</option>
+    <option value="opus-4-6[1m]">Opus 4.6 (1M)</option>
     <option value="sonnet">Sonnet 4.6</option>
     <option value="sonnet[1m]">Sonnet 4.6 (1M)</option>
     <option value="haiku">Haiku 4.5</option>
@@ -416,13 +456,11 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.1/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/core.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/bash.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/go.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/javascript.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/python.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/json.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/yaml.min.js"></script>
+<!-- highlight.js: full UMD bundle (browser-ready, ~36 common languages preregistered).
+     Do NOT load /lib/core.min.js + /lib/languages/*.min.js separately — those are
+     CommonJS modules ("module is not defined") and each redeclares IDENT_RE in the
+     global scope ("Identifier 'IDENT_RE' has already been declared"). -->
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/highlight.min.js"></script>
 <!-- Alpine.js (5KB, no build step) — lightweight reactivity for drawers/panels -->
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
 <!-- Interactive component registry (choices / chips / rating / gallery).
@@ -434,10 +472,15 @@
 'use strict';
 
 // ── Server-injected config ──
-const SERVER_CONFIG = {defaultReplaceSoul: {{.DefaultReplaceSoul}}, defaultInteractiveModel: "{{.DefaultInteractiveModel}}"};
+const SERVER_CONFIG = {defaultReplaceSoul: {{.DefaultReplaceSoul}}, defaultInteractiveModel: "{{.DefaultInteractiveModel}}", disableTmuxDrawer: {{.DisableTmuxDrawer}}};
 
 // ── State ──
 let TOKEN = new URLSearchParams(location.search).get('token')||localStorage.getItem('weiran_token')||'';
+// Persist URL-provided token to localStorage so other pages on the same origin
+// (e.g. /api/db/ui) can reuse it without re-prompting.
+if (TOKEN && localStorage.getItem('weiran_token') !== TOKEN) {
+  localStorage.setItem('weiran_token', TOKEN);
+}
 let ws = null, wsRetryDelay = 1000, wsRetryTimer = null;
 let activeSessionId = null, sessions = {}, streamingMsgEl = null, streamingText = '';
 let typeBuf = '', typeRendered = '', typeRAF = null, typeLastChunk = 0;
@@ -1069,6 +1112,12 @@ function handleWSMessage(msg){
       handleSessionsUpdate(msg.sessions||[]);
       break;
     case 'event':
+      // Always track Agent subagent lifecycle regardless of which session is
+      // currently active — otherwise switching sessions while a subagent is
+      // running silently drops the start/end events and the drawer never updates.
+      if(msg.event==='tool_use'||msg.event==='tool_result'){
+        routeSubagentEvent(msg.session_id,msg.event,msg.data);
+      }
       if(msg.session_id===activeSessionId||resumeInProgress)handleSessionEvent(msg.event,msg.data);
       break;
     case 'created':
@@ -1278,6 +1327,9 @@ function handleSessionEvent(event,data){
     case 'ask_user_question_dismissed':
       handleAUQDismissed(data);
       break;
+    case 'plan_approval':
+      handlePlanApproval(data);
+      break;
     case 'task_event':
       // data is the runningTask snapshot. Attach to active session if it's the
       // session generating events (we can't tell from data alone, but the SSE
@@ -1346,6 +1398,9 @@ function selectSession(id){
   // Render subagent drawer for newly selected session (state is preserved per-session)
   renderSubagentDrawer();
   renderTasksDrawer();
+  // Backfill subagent state from JSONL — covers history that arrived while we
+  // weren't viewing this session, or before this page loaded.
+  if(id)backfillSubagentsFromHistory(id);
 
   // Sync URL query string — prefer cc id (stable user-visible handle);
   // fall back to weiran id if cc id not yet known (e.g. freshly created session).
@@ -1512,10 +1567,8 @@ function handleToolUse(data){
         const m=b.input.command.match(/^\s*cd\s+("[^"]+"|'[^']+'|\S+)/);
         if(m){let d=m[1].replace(/^['"]|['"]$/g,'');if(d.startsWith('~'))d='/Users/kiyor'+d.slice(1);else if(!d.startsWith('/'))d=currentCwd+'/'+d;setCwd(d)}
       }
-      // Track Agent subagent launches
-      if(b.name==='Agent'&&b.id&&b.input){
-        trackSubagentStart(b.id,b.input);
-      }
+      // Note: Agent subagent tracking is handled in routeSubagentEvent,
+      // which runs in handleWSMessage regardless of active session.
     }
   });
   if(!showToolsMode){
@@ -1535,19 +1588,29 @@ function handleToolUse(data){
 //   POST /api/sessions/{id}/answer-question sends a control_response.
 function handleAskUserQuestion(data){
   if(!data||!data.request_id||!data.input||!Array.isArray(data.input.questions))return;
-  renderAskUserQuestion(data.request_id, data.tool_use_id||'', data.input.questions);
+  const kind=data.kind||'auq';
+  const toolName=data.tool_name||'';
+  renderAskUserQuestion(data.request_id, data.tool_use_id||'', data.input.questions, kind, toolName);
   // Pause the model's "thinking" spinner — we're waiting on the user now.
   setThinking(false);clearTicker();
 }
 
 // Renders Claude's AskUserQuestion as an inline choice panel. Pane is keyed
 // by request_id so SSE history replay is deduplicated.
-function renderAskUserQuestion(requestId, toolUseId, questions){
+// kind: "auq" (default, real AskUserQuestion tool) or "permission" (Bash/Edit/Write
+// tool approval prompt). Permission containers get distinct styling and are
+// excluded from autoSkipActiveAUQ — auto-deny silently is too easy to miss.
+function renderAskUserQuestion(requestId, toolUseId, questions, kind, toolName){
   if(!requestId) return;
   if(document.querySelector(`.auq-container[data-request-id="${CSS.escape(requestId)}"]`)) return;
+  kind = kind || 'auq';
+  toolName = toolName || '';
   const el=document.createElement('div');el.className='msg ai';
   const frag=[];
-  frag.push(`<div class="body"><div class="md"><div class="auq-container" data-request-id="${esc(requestId)}" data-tool-use-id="${esc(toolUseId)}">`);
+  frag.push(`<div class="body"><div class="md"><div class="auq-container" data-request-id="${esc(requestId)}" data-tool-use-id="${esc(toolUseId)}" data-kind="${esc(kind)}" data-tool-name="${esc(toolName)}">`);
+  if(kind==='permission'){
+    frag.push(`<div class="auq-permission-banner">🔒 Permission Request${toolName?' · <code>'+esc(toolName)+'</code>':''}</div>`);
+  }
   questions.forEach((q,qi)=>{
     const multi=!!q.multiSelect;
     frag.push(`<div class="auq-question" data-qidx="${qi}" data-question-text="${esc(q.question||'')}" data-multi="${multi?'1':'0'}">`);
@@ -1654,15 +1717,29 @@ async function cancelAUQ(btn){
 // Called from sendMessage() so that typing a free-text reply auto-skips
 // pending AUQ prompts without requiring a click on the "跳过" button.
 // Returns the number of panels that were auto-skipped.
+//
+// Permission containers (data-kind="permission") get the same cancel — the
+// subprocess MUST be unblocked or the new message can't be processed — but
+// we surface a loud toast + scroll the card into view so the user knows a
+// tool call was just denied (instead of it disappearing silently as a normal
+// AUQ would).
 async function autoSkipActiveAUQ(){
   if(!activeSessionId)return 0;
   const containers=document.querySelectorAll('.auq-container:not(.submitted)');
   if(!containers.length)return 0;
   const jobs=[];
+  let permissionContainer=null;
+  let permissionToolName='';
   containers.forEach(container=>{
     const requestId=container.dataset.requestId;
     if(!requestId)return;
-    lockAUQ(container,'已跳过（改用输入框回复）');
+    const kind=container.dataset.kind||'auq';
+    const isPermission=(kind==='permission');
+    if(isPermission && !permissionContainer){
+      permissionContainer=container;
+      permissionToolName=container.dataset.toolName||'';
+    }
+    lockAUQ(container, isPermission?'已自动拒绝（你输入了消息）':'已跳过（改用输入框回复）');
     jobs.push(
       fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/answer-question`,{
         method:'POST',
@@ -1672,6 +1749,13 @@ async function autoSkipActiveAUQ(){
     );
   });
   await Promise.all(jobs);
+  // Loudly notify if any permission requests were auto-denied — the user may
+  // not have realized one was pending. Scroll first matching card into view.
+  if(permissionContainer){
+    const tname=permissionToolName?` (${permissionToolName})`:'';
+    toast(`权限请求已被自动拒绝${tname} — 可让我重试`,'error',5000);
+    try{ permissionContainer.scrollIntoView({behavior:'smooth', block:'center'}); }catch(e){}
+  }
   return containers.length;
 }
 
@@ -1684,12 +1768,107 @@ function lockAUQ(container, confirmText){
   if(cancel){cancel.disabled=true}
 }
 
+// ── Plan Approval (ExitPlanMode) ──
+// When Claude calls ExitPlanMode, the server broadcasts a plan_approval SSE
+// event containing the full plan content. We render a dedicated approval
+// dialog with the plan in markdown, an optional feedback textarea, and
+// approve/reject buttons. On approve/reject we POST to the same
+// /answer-question endpoint with Kind-specific payload.
+
+function handlePlanApproval(data){
+  if(!data||!data.request_id)return;
+  renderPlanApproval(data.request_id, data.tool_use_id||'', data.plan||'', data.plan_file_path||'', data.allowed_prompts);
+  setThinking(false);clearTicker();
+}
+
+function renderPlanApproval(requestId, toolUseId, plan, planFilePath, allowedPrompts){
+  if(!requestId)return;
+  // Dedupe
+  if(document.querySelector(`.plan-approval[data-request-id="${CSS.escape(requestId)}"]`))return;
+  const el=document.createElement('div');el.className='msg ai';
+  const displayPath=planFilePath?planFilePath.replace(/^\/Users\/[^/]+\//,'~/'):''
+  const isEmpty=!plan||!plan.trim();
+  const planHtml=isEmpty
+    ?'<em style="color:var(--muted2)">No plan content found.</em>'
+    :renderMd(plan);
+  const frag=[];
+  frag.push(`<div class="body"><div class="md"><div class="plan-approval" data-request-id="${esc(requestId)}" data-tool-use-id="${esc(toolUseId)}">`);
+  frag.push(`<div class="plan-header"><span class="plan-badge">📋 Plan Approval</span>`);
+  if(displayPath)frag.push(`<span class="plan-file">${esc(displayPath)}</span>`);
+  frag.push(`</div>`);
+  frag.push(`<div class="plan-content"><div class="md">${planHtml}</div></div>`);
+  frag.push(`<textarea class="plan-feedback" placeholder="Optional feedback — visible to Claude on approve or reject…" rows="1"></textarea>`);
+  frag.push(`<div class="plan-footer">`);
+  frag.push(`<button class="plan-approve" onclick="submitPlanApproval(this,'approve')">✓ Approve Plan</button>`);
+  frag.push(`<button class="plan-reject" onclick="submitPlanApproval(this,'reject')">✗ Reject</button>`);
+  frag.push(`</div></div></div></div>`);
+  el.innerHTML=frag.join('');
+  document.getElementById('messages').appendChild(el);
+  scrollBottomSmooth();
+}
+
+async function submitPlanApproval(btn, action){
+  const container=btn.closest('.plan-approval');
+  if(!container||!activeSessionId)return;
+  const requestId=container.dataset.requestId;
+  const feedbackEl=container.querySelector('.plan-feedback');
+  const feedback=(feedbackEl&&feedbackEl.value)||'';
+  // Lock UI
+  container.classList.add('submitted');
+  container.querySelectorAll('button').forEach(b=>{b.disabled=true});
+  const label=container.querySelector('.plan-approve');
+  if(action==='approve'&&label)label.textContent='✓ Plan Approved';
+  if(action==='reject'&&label)label.textContent='✗ Plan Rejected';
+  const rejectBtn=container.querySelector('.plan-reject');
+  if(rejectBtn)rejectBtn.style.display='none';
+  try{
+    const resp=await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/answer-question`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},
+      body:JSON.stringify({
+        request_id:requestId,
+        // Repurpose answers: answer[0].answer = "approve"|"reject", question = feedback
+        answers:[{question:feedback, answer:action}],
+        cancelled:action==='reject',
+      }),
+    });
+    if(!resp.ok){
+      console.error('plan-approval failed:',resp.status,await resp.text());
+      if(label)label.textContent='Submit Failed';
+    }
+  }catch(e){
+    console.error('plan-approval error:',e);
+    if(label)label.textContent='Submit Failed';
+  }
+}
+
+// Auto-skip plan approval when user sends a free-text message (same as AUQ)
+function autoSkipPlanApproval(){
+  if(!activeSessionId)return 0;
+  const containers=document.querySelectorAll('.plan-approval:not(.submitted)');
+  if(!containers.length)return 0;
+  containers.forEach(container=>{
+    const requestId=container.dataset.requestId;
+    if(!requestId)return;
+    container.classList.add('submitted');
+    container.querySelectorAll('button').forEach(b=>{b.disabled=true});
+    const label=container.querySelector('.plan-approve');
+    if(label)label.textContent='Skipped (replied via input)';
+    fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/answer-question`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},
+      body:JSON.stringify({request_id:requestId, cancelled:true}),
+    }).catch(e=>console.error('auto-skip-plan error:',e));
+  });
+  return containers.length;
+}
+
 function handleToolResult(data){
   const msg=data.message;if(!msg||!msg.content)return;
   msg.content.forEach(b=>{
     if(b.type==='tool_result'){
-      // Track Agent subagent completions
-      if(b.tool_use_id)trackSubagentEnd(b.tool_use_id,b.is_error);
+      // Note: Agent subagent completion tracking is handled in
+      // routeSubagentEvent (runs regardless of active session).
       // Check for image content (base64 from Read tool)
       const images=extractImages(b.content);
       if(images.length>0){
@@ -2095,10 +2274,23 @@ let pendingFiles=[];
 function isPdfFile(f){
   return f.type==='application/pdf'||/\.pdf$/i.test(f.name||'');
 }
+function isImageFile(f){
+  return (f.type||'').startsWith('image/');
+}
+function fileIconFor(f){
+  const n=(f.name||'').toLowerCase();
+  if(/\.(html?|htm)$/.test(n))return '🌐';
+  if(/\.(zip|tar|gz|tgz|bz2|7z|rar)$/.test(n))return '🗜️';
+  if(/\.(mp3|wav|ogg|flac|m4a|aac)$/.test(n))return '🎵';
+  if(/\.(mp4|mov|webm|mkv|avi)$/.test(n))return '🎬';
+  if(/\.(json|ya?ml|toml|xml|csv|tsv)$/.test(n))return '📋';
+  if(/\.(md|txt|log)$/.test(n))return '📝';
+  if(/\.(go|js|ts|py|rs|c|cc|cpp|h|hpp|java|sh|rb|php)$/.test(n))return '💻';
+  return '📎';
+}
 
 function handleFileSelect(files){
   for(const f of files){
-    if(!f.type.startsWith('image/')&&!isPdfFile(f))continue;
     pendingFiles.push(f);
     addThumb(f);
   }
@@ -2110,7 +2302,12 @@ function addThumb(file){
   const wrap=document.createElement('div');
   wrap.className='upload-thumb';
   let objUrl=null;
-  if(isPdfFile(file)){
+  if(isImageFile(file)){
+    const img=document.createElement('img');
+    objUrl=URL.createObjectURL(file);
+    img.src=objUrl;
+    wrap.append(img);
+  }else if(isPdfFile(file)){
     wrap.classList.add('is-pdf');
     wrap.title=file.name||'PDF';
     const icon=document.createElement('div');
@@ -2119,10 +2316,13 @@ function addThumb(file){
     name.className='pdf-name';name.textContent=file.name||'PDF';
     wrap.append(icon,name);
   }else{
-    const img=document.createElement('img');
-    objUrl=URL.createObjectURL(file);
-    img.src=objUrl;
-    wrap.append(img);
+    wrap.classList.add('is-pdf');
+    wrap.title=file.name||'File';
+    const icon=document.createElement('div');
+    icon.className='pdf-icon';icon.textContent=fileIconFor(file);
+    const name=document.createElement('div');
+    name.className='pdf-name';name.textContent=file.name||'File';
+    wrap.append(icon,name);
   }
   const btn=document.createElement('button');
   btn.className='remove-thumb';btn.textContent='×';
@@ -2189,10 +2389,12 @@ async function sendMessage(){
   // Handle built-in slash commands client-side
   if(text.startsWith('/')&&!pendingFiles.length&&handleSlashSend(text))return;
 
-  // If an AskUserQuestion panel is still open, typing a free-text reply
-  // implicitly means "skip those questions". Auto-cancel before sending so
-  // the subprocess unblocks and the new message lands on a clean turn.
+  // If an AskUserQuestion or plan approval panel is still open, typing a
+  // free-text reply implicitly means "skip those questions". Auto-cancel
+  // before sending so the subprocess unblocks and the new message lands
+  // on a clean turn.
   await autoSkipActiveAUQ();
+  autoSkipPlanApproval();
 
   // Upload pending images first
   let imgMarkdown='';
@@ -2200,8 +2402,15 @@ async function sendMessage(){
     const prog=document.getElementById('upload-progress');
     prog.textContent='Uploading...';
     try{
-      const results=await Promise.all(pendingFiles.map(uploadFile));
-      imgMarkdown=results.map(r=>`![${r.original_name||'image'}](${r.url})`).join('\n');
+      const results=await Promise.all(pendingFiles.map(async f=>{
+        const r=await uploadFile(f);
+        r._isImage=isImageFile(f);
+        return r;
+      }));
+      imgMarkdown=results.map(r=>{
+        const name=r.original_name||'file';
+        return r._isImage?`![${name}](${r.url})`:`[${name}](${r.url})`;
+      }).join('\n');
     }catch(e){
       prog.textContent='Upload failed: '+e.message;
       setTimeout(()=>{prog.textContent=''},3000);
@@ -3040,18 +3249,31 @@ function closeFileModal(){
 // ── AUQ dismissed (server told us a pending question was invalidated) ──
 function handleAUQDismissed(data){
   if(!data||!data.request_id)return;
-  const container=document.querySelector(`.auq-container[data-request-id="${CSS.escape(data.request_id)}"]`);
-  if(!container)return;
+  const rid=CSS.escape(data.request_id);
   const reason=data.reason||'';
   const label=reason==='session_dead'?'已失效':reason==='user_message'?'已跳过':'已忽略';
-  container.classList.add('auq-dismissed');
-  container.setAttribute('data-dismiss-label',label);
-  // Disable interaction
-  container.querySelectorAll('.choice-card').forEach(c=>c.classList.add('disabled'));
-  const btn=container.querySelector('.choices-confirm');
-  if(btn){btn.disabled=true;btn.textContent=label}
-  const cancel=container.querySelector('.auq-cancel');
-  if(cancel)cancel.disabled=true;
+  // Try AUQ container first
+  const auq=document.querySelector(`.auq-container[data-request-id="${rid}"]`);
+  if(auq){
+    auq.classList.add('auq-dismissed');
+    auq.setAttribute('data-dismiss-label',label);
+    auq.querySelectorAll('.choice-card').forEach(c=>c.classList.add('disabled'));
+    const btn=auq.querySelector('.choices-confirm');
+    if(btn){btn.disabled=true;btn.textContent=label}
+    const cancel=auq.querySelector('.auq-cancel');
+    if(cancel)cancel.disabled=true;
+    return;
+  }
+  // Try plan approval container
+  const pa=document.querySelector(`.plan-approval[data-request-id="${rid}"]`);
+  if(pa){
+    pa.classList.add('submitted');
+    pa.querySelectorAll('button').forEach(b=>{b.disabled=true});
+    const approve=pa.querySelector('.plan-approve');
+    if(approve)approve.textContent=label;
+    const reject=pa.querySelector('.plan-reject');
+    if(reject)reject.style.display='none';
+  }
 }
 
 // ── Session State Restore (refresh idempotency) ──
@@ -3072,10 +3294,16 @@ async function loadSessionState(sid){
     if(Array.isArray(state.pending_auq)){
       state.pending_auq.forEach(p=>{
         if(!p||!p.request_id||!p.input)return;
+        // Plan approval: re-render the full plan dialog
+        if(p.kind==='plan_approval'){
+          const pi=p.input||{};
+          renderPlanApproval(p.request_id, p.tool_use_id||'', pi.plan||'', pi.planFilePath||'', pi.allowedPrompts);
+          return;
+        }
         const qs=p.input.questions;
         if(!Array.isArray(qs))return;
         // renderAskUserQuestion is already idempotent (dedupes by request_id)
-        renderAskUserQuestion(p.request_id, p.tool_use_id||'', qs);
+        renderAskUserQuestion(p.request_id, p.tool_use_id||'', qs, p.kind||'auq', p.tool_name||'');
       });
     }
     // Todos handled separately by existing TodoWrite path; /state.todos is
@@ -3111,28 +3339,56 @@ function toggleSubagentDrawer(){
   adjustDrawerLayout();
 }
 
-function trackSubagentStart(toolUseId,input){
-  nativeSubagentsForActive().set(toolUseId,{
+function trackSubagentStart(toolUseId,input,sid){
+  const target=sid||activeSessionId;
+  if(!target)return;
+  getSubagents(target).set(toolUseId,{
     description:input.description||'Agent task',
     type:input.subagent_type||'general-purpose',
     model:input.model||'',
     status:'running',
     startTime:Date.now()
   });
-  renderSubagentDrawer();
+  if(target===activeSessionId)renderSubagentDrawer();
 }
 
-function trackSubagentEnd(toolUseId,isError){
-  const subs=nativeSubagentsForActive();
+function trackSubagentEnd(toolUseId,isError,sid){
+  const target=sid||activeSessionId;
+  if(!target)return;
+  const subs=getSubagents(target);
   const sa=subs.get(toolUseId);
   if(!sa)return;
   sa.status=isError?'error':'completed';
-  sa.endTime=Date.now();
-  renderSubagentDrawer();
-  // Auto-hide completed agents after 30s
-  setTimeout(()=>{
-    if(sa.status==='completed'){subs.delete(toolUseId);renderSubagentDrawer()}
-  },30000);
+  sa.endTime=sa.endTime||Date.now();
+  if(target===activeSessionId)renderSubagentDrawer();
+  // Keep completed/error subagents in the drawer for the session lifetime —
+  // user wants to see the full history of "what did this turn launch", not
+  // just what's currently running. Cleanup happens when the session is
+  // closed (allSessionSubagents entry is dropped via gcSessionTasks-style
+  // mechanism if needed) or when the page reloads.
+}
+
+// Route SSE event into per-session subagent tracker regardless of active session.
+// We only care about Agent tool_use launches and tool_result completions —
+// extracting them ourselves so we don't pollute the chat stream for non-active
+// sessions (handleSessionEvent stays gated on activeSessionId for chat).
+function routeSubagentEvent(sid,event,data){
+  if(!sid||!data)return;
+  const msg=data.message;if(!msg||!msg.content)return;
+  if(event==='tool_use'){
+    msg.content.forEach(b=>{
+      if(b.type==='tool_use'&&b.name==='Agent'&&b.id&&b.input){
+        trackSubagentStart(b.id,b.input,sid);
+      }
+    });
+  }else if(event==='tool_result'){
+    msg.content.forEach(b=>{
+      if(b.type==='tool_result'&&b.tool_use_id){
+        // trackSubagentEnd no-ops for unknown ids, safe to call blindly
+        trackSubagentEnd(b.tool_use_id,b.is_error,sid);
+      }
+    });
+  }
 }
 
 function renderSubagentDrawer(){
@@ -3157,8 +3413,13 @@ function renderSubagentDrawer(){
     badge.style.display='inline-block';
   }
 
+  // Sort: running first, then newest completion/start time
+  const ordered=[...subs.values()].sort((a,b)=>{
+    if((a.status==='running')!==(b.status==='running'))return a.status==='running'?-1:1;
+    return (b.endTime||b.startTime||0)-(a.endTime||a.startTime||0);
+  });
   let html='';
-  for(const [id,sa] of subs){
+  for(const sa of ordered){
     const st=sa.status;
     const elapsed=sa.endTime
       ?fmtDuration(sa.endTime-sa.startTime)
@@ -3190,6 +3451,42 @@ function fmtDuration(ms){
 setInterval(()=>{
   if([...nativeSubagentsForActive().values()].some(a=>a.status==='running'))renderSubagentDrawer();
 },1000);
+
+// Backfill subagent drawer state from server's JSONL parse. Called from
+// selectSession so that switching to a session shows historical Agent calls
+// even when the live tool_use SSE arrived before we were viewing this session
+// (or before the page loaded).
+async function backfillSubagentsFromHistory(sid){
+  if(!sid)return;
+  try{
+    const r=await fetch(`/api/sessions/${encodeURIComponent(sid)}/subagents`,
+      {headers:{'Authorization':'Bearer '+TOKEN}});
+    if(!r.ok)return;
+    const list=await r.json();
+    if(!Array.isArray(list))return;
+    const subs=getSubagents(sid);
+    list.forEach(rec=>{
+      if(!rec||!rec.tool_use_id)return;
+      const existing=subs.get(rec.tool_use_id);
+      // Live state from SSE wins over history (it's already authoritative);
+      // only insert when we don't have it, or upgrade running→completed/error.
+      if(existing&&existing.status!=='running')return;
+      const startTime=rec.started_at?Date.parse(rec.started_at)||Date.now():Date.now();
+      const endTime=rec.ended_at?Date.parse(rec.ended_at)||null:null;
+      subs.set(rec.tool_use_id,{
+        description:rec.description||'Agent task',
+        type:rec.subagent_type||'general-purpose',
+        model:rec.model||'',
+        status:rec.status||'running',
+        startTime,
+        endTime:endTime||undefined,
+      });
+    });
+    if(sid===activeSessionId)renderSubagentDrawer();
+  }catch(e){
+    console.warn('backfillSubagentsFromHistory failed:',e);
+  }
+}
 
 // ── Toast ──
 function toast(text,type='info',duration=3000){
@@ -4119,6 +4416,16 @@ function handleHashRoute(){
   if(hash==='telemetry'&&window._sniffEnabled){showSniffTelemetry();return}
 }
 function setHash(h){location.hash=h}
+
+// ── DB Explorer ──
+// Opens /api/db/ui in a new tab. Token comes from shared localStorage, but
+// we also pass it via ?token= as a belt-and-suspenders fallback (some browsers
+// in split-storage / incognito modes don't share localStorage across tabs).
+function openDBExplorer(){
+  var url = '/api/db/ui';
+  if (TOKEN) url += '?token=' + encodeURIComponent(TOKEN);
+  window.open(url, '_blank', 'noopener');
+}
 
 // ── Sniff Viewer ──
 

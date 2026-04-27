@@ -92,8 +92,9 @@ const defaultEvent = HookEventPreToolUse
 type ToolHookInput struct {
 	SessionID      string          `json:"session_id"`
 	CWD            string          `json:"cwd"`
-	ToolName       string          `json:"tool_name"`       // PreToolUse
-	ToolInput      json.RawMessage `json:"tool_input"`      // PreToolUse
+	ToolName       string          `json:"tool_name"`       // PreToolUse / PostToolUse
+	ToolInput      json.RawMessage `json:"tool_input"`      // PreToolUse / PostToolUse
+	ToolResponse   json.RawMessage `json:"tool_response"`   // PostToolUse
 	Prompt         string          `json:"prompt"`          // UserPromptSubmit
 	HookEventName  string          `json:"hook_event_name"`
 	TranscriptPath string          `json:"transcript_path"`
@@ -101,16 +102,40 @@ type ToolHookInput struct {
 
 // ToolHookRule is one YAML rule definition.
 type ToolHookRule struct {
-	ID          string   `yaml:"id"`
-	Events      []string `yaml:"events"`       // which hook events the rule applies to; empty = [PreToolUse]
-	Match       []string `yaml:"match"`        // glob patterns against target path (PreToolUse)
-	Tools       []string `yaml:"tools"`        // Read / Edit / Write / Grep / Glob; empty = any (PreToolUse)
-	MatchPrompt []string `yaml:"match_prompt"` // regex patterns against user prompt (UserPromptSubmit)
-	Inject      string   `yaml:"inject"`       // system-reminder body (trimmed)
-	Dedupe      string   `yaml:"dedupe"`       // never | per_session | per_file (default per_file)
-	Budget      int      `yaml:"budget"`       // per-rule max chars; 0 = 500 default
-	Priority    int      `yaml:"priority"`     // higher fires first; 0 = 50 default
-	Disabled    bool     `yaml:"disabled"`
+	ID            string   `yaml:"id"`
+	Events        []string `yaml:"events"`         // which hook events the rule applies to; empty = [PreToolUse]
+	Match         []string `yaml:"match"`          // glob patterns against target path (PreToolUse)
+	Tools         []string `yaml:"tools"`          // Read / Edit / Write / Grep / Glob; empty = any (PreToolUse / PostToolUse)
+	MatchPrompt   []string `yaml:"match_prompt"`   // regex patterns against user prompt (UserPromptSubmit)
+	MatchResponse []string `yaml:"match_response"` // regex patterns against tool_response JSON (PostToolUse)
+	MatchInput    []string `yaml:"match_input"`    // regex patterns against tool_input JSON (PreToolUse) — used when tool has no path (e.g. Bash)
+	SkipInput     []string `yaml:"skip_input"`     // regex patterns against tool_input JSON (Pre + PostToolUse) — match ⇒ skip rule
+	Inject        string   `yaml:"inject"`         // system-reminder body (trimmed) — also used as permissionDecisionReason when Decision != ""
+	Decision      string   `yaml:"decision"`       // PreToolUse only: "deny" | "ask" | "allow". Empty (default) = additionalContext (legacy behavior).
+	Action        string   `yaml:"action"`         // PreToolUse only: side-effect to run when rule matches. Currently supports "mark_restart_initiator". Empty = no side effect (default). Runs in addition to Inject (both fire).
+	Dedupe        string   `yaml:"dedupe"`         // never | per_session | per_file (default per_file)
+	Budget        int      `yaml:"budget"`         // per-rule max chars; 0 = 500 default
+	Priority      int      `yaml:"priority"`       // higher fires first; 0 = 50 default
+	Disabled      bool     `yaml:"disabled"`
+	// DisableUntil / DisableReason implement the time-bounded temporary disable.
+	// The model can call `weiran tool-hook disable <id> --until +30m --reason …`
+	// to grant itself a short exemption when a rule is judged inapplicable to
+	// the current task. When DisableUntil is in the future, the rule is skipped
+	// and an audit row is written with SkipReason="temp_disabled". When it has
+	// expired, the rule self-heals (fires normally) — no cleanup required.
+	// Hard cap of 2h is enforced at disable time, not at eval time.
+	DisableUntil  *time.Time `yaml:"disable_until,omitempty"`
+	DisableReason string     `yaml:"disable_reason,omitempty"`
+}
+
+// validDecision returns true if d is one of the Claude Code permissionDecision
+// values we accept on a rule. Empty = no decision (context injection only).
+func validDecision(d string) bool {
+	switch d {
+	case "", "deny", "ask", "allow":
+		return true
+	}
+	return false
 }
 
 // ToolHookConfig is the top-level YAML doc.
@@ -328,6 +353,95 @@ func matchesPromptRegex(prompt string, patterns []string) bool {
 	return false
 }
 
+// matchesInputRegex returns true if the tool_input matches any of the regex
+// patterns. Matching is done twice — against the raw JSON bytes AND against
+// string-valued fields ("command", "new_string", "content", "pattern", "query")
+// after JSON decoding. This dual match is necessary because JSON encoders may
+// escape `<`, `>`, `&` as `<` / `>` / `&` (Go's encoding/json
+// default; not Node's) — a regex like `>` written naively against raw bytes
+// misses every `>` character that got escaped. Decoded-field matching restores
+// the original character so rule authors can write intuitive regexes like `>`
+// and have them work regardless of the encoder.
+//
+// Used by:
+//   - Pre + PostToolUse rules with `match_input:` (fire when tool_input matches)
+//   - Pre + PostToolUse rules with `skip_input:` (suppress rule when tool_input matches,
+//     e.g. daily-notes Edit whose new_string is a heartbeat header, or
+//     `echo '... weiran notify ...'` / `weiran tool-hook` smoke tests on Bash).
+// Reuses compilePromptRegex for pattern caching.
+func matchesInputRegex(input []byte, patterns []string) bool {
+	if len(input) == 0 || len(patterns) == 0 {
+		return false
+	}
+	raw := string(input)
+	decoded := extractStringFields(input)
+	for _, pat := range patterns {
+		rx := compilePromptRegex(pat)
+		if rx == nil {
+			continue
+		}
+		if rx.MatchString(raw) {
+			return true
+		}
+		for _, s := range decoded {
+			if rx.MatchString(s) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// extractStringFields pulls out the string values we care about for regex
+// matching. We intentionally don't walk arbitrary JSON — the cost isn't worth
+// it for an interactive hook that runs on every Bash/Edit call — but we do
+// cover the fields that actually appear in Claude Code tool_input payloads:
+//
+//   Bash       → command
+//   Edit/Write → old_string, new_string, content
+//   Grep       → pattern
+//   Glob       → pattern
+//
+// When a tool has none of these (e.g. Read), decoded is empty and we fall back
+// to raw-bytes matching only.
+func extractStringFields(input []byte) []string {
+	var probe struct {
+		Command   string `json:"command"`
+		OldString string `json:"old_string"`
+		NewString string `json:"new_string"`
+		Content   string `json:"content"`
+		Pattern   string `json:"pattern"`
+		Query     string `json:"query"`
+	}
+	if err := json.Unmarshal(input, &probe); err != nil {
+		return nil
+	}
+	out := make([]string, 0, 6)
+	for _, s := range []string{probe.Command, probe.OldString, probe.NewString, probe.Content, probe.Pattern, probe.Query} {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// matchesResponseRegex returns true if the tool_response (as raw JSON bytes)
+// matches any of the regex patterns. Reuses compilePromptRegex for pattern
+// caching — regexps are pattern strings, independent of target semantics.
+func matchesResponseRegex(response []byte, patterns []string) bool {
+	if len(response) == 0 || len(patterns) == 0 {
+		return false
+	}
+	s := string(response)
+	for _, pat := range patterns {
+		rx := compilePromptRegex(pat)
+		if rx != nil && rx.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
 var promptRegexCache sync.Map // pattern → *regexp.Regexp (or nil sentinel on bad pattern)
 
 type badRegex struct{}
@@ -436,7 +550,8 @@ func runToolHook() {
 		event = defaultEvent
 	}
 
-	cfg, err := loadToolHookConfig(defaultToolHookConfigPath())
+	cfgPath := defaultToolHookConfigPath()
+	cfg, err := loadToolHookConfig(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[tool-hook] config load error: %v\n", err)
 		return
@@ -447,15 +562,23 @@ func runToolHook() {
 		defer db.Close()
 	}
 
+	// Auto-cleanup expired temp disables so yaml doesn't accumulate dead state.
+	// Fast path (no expired entries) is zero IO — only touches disk when there's
+	// something to clean. Multiple concurrent hook invocations may both try to
+	// clean; last-writer-wins is safe (all cleanups are idempotent).
+	cleanupExpiredDisables(cfgPath, cfg, db)
+
 	switch event {
 	case HookEventPreToolUse:
 		runPreToolUseHook(in, cfg, db)
 	case HookEventUserPromptSubmit:
 		runUserPromptSubmitHook(in, cfg, db)
+	case HookEventPostToolUse:
+		runPostToolUseHook(in, cfg, db)
 	default:
-		// All other events (PostToolUse, Stop, SessionStart, Notification,
-		// PreCompact, ...) are audit-only for now: one row per invocation, no
-		// injection. Future bespoke matchers can be added by name.
+		// All other events (Stop, SessionStart, Notification, PreCompact, ...)
+		// are audit-only for now: one row per invocation, no injection.
+		// Future bespoke matchers can be added by name.
 		runAuditOnlyHook(event, in, db)
 	}
 }
@@ -501,16 +624,58 @@ func runPreToolUseHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
 		if rule.Disabled || rule.ID == "" {
 			continue
 		}
+		if isTempDisabled(&rule) {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  HookEventPreToolUse,
+				ToolName:   in.ToolName,
+				Path:       path,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: tempDisableReason(&rule),
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+			continue
+		}
 		if !rule.eventMatches(HookEventPreToolUse) {
 			continue
 		}
 		if !rule.toolMatches(in.ToolName) {
 			continue
 		}
-		if !matchesGlob(path, rule.Match) {
+		// Match semantics: if `match` is set, path must match; if `match_input`
+		// is set, tool_input JSON must match. Both empty ⇒ rule inert (prevents
+		// accidentally global rules). When both set ⇒ both must match (AND).
+		hasPathMatch := len(rule.Match) > 0
+		hasInputMatch := len(rule.MatchInput) > 0
+		if !hasPathMatch && !hasInputMatch {
+			continue
+		}
+		if hasPathMatch && !matchesGlob(path, rule.Match) {
+			continue
+		}
+		if hasInputMatch && !matchesInputRegex(in.ToolInput, rule.MatchInput) {
 			continue
 		}
 		audited = true
+
+		if matchesInputRegex(in.ToolInput, rule.SkipInput) {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  HookEventPreToolUse,
+				ToolName:   in.ToolName,
+				Path:       path,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: "skip_input",
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+			continue
+		}
 
 		if db != nil && isDeduped(db, rule, sessionID, path) {
 			writeToolHookAudit(db, toolHookAuditRow{
@@ -532,6 +697,50 @@ func runPreToolUseHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
 		if len(body) > rule.Budget {
 			body = body[:rule.Budget]
 		}
+
+		// Decision rules (deny/ask/allow) short-circuit immediately — permission
+		// decisions are terminal, so there's no point accumulating further
+		// additionalContext after one fires. Rules are already sorted by priority
+		// DESC, so the highest-priority decision wins. Budget check is still
+		// enforced: an oversized decision reason falls back to skip (budget) and
+		// moves on — a partial deny reason would confuse the user.
+		if rule.Decision != "" {
+			if !validDecision(rule.Decision) {
+				fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: ignoring invalid decision %q\n", rule.ID, rule.Decision)
+				continue
+			}
+			if len(body) > budgetRemaining {
+				writeToolHookAudit(db, toolHookAuditRow{
+					Timestamp:  time.Now().Format(time.RFC3339),
+					SessionID:  sessionID,
+					CWD:        in.CWD,
+					EventName:  HookEventPreToolUse,
+					ToolName:   in.ToolName,
+					Path:       path,
+					RuleID:     rule.ID,
+					Injected:   false,
+					SkipReason: "budget",
+					LatencyMS:  time.Since(start).Milliseconds(),
+				})
+				continue
+			}
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:     time.Now().Format(time.RFC3339),
+				SessionID:     sessionID,
+				CWD:           in.CWD,
+				EventName:     HookEventPreToolUse,
+				ToolName:      in.ToolName,
+				Path:          path,
+				RuleID:        rule.ID,
+				Injected:      true,
+				InjectionSize: len(body),
+				BudgetUsed:    len(body),
+				LatencyMS:     time.Since(start).Milliseconds(),
+			})
+			emitDecision(HookEventPreToolUse, rule.Decision, fmt.Sprintf("[rule:%s] %s", rule.ID, body))
+			return
+		}
+
 		if len(body) > budgetRemaining {
 			writeToolHookAudit(db, toolHookAuditRow{
 				Timestamp:  time.Now().Format(time.RFC3339),
@@ -565,6 +774,13 @@ func runPreToolUseHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
 			BudgetUsed:    budgetUsedTotal,
 			LatencyMS:     time.Since(start).Milliseconds(),
 		})
+
+		// Side-effect dispatch — runs after audit so the action's own logging
+		// can correlate. Action failures are non-fatal: we log to stderr but
+		// don't abort the hook (the user's tool call must proceed).
+		if rule.Action != "" {
+			runRuleAction(rule.Action, rule.ID, in)
+		}
 	}
 
 	if !audited && db != nil {
@@ -580,6 +796,83 @@ func runPreToolUseHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
 	}
 
 	emitInjections(HookEventPreToolUse, injections)
+}
+
+// runRuleAction dispatches a rule's `action:` side effect. Unknown actions are
+// logged to stderr and ignored (forward-compat: yaml may reference an action
+// that this binary doesn't know yet).
+//
+// All actions are best-effort: failures log to stderr but never propagate —
+// the user's underlying tool call must always proceed. The hook is advisory.
+func runRuleAction(action, ruleID string, in ToolHookInput) {
+	switch action {
+	case "mark_restart_initiator":
+		actionMarkRestartInitiator(ruleID, in)
+	default:
+		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: unknown action %q\n", ruleID, action)
+	}
+}
+
+// actionMarkRestartInitiator persists a custom rehydrate_message for the
+// session that ran a server-restart command. After the server comes back, the
+// rehydration path uses this custom message instead of the bystander warning,
+// so the model recognizes the restart as something IT triggered (not an
+// external interruption).
+//
+// Why this exists: PreToolUse fires before Bash executes. By the time
+// `make server-restart` kills the server process, the DB write has already
+// landed. On rehydration, server_session.go:1917 reads the rehydrate_message
+// column and sends it to the model as the wake message.
+//
+// Lookup chain: CC session_id (from hook payload) → weiran session_id (via
+// server_sessions.claude_session_id) → setRehydrateMessage. If lookup fails
+// (session not yet handshaked, hook fired outside any session, etc.), we log
+// and return — falling back to the bystander warning is safe.
+func actionMarkRestartInitiator(ruleID string, in ToolHookInput) {
+	if in.SessionID == "" {
+		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: no session_id in payload, skipping\n", ruleID)
+		return
+	}
+	weiranSID := getWeiranSessionIDByClaudeSID(in.SessionID)
+	if weiranSID == "" {
+		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: no weiran session for cc=%s, skipping\n",
+			ruleID, shortID(in.SessionID))
+		return
+	}
+	cmd := extractBashCommand(in.ToolInput)
+	if cmd == "" {
+		cmd = "(server restart command)"
+	}
+	if len(cmd) > 200 {
+		cmd = cmd[:200] + "…"
+	}
+	msg := fmt.Sprintf(
+		"Server restart you triggered via `%s` completed. "+
+			"Continue your work — do NOT re-run the restart, it already happened. "+
+			"Any in-flight tool calls from before the restart did not complete; "+
+			"verify state if needed before assuming success.",
+		cmd,
+	)
+	setRehydrateMessage(weiranSID, msg)
+	fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: marked weiran=%s as restart initiator (cmd=%q)\n",
+		ruleID, shortID(weiranSID), cmd)
+}
+
+// extractBashCommand pulls the `command` field out of a Bash tool_input JSON
+// blob. Returns "" if absent or unparseable. Used for human-readable context
+// in side-effect actions (e.g. mark_restart_initiator) — never for matching
+// (use matchesInputRegex for that).
+func extractBashCommand(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var probe struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(input, &probe); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(probe.Command)
 }
 
 // runUserPromptSubmitHook handles prompt regex matching for the user's message.
@@ -598,6 +891,20 @@ func runUserPromptSubmitHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) 
 
 	for _, rule := range cfg.Rules {
 		if rule.Disabled || rule.ID == "" {
+			continue
+		}
+		if isTempDisabled(&rule) {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  HookEventUserPromptSubmit,
+				Path:       digest,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: tempDisableReason(&rule),
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
 			continue
 		}
 		if !rule.eventMatches(HookEventUserPromptSubmit) {
@@ -676,6 +983,168 @@ func runUserPromptSubmitHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) 
 	emitInjections(HookEventUserPromptSubmit, injections)
 }
 
+// runPostToolUseHook handles tool + response-regex matching. Fires after a
+// tool call returns — ideal for reflex messages on specific error patterns
+// (e.g. "Unknown skill" from the Skill tool).
+//
+// Matching: rule must list PostToolUse in events, match tool name, and (if
+// MatchResponse is set) have at least one regex match against the raw
+// tool_response JSON bytes. If MatchResponse is empty, the rule fires on
+// every matching tool call. Uses the same path-based dedupe as PreToolUse
+// (per_file treats the tool name as the "path" surrogate).
+func runPostToolUseHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
+	start := time.Now()
+	sessionID := in.SessionID
+	path := extractToolPath(in.ToolName, in.ToolInput)
+	// Fall back to tool name as the dedupe key when no path is extractable
+	// (e.g. Skill tool — the "path" is really the skill name).
+	dedupeKey := path
+	if dedupeKey == "" {
+		dedupeKey = in.ToolName
+	}
+
+	audited := false
+	budgetRemaining := cfg.Budget
+	var injections []string
+	budgetUsedTotal := 0
+
+	for _, rule := range cfg.Rules {
+		if rule.Disabled || rule.ID == "" {
+			continue
+		}
+		if isTempDisabled(&rule) {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  HookEventPostToolUse,
+				ToolName:   in.ToolName,
+				Path:       dedupeKey,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: tempDisableReason(&rule),
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+			continue
+		}
+		if !rule.eventMatches(HookEventPostToolUse) {
+			continue
+		}
+		if !rule.toolMatches(in.ToolName) {
+			continue
+		}
+		// Filters (AND): match (path glob) / match_input (input regex) /
+		// match_response (response regex). At least ONE of the three must be set
+		// — otherwise a rule of e.g. `tools: [Bash]` alone would fire on every
+		// Bash call, which is almost never the intent. Each filter is optional;
+		// when set it must match.
+		hasPathMatch := len(rule.Match) > 0
+		hasInputMatch := len(rule.MatchInput) > 0
+		hasResponseMatch := len(rule.MatchResponse) > 0
+		if !hasPathMatch && !hasInputMatch && !hasResponseMatch {
+			continue
+		}
+		if hasPathMatch && !matchesGlob(path, rule.Match) {
+			continue
+		}
+		if hasInputMatch && !matchesInputRegex(in.ToolInput, rule.MatchInput) {
+			continue
+		}
+		if hasResponseMatch && !matchesResponseRegex(in.ToolResponse, rule.MatchResponse) {
+			continue
+		}
+		audited = true
+
+		// skip_input — mirrors PreToolUse semantics. Suppresses the rule when the
+		// tool_input matches any skip pattern, even if match_input/match_response
+		// already matched. Used to exclude self-referential cases like
+		// `echo '... command ...'` or `weiran tool-hook` smoke tests.
+		if matchesInputRegex(in.ToolInput, rule.SkipInput) {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  HookEventPostToolUse,
+				ToolName:   in.ToolName,
+				Path:       dedupeKey,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: "skip_input",
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+			continue
+		}
+
+		if db != nil && isDeduped(db, rule, sessionID, dedupeKey) {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  HookEventPostToolUse,
+				ToolName:   in.ToolName,
+				Path:       dedupeKey,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: "dedupe",
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+			continue
+		}
+
+		body := strings.TrimSpace(rule.Inject)
+		if len(body) > rule.Budget {
+			body = body[:rule.Budget]
+		}
+		if len(body) > budgetRemaining {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  HookEventPostToolUse,
+				ToolName:   in.ToolName,
+				Path:       dedupeKey,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: "budget",
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+			continue
+		}
+
+		injections = append(injections, fmt.Sprintf("[rule:%s] %s", rule.ID, body))
+		budgetUsedTotal += len(body)
+		budgetRemaining -= len(body)
+
+		writeToolHookAudit(db, toolHookAuditRow{
+			Timestamp:     time.Now().Format(time.RFC3339),
+			SessionID:     sessionID,
+			CWD:           in.CWD,
+			EventName:     HookEventPostToolUse,
+			ToolName:      in.ToolName,
+			Path:          dedupeKey,
+			RuleID:        rule.ID,
+			Injected:      true,
+			InjectionSize: len(body),
+			BudgetUsed:    budgetUsedTotal,
+			LatencyMS:     time.Since(start).Milliseconds(),
+		})
+	}
+
+	if !audited && db != nil {
+		writeToolHookAudit(db, toolHookAuditRow{
+			Timestamp: time.Now().Format(time.RFC3339),
+			SessionID: sessionID,
+			CWD:       in.CWD,
+			EventName: HookEventPostToolUse,
+			ToolName:  in.ToolName,
+			Path:      path,
+			LatencyMS: time.Since(start).Milliseconds(),
+		})
+	}
+
+	emitInjections(HookEventPostToolUse, injections)
+}
+
 // isDedupedPrompt is the UserPromptSubmit dedupe check (session-scoped only).
 // "never" → always allow; anything else → 1 per (rule, session).
 func isDedupedPrompt(db *sql.DB, rule ToolHookRule, sessionID string) bool {
@@ -711,6 +1180,23 @@ func emitInjections(event string, injections []string) {
 		"hookSpecificOutput": map[string]interface{}{
 			"hookEventName":     event,
 			"additionalContext": body,
+		},
+		"suppressOutput": true,
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.Encode(out)
+}
+
+// emitDecision writes a PreToolUse permission decision — Claude Code will
+// short-circuit the tool call based on the verdict (deny / ask / allow).
+// Reason is shown to the user in the tool-denied UI and back to the model.
+// Only valid for PreToolUse; callers must ensure decision ∈ {deny, ask, allow}.
+func emitDecision(event, decision, reason string) {
+	out := map[string]interface{}{
+		"hookSpecificOutput": map[string]interface{}{
+			"hookEventName":            event,
+			"permissionDecision":       decision,
+			"permissionDecisionReason": reason,
 		},
 		"suppressOutput": true,
 	}
@@ -863,15 +1349,24 @@ func handleToolHook(args []string) {
 		handleToolHookGC(args[1:])
 	case "log":
 		handleToolHookLog(args[1:])
+	case "disable":
+		handleToolHookDisable(args[1:])
+	case "enable":
+		handleToolHookEnable(args[1:])
+	case "disables":
+		handleToolHookDisables(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "usage: %s tool-hook <subcommand>\n\n", appName)
-		fmt.Fprintf(os.Stderr, "  (no args)            run as hook (reads JSON from stdin)\n")
-		fmt.Fprintf(os.Stderr, "  stats [--days N] [--json]\n                       aggregated audit stats (human by default)\n")
-		fmt.Fprintf(os.Stderr, "  log   [filters…]     tail recent audit rows (see log --help)\n")
-		fmt.Fprintf(os.Stderr, "  test  <tool> <path>  dry-run PreToolUse rule matching\n")
-		fmt.Fprintf(os.Stderr, "  rules                list configured rules (YAML)\n")
-		fmt.Fprintf(os.Stderr, "  events               list hook events this binary recognizes\n")
-		fmt.Fprintf(os.Stderr, "  gc    [--days N]     delete audit rows older than N days (default 30)\n")
+		fmt.Fprintf(os.Stderr, "  (no args)                run as hook (reads JSON from stdin)\n")
+		fmt.Fprintf(os.Stderr, "  stats  [--days N] [--json]\n                           aggregated audit stats (human by default)\n")
+		fmt.Fprintf(os.Stderr, "  log    [filters…]        tail recent audit rows (see log --help)\n")
+		fmt.Fprintf(os.Stderr, "  test   <tool> <path>     dry-run PreToolUse rule matching\n")
+		fmt.Fprintf(os.Stderr, "  rules                    list configured rules (YAML)\n")
+		fmt.Fprintf(os.Stderr, "  events                   list hook events this binary recognizes\n")
+		fmt.Fprintf(os.Stderr, "  gc     [--days N]        delete audit rows older than N days (default 30)\n")
+		fmt.Fprintf(os.Stderr, "  disable <rule> --until <spec> [--reason \"…\"]\n                           temp disable (required --until, 2h cap)\n")
+		fmt.Fprintf(os.Stderr, "  enable  <rule>           clear temp disable early\n")
+		fmt.Fprintf(os.Stderr, "  disables                 list active + expired temp disables\n")
 		os.Exit(1)
 	}
 }
@@ -1309,6 +1804,21 @@ func handleToolHookRules() {
 			r.ID, status, r.Priority, r.Budget, r.Dedupe)
 		fmt.Printf("    tools: %v\n", r.Tools)
 		fmt.Printf("    match: %v\n", r.Match)
+		if len(r.MatchInput) > 0 {
+			fmt.Printf("    match_input: %v\n", r.MatchInput)
+		}
+		if len(r.SkipInput) > 0 {
+			fmt.Printf("    skip_input: %v\n", r.SkipInput)
+		}
+		if len(r.MatchPrompt) > 0 {
+			fmt.Printf("    match_prompt: %v\n", r.MatchPrompt)
+		}
+		if len(r.MatchResponse) > 0 {
+			fmt.Printf("    match_response: %v\n", r.MatchResponse)
+		}
+		if r.Decision != "" {
+			fmt.Printf("    decision: %s\n", r.Decision)
+		}
 		fmt.Printf("    inject: %s\n\n", trimForDisplay(r.Inject, 120))
 	}
 }

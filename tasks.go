@@ -158,6 +158,13 @@ cat > {{.ReportPath}} << 'RPTEOF'
 - [soul/memory] what changed and why (if any)
 RPTEOF
 ` + "```" + `
+- **Persist the Summary JSON to SQLite** (enables SQL queries in future cycles):
+` + "```bash" + `
+# Extract the JSON block from the report file and pipe into the evolve log.
+# This is idempotent-ish: one row per cycle. If you re-run, you get two rows
+# — fine for now, dedupe happens in handleEvolveBackfill by (date, source).
+awk '/^## Summary/{f=1; next} /^## /{f=0} f && /^\` + "`" + `\` + "`" + `\` + "`" + `json$/{p=1;next} f && /^\` + "`" + `\` + "`" + `\` + "`" + `$/{p=0} p' {{.ReportPath}} | {{.CLI}} db evolve-log -
+` + "```" + `
 If no evolution needed, set status="no-op" in the JSON block and write "No evolution inspiration today, system running normally" in the narrative.
 If the Ethics Gate or Blast Radius cap triggered, set the corresponding counters and set ` + "`needs_human_review: true`" + `.
 

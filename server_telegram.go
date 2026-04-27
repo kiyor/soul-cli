@@ -505,14 +505,24 @@ func transcribeAudio(audioPath string, durationSec int) string {
 		return ""
 	}
 
-	// Model path — prefer small (better accuracy, especially zh/auto), fall back to base
+	// Model path — prefer large-v3-turbo (best zh/en code-switching), fall back to small → base
 	modelDir := filepath.Join(os.Getenv("HOME"), ".local", "share", "whisper-cpp")
-	modelPath := filepath.Join(modelDir, "ggml-small.bin")
-	if _, err := os.Stat(modelPath); err != nil {
-		modelPath = filepath.Join(modelDir, "ggml-base.bin") // fallback
+	modelCandidates := []string{
+		"ggml-large-v3-turbo-q5_0.bin", // ~1.6GB, 809M params, best accuracy for zh/en mix
+		"ggml-large-v3-turbo.bin",       // unquantized fallback if user has it
+		"ggml-small.bin",                // ~466MB, 244M params
+		"ggml-base.bin",                 // ~142MB, last resort
 	}
-	if _, err := os.Stat(modelPath); err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] whisper: model not found at %s\n", appName, modelPath)
+	var modelPath string
+	for _, name := range modelCandidates {
+		p := filepath.Join(modelDir, name)
+		if _, err := os.Stat(p); err == nil {
+			modelPath = p
+			break
+		}
+	}
+	if modelPath == "" {
+		fmt.Fprintf(os.Stderr, "[%s] whisper: no model found in %s (tried %v)\n", appName, modelDir, modelCandidates)
 		return ""
 	}
 
@@ -525,13 +535,23 @@ func transcribeAudio(audioPath string, durationSec int) string {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// whisper-cli -m model -f audio --no-timestamps --output-txt --language auto
+	// whisper-cli with zh/en code-switching optimizations:
+	//   --prompt: biases decoder toward technical zh/en mixed vocabulary
+	//   --temperature 0: deterministic, avoids hallucination on ambiguous tokens
+	//   --language auto: let it detect; prompt + temperature do the heavy lifting
+	// Whisper bias prompt: code-switching zh/en technical vocabulary. Includes
+	// agentNick (how the user actually addresses the agent in speech) so
+	// transcription doesn't mishear self-references. No personal user data
+	// here — soul-cli is open-source.
+	initialPrompt := fmt.Sprintf("技术讨论场景，中英文混杂。常见词汇：Kubernetes kubectl Docker Whisper API session token GPU LoRA ComfyUI Claude Anthropic 部署 调试 代理 模型 %s。", agentNick)
 	cmd := exec.CommandContext(ctx, whisperBin,
 		"-m", modelPath,
 		"-f", audioPath,
 		"--no-timestamps",
 		"--language", "auto",
 		"--no-prints",
+		"--prompt", initialPrompt,
+		"--temperature", "0",
 	)
 
 	out, err := cmd.Output()
@@ -548,7 +568,75 @@ func transcribeAudio(audioPath string, durationSec int) string {
 		return ""
 	}
 
+	// Trim known Whisper trailing hallucinations (YouTube/podcast outro phrases
+	// that the model has been over-trained on). They show up at the tail of
+	// otherwise valid transcripts, especially on Chinese audio.
+	transcript = trimWhisperTailHallucinations(transcript)
+
+	if transcript == "" {
+		return ""
+	}
+
 	return transcript
+}
+
+// whisperTailHallucinations is a list of phrases that Whisper commonly emits at
+// the very end of a transcription as a hallucination, even when the speaker did
+// not say them. They originate from the YouTube/podcast corpus the model was
+// trained on. We strip them from the tail (and only the tail) — never from the
+// middle, since a user might legitimately say "谢谢大家" mid-sentence.
+//
+// Order matters: longer/more-specific phrases must come first so they're matched
+// before their shorter substrings.
+var whisperTailHallucinations = []string{
+	"請不吝點贊訂閱轉發打賞支持明鏡與點點欄目",
+	"请不吝点赞订阅转发打赏支持明镜与点点栏目",
+	"字幕由Amara.org社区提供",
+	"字幕由 Amara.org 社区提供",
+	"明鏡與點點欄目",
+	"明镜与点点栏目",
+	"请订阅我的频道",
+	"請訂閱我的頻道",
+	"请点赞订阅",
+	"請點贊訂閱",
+	"点赞订阅",
+	"點贊訂閱",
+	"谢谢观看",
+	"謝謝觀看",
+	"谢谢收看",
+	"謝謝收看",
+	"谢谢大家",
+	"謝謝大家",
+	"谢谢您的观看",
+	"謝謝您的觀看",
+	"多谢观看",
+	"多謝觀看",
+	"MING PAO CANADA",
+	"MING PAO TORONTO",
+	"Thanks for watching",
+	"Thank you for watching",
+	"Please subscribe",
+}
+
+// trimWhisperTailHallucinations strips known hallucinated outro phrases from
+// the END of a Whisper transcript. Repeats until no more match (handles cases
+// where Whisper stacks two of them, e.g. "...谢谢大家 谢谢观看").
+func trimWhisperTailHallucinations(s string) string {
+	for {
+		trimmed := strings.TrimRight(s, " 　\t\n\r。．.!！?？,，、")
+		matched := false
+		for _, phrase := range whisperTailHallucinations {
+			if strings.HasSuffix(trimmed, phrase) {
+				trimmed = strings.TrimSuffix(trimmed, phrase)
+				s = strings.TrimRight(trimmed, " 　\t\n\r。．.!！?？,，、")
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return strings.TrimSpace(s)
+		}
+	}
 }
 
 func (tb *telegramBridge) handleCommand(chatID, cmd, args string) {

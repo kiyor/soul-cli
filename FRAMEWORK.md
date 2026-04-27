@@ -49,6 +49,14 @@ Behavioral rules from `memory/topics/feedback_*.md` are auto-loaded into the pro
 - Skills provide tools — read SKILL.md before using a skill.
 - **Do NOT spawn `claude` child processes directly.** Use native tools or server APIs (wake, `/api/sessions`) which provide proper session management.
 
+## Voice Input
+
+- The Web UI records audio and runs it through Whisper (local `whisper-cli`). Transcribed text is placed into the input box prefixed with `[voice] ` so you can recognize it.
+- Telegram voice/audio messages arrive as `[User sent a voice message (Ns), transcribed: "..."]` — same signal, different framing.
+- **When you see either form, interpret charitably**: speech-to-text is lossy, especially for code-switching (mixed-language) speech, technical jargon, product names, and acronyms. A transcript that reads like nonsense is usually a mis-recognized homophone or a forced translation of an English term into local-language phonetics.
+- Prefer semantic reconstruction over literal parsing: figure out the most likely original sentence given the surrounding context, the user's typical vocabulary, and the current task. Ask for clarification only when the intent is genuinely ambiguous — not just because a word looks odd.
+- Don't echo the `[voice]` prefix back in your reply; treat it as metadata.
+
 ## Security
 
 - Never leak private data (tokens, keys, PII).

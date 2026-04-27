@@ -371,6 +371,21 @@ type codexAPIRequest struct {
 	ToolChoice        string                `json:"tool_choice"`
 	ParallelToolCalls bool                  `json:"parallel_tool_calls"`
 	Reasoning         *codexReasoningConfig `json:"reasoning,omitempty"`
+	// Include controls which optional response artefacts the upstream returns.
+	// We always request `reasoning.encrypted_content` because Store=false leaves
+	// no server-side state, so the only way to keep multi-turn reasoning
+	// context alive is to round-trip the encrypted reasoning blob back to the
+	// upstream on the next turn. Without this, GPT-5 / o-series effectively
+	// "forget" their prior chain of thought between Anthropic /v1/messages
+	// turns, even though Claude Code preserves the thinking blocks locally.
+	// cc-switch sets this under is_codex_oauth=true; mirror that behaviour.
+	Include []string `json:"include,omitempty"`
+	// ServiceTier asks the ChatGPT backend to route this request through the
+	// priority queue. ChatGPT Plus/Pro subscriptions are entitled to it; free
+	// accounts gracefully fall back to the standard queue. codex-cli itself
+	// sends "priority" by default, so matching its fingerprint here keeps the
+	// proxy indistinguishable from an authentic codex-cli session.
+	ServiceTier string `json:"service_tier,omitempty"`
 }
 
 // codexReasoningConfig requests reasoning summary emission. Without
@@ -1010,6 +1025,13 @@ func handleCodexMessages(w http.ResponseWriter, r *http.Request, sess *codexSess
 		ToolChoice:        "auto",
 		ParallelToolCalls: true,
 		Reasoning:         reasoning,
+		// Preserve multi-turn reasoning context under Store=false (Codex OAuth
+		// path requires Store=false). Without this, GPT-5 reasoning chains do
+		// not survive across turns even though CC keeps the thinking blocks.
+		Include: []string{"reasoning.encrypted_content"},
+		// Match codex-cli's default fingerprint; Plus/Pro accounts get the
+		// priority queue, free accounts gracefully degrade.
+		ServiceTier: "priority",
 	}
 
 	reqBody, err := json.Marshal(creq)

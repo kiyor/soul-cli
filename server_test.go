@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,48 @@ func TestAuthMiddleware_NoToken(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestLoadServerConfigReadsBooleanOnlyServerConfig(t *testing.T) {
+	origAppDir := appDir
+	appDir = t.TempDir()
+	t.Cleanup(func() { appDir = origAppDir })
+
+	cfgPath := filepath.Join(appDir, "config.json")
+	err := os.WriteFile(cfgPath, []byte(`{
+		"server": {
+			"defaultReplaceSoul": false,
+			"disableTmuxDrawer": true,
+			"dbExplorer": {"enabled": false}
+		}
+	}`), 0o600)
+	if err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg := loadServerConfig()
+	if cfg.DefaultReplaceSoul {
+		t.Fatalf("defaultReplaceSoul=true, want false")
+	}
+	if !cfg.DisableTmuxDrawer {
+		t.Fatalf("disableTmuxDrawer=false, want true")
+	}
+	if dbExplorerEnabled(cfg.DBExplorer) {
+		t.Fatalf("dbExplorer enabled, want disabled")
+	}
+}
+
+func TestIsActiveUploadExt(t *testing.T) {
+	for _, ext := range []string{".html", ".HTM", ".js", ".svg", ".xml"} {
+		if !isActiveUploadExt(ext) {
+			t.Fatalf("isActiveUploadExt(%q)=false, want true", ext)
+		}
+	}
+	for _, ext := range []string{".png", ".jpg", ".pdf", ".txt", ""} {
+		if isActiveUploadExt(ext) {
+			t.Fatalf("isActiveUploadExt(%q)=true, want false", ext)
+		}
 	}
 }
 
