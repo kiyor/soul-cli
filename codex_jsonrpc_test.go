@@ -505,7 +505,13 @@ func TestCodexJSONRPCMalformedFrameIgnored(t *testing.T) {
 
 // TestCodexJSONRPCTransportClose: pending calls fail with a useful error.
 func TestCodexJSONRPCTransportClose(t *testing.T) {
-	cr, cw, _, sw, _ := pipePair()
+	cr, cw, sr, sw, closer := pipePair()
+	// Defer closer so the unused server-side reader (sr) and the client
+	// writer (cw) get cleaned up even if the test fails before reaching
+	// the explicit close calls below. closeWriter remains the explicit
+	// "close just the producer side" hook used by the test.
+	defer closer()
+	_ = sr // unused — server side never reads in this test
 	closeWriter := func() {
 		if pw, ok := sw.(io.Closer); ok {
 			_ = pw.Close()

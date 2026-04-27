@@ -437,8 +437,15 @@ func makeOnInit(sess *serverSession, source string) func(json.RawMessage) {
 				fmt.Fprintf(os.Stderr, "[%s] server: onInit model: before=%q init=%q after=%q (session %s)\n",
 					appName, before, init.Model, sess.Model, shortID(sess.ID))
 			}
-			hub := sess.hub // read under lock to avoid race
+			proc := sess.process // capture under lock
+			hub := sess.hub      // read under lock to avoid race
 			sess.mu.Unlock()
+
+			// Mirror the CC session id onto the backend so info() can
+			// surface it without reaching back into serverSession state.
+			if cb, ok := proc.(*claudeBackend); ok {
+				cb.setClaudeSessionID(init.SessionID)
+			}
 
 			if source != "" {
 				// Full init: record mappings and sync CC name
@@ -722,11 +729,11 @@ func drainStderr(proc *claudeBackend, sess *serverSession) {
 			if n > 0 {
 				proc.stderrTail.Write(buf[:n])
 
-				// Real-time 429 detection for ephemeral sessions
+				// Real-time 429 detection for ephemeral sessions.
+				// Signature list lives on looksLikeRateLimit (backend.go)
+				// so codex's drainStderr stays in sync automatically.
 				if shouldMonitor && !proc.rateLimited.Load() {
-					chunk := strings.ToLower(string(buf[:n]))
-					if strings.Contains(chunk, "429") || strings.Contains(chunk, "rate limit") ||
-						strings.Contains(chunk, "too many requests") || strings.Contains(chunk, "quota exceeded") {
+					if looksLikeRateLimit(strings.ToLower(string(buf[:n]))) {
 						proc.rateLimited.Store(true)
 						fmt.Fprintf(os.Stderr, "[%s] server: detected 429/rate-limit in stderr, killing process for fallback\n", appName)
 						proc.cmd.Process.Kill()

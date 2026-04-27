@@ -143,6 +143,15 @@ type claudeBackend struct {
 	exitCode int
 	mu       sync.Mutex // protects stdin writes
 
+	// model is the model name the process was launched with (from sessionOpts).
+	// Set once at spawn time; read via info().
+	model string
+
+	// claudeSessionID holds the session id reported by CC's first init
+	// message. atomic.Pointer so info() can read concurrently with the
+	// init-message handler that calls setClaudeSessionID. nil until init.
+	claudeSessionID atomic.Pointer[string]
+
 	// initReady is closed when the process emits its first "init" message,
 	// signaling it's ready to accept user messages on stdin.
 	initReady chan struct{}
@@ -274,6 +283,7 @@ func spawnCC(opts sessionOpts) (*claudeBackend, error) {
 		stdin:      stdin,
 		stdout:     stdout,
 		stderr:     stderr,
+		model:      opts.Model,
 		done:       make(chan struct{}),
 		initReady:  make(chan struct{}),
 		waiters:    make(map[string]chan json.RawMessage),
@@ -634,7 +644,25 @@ func (p *claudeBackend) shutdown() {
 // first init message, so callers that need it before init landed should
 // fall back to the persisted DB record (server_session.go does both).
 func (p *claudeBackend) info() BackendInfo {
-	return BackendInfo{Kind: BackendCC}
+	if p == nil {
+		return BackendInfo{Kind: BackendCC}
+	}
+	out := BackendInfo{Kind: BackendCC, Model: p.model}
+	if sid := p.claudeSessionID.Load(); sid != nil {
+		out.SessionID = *sid
+	}
+	return out
+}
+
+// setClaudeSessionID records the CC session id reported by the init
+// message. Idempotent — repeated calls with the same value are no-ops;
+// changes (rare, e.g. resume swapping ids) overwrite. Safe for concurrent
+// readers via info().
+func (p *claudeBackend) setClaudeSessionID(id string) {
+	if p == nil || id == "" {
+		return
+	}
+	p.claudeSessionID.Store(&id)
 }
 
 // markRateLimited flags this backend as rate-limited. Setting the atomic

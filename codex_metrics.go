@@ -55,6 +55,13 @@ var (
 	codexJSONRPCTotal   atomic.Int64
 	codexJSONRPCSumMs   atomic.Int64
 
+	// Event bus drops. Bumped from emit() when the bounded events channel
+	// (capacity 256) is full; we drop the oldest queued event and continue.
+	// A non-zero count usually means a consumer (the bridge goroutine) is
+	// stalled or hasn't attached yet — useful as an "is the bridge stuck?"
+	// signal independent of any latency metric.
+	codexEventsDroppedTotal atomic.Int64
+
 	// Server-process start time for uptime reporting.
 	codexMetricsStart = time.Now()
 )
@@ -111,12 +118,13 @@ func recordCodexJSONRPCDuration(d time.Duration) {
 // codexMetricsSnapshot returns a JSON-serializable view of every counter.
 // Stable enough to consume from a dashboard or alert rule.
 type codexMetricsSnapshot struct {
-	UptimeSeconds int64                    `json:"uptime_seconds"`
-	Backend       map[string]int64         `json:"backend_sessions_total"`
-	Handshake     codexHandshakeMetrics    `json:"codex_handshake"`
-	Approvals     codexApprovalMetrics     `json:"codex_approvals"`
-	JSONRPC       codexJSONRPCMetrics      `json:"codex_jsonrpc"`
-	Generated     string                   `json:"generated_at"`
+	UptimeSeconds      int64                 `json:"uptime_seconds"`
+	Backend            map[string]int64      `json:"backend_sessions_total"`
+	Handshake          codexHandshakeMetrics `json:"codex_handshake"`
+	Approvals          codexApprovalMetrics  `json:"codex_approvals"`
+	JSONRPC            codexJSONRPCMetrics   `json:"codex_jsonrpc"`
+	EventsDroppedTotal int64                 `json:"codex_events_dropped_total"`
+	Generated          string                `json:"generated_at"`
 }
 
 type codexHandshakeMetrics struct {
@@ -154,7 +162,8 @@ func snapshotCodexMetrics() codexMetricsSnapshot {
 			TimeoutTotal: codexApprovalTimeoutTotal.Load(),
 			DefaultTotal: codexApprovalDefaultTotal.Load(),
 		},
-		Generated: time.Now().UTC().Format(time.RFC3339),
+		EventsDroppedTotal: codexEventsDroppedTotal.Load(),
+		Generated:          time.Now().UTC().Format(time.RFC3339),
 	}
 	backendSessionCount.Range(func(k, v any) bool {
 		kind, _ := k.(BackendKind)

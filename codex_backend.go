@@ -356,11 +356,7 @@ func (cb *codexBackend) drainStderr() {
 		n, err := cb.stderr.Read(buf)
 		if n > 0 {
 			chunk := strings.ToLower(string(buf[:n]))
-			if !cb.rateLimited.Load() &&
-				(strings.Contains(chunk, "429") ||
-					strings.Contains(chunk, "rate limit") ||
-					strings.Contains(chunk, "too many requests") ||
-					strings.Contains(chunk, "quota exceeded")) {
+			if !cb.rateLimited.Load() && looksLikeRateLimit(chunk) {
 				cb.rateLimited.Store(true)
 				if cb.logger != nil {
 					cb.logger("rate-limit detected in stderr; flagging backend")
@@ -490,6 +486,15 @@ func (cb *codexBackend) runHandshake() {
 		"approvalPolicy": cb.approvalPolicy,
 	}
 	if pp := codexPermissionProfilePayload(cb.permissionProfile); pp != nil {
+		// Validate JSON syntax up front so an operator typo (e.g. missing
+		// quote) surfaces with our own error message linking back to the
+		// runbook, rather than as a confusing "invalid type" from codex.
+		if !json.Valid(pp) {
+			cb.failInit("thread/start", fmt.Sprintf(
+				"agents.codex.permission_profile is not valid JSON: %q (see docs/codex-backend-runbook.md)",
+				cb.permissionProfile))
+			return
+		}
 		startParams["permissionProfile"] = pp
 	}
 	raw, err := cb.client.Call(ctx, MethodThreadStart, startParams)
@@ -793,6 +798,12 @@ func (cb *codexBackend) shutdown() {
 			}
 		}
 		cb.cancel()
+		// Guarantee callers that shutdown() returning implies alive()==false.
+		// watchClientDone will also call markDone after observing ctx.Done(),
+		// but it runs on another goroutine and may not have been scheduled by
+		// the time shutdown() returns — under -race this manifested as a
+		// flaky TestCodexBackendShutdown. markDone is idempotent (doneOnce).
+		cb.markDone()
 	})
 }
 
@@ -1310,6 +1321,7 @@ func (cb *codexBackend) emit(e UnifiedEvent) {
 	// Full — drop oldest and try again.
 	select {
 	case <-cb.eventsCh:
+		codexEventsDroppedTotal.Add(1)
 		if cb.logger != nil {
 			cb.logger("events channel overflow; dropped oldest event")
 		}
@@ -1320,6 +1332,7 @@ func (cb *codexBackend) emit(e UnifiedEvent) {
 	default:
 		// Still full (concurrent producer). Drop the new one — caller
 		// can't observe but the old data on the channel still matters.
+		codexEventsDroppedTotal.Add(1)
 		if cb.logger != nil {
 			cb.logger("events channel still full; dropped new event")
 		}

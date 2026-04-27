@@ -26,7 +26,9 @@ import (
 // we emit a small set of *new* event types that mirror the unified-event
 // shape one-for-one:
 //
-//   "codex_init"        — when the codex thread is ready (mirrors CC "init")
+//   "init"              — when the codex thread is ready (intentionally the
+//                         same event name as CC so the Web UI's session-ready
+//                         hint reuses the existing handler unchanged)
 //   "codex_turn_started"
 //   "codex_turn_completed"   (final status / error)
 //   "codex_item_started"     (with kind: agent_message / tool_call / …)
