@@ -35,6 +35,13 @@ CODEX_BIN="${CODEX_BIN:-/opt/homebrew/bin/codex}"
 CODEX_MODEL="${CODEX_MODEL:-gpt-5.5}"
 CODEX_PROMPT="${CODEX_PROMPT:-reply with one word: ok}"
 
+# Per-step timeouts (seconds). Override via env when codex is slow on this
+# box. Defaults are chosen so a healthy local codex finishes well inside
+# them but a hung step doesn't block forever.
+export CODEX_INIT_TIMEOUT="${CODEX_INIT_TIMEOUT:-10}"
+export CODEX_THREAD_TIMEOUT="${CODEX_THREAD_TIMEOUT:-15}"
+export CODEX_TURN_TIMEOUT="${CODEX_TURN_TIMEOUT:-30}"
+
 # ── Preflight ──────────────────────────────────────────────────────────────
 
 hdr "preflight"
@@ -128,7 +135,7 @@ try:
     send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
         "clientInfo":{"name":"weiran-smoke","title":"weiran smoke","version":"0.0.1"}
     }})
-    init = wait_id(1, timeout=10)
+    init = wait_id(1, timeout=int(os.environ.get("CODEX_INIT_TIMEOUT", "10")))
     if not init or "result" not in init:
         print("FAIL initialize:", init, file=sys.stderr)
         print(stderr_tail(), file=sys.stderr)
@@ -142,7 +149,7 @@ try:
         "model": model,
         "approvalPolicy": "never",
     }})
-    th = wait_id(2, timeout=15)
+    th = wait_id(2, timeout=int(os.environ.get("CODEX_THREAD_TIMEOUT", "15")))
     if not th or "result" not in th:
         print("FAIL thread/start:", th, file=sys.stderr)
         print(stderr_tail(), file=sys.stderr)
@@ -154,7 +161,7 @@ try:
         "threadId": thread_id,
         "input": [{"type":"text","text": prompt}],
     }})
-    ts = wait_id(3, timeout=30)
+    ts = wait_id(3, timeout=int(os.environ.get("CODEX_TURN_TIMEOUT", "30")))
     if not ts or "result" not in ts:
         print("FAIL turn/start:", ts, file=sys.stderr)
         print(stderr_tail(), file=sys.stderr)

@@ -2,8 +2,23 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
+
+// looksLikeRateLimit reports whether a chunk of stderr text contains a
+// recognizable rate-limit / 429 signature. Shared between the CC
+// drainStderr (server_session.go) and the codex drainStderr
+// (codex_backend.go) so the two stay in sync — adding a new signature
+// here automatically benefits both backends.
+//
+// Caller is responsible for normalizing case (this function does not).
+func looksLikeRateLimit(loweredChunk string) bool {
+	return strings.Contains(loweredChunk, "429") ||
+		strings.Contains(loweredChunk, "rate limit") ||
+		strings.Contains(loweredChunk, "too many requests") ||
+		strings.Contains(loweredChunk, "quota exceeded")
+}
 
 // SessionOpts is the unified options struct for spawning a backend session.
 //

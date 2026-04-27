@@ -496,8 +496,17 @@ func (c *CodexJSONRPCClient) writeLoop() {
 				case buf := <-c.outbound:
 					_, _ = c.w.Write(buf)
 				default:
-					return
+					goto flushAndExit
 				}
+			}
+		flushAndExit:
+			// If the underlying writer is a buffered type (bufio.Writer or
+			// any wrapper exposing Flush), make sure queued bytes actually
+			// hit the wire before we return. Today c.w is an os.File / pipe
+			// which doesn't need this — but adding a buffered writer in the
+			// future shouldn't silently drop frames.
+			if f, ok := c.w.(interface{ Flush() error }); ok {
+				_ = f.Flush()
 			}
 			return
 		case buf := <-c.outbound:
