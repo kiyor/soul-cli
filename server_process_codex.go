@@ -304,6 +304,7 @@ func handleCodexApproval(cb *codexBackend, sess *serverSession, ev UnifiedEvent)
 	}
 
 	decision, reason, contexts := evaluateToolHookForApproval(hookIn)
+	recordCodexApprovalDecision(decision)
 	switch decision {
 	case "deny":
 		msg := reason

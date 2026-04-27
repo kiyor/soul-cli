@@ -1170,6 +1170,7 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 			return nil, fmt.Errorf("spawn codex: %w", err)
 		}
 		proc = cb
+		recordBackendStart(BackendCodex)
 	default:
 		ccb, err := spawnClaude(spawnOpts)
 		if err != nil {
@@ -1177,6 +1178,7 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 			return nil, fmt.Errorf("spawn claude: %w", err)
 		}
 		proc = ccb
+		recordBackendStart(BackendCC)
 	}
 	sess.mu.Lock()
 	sess.process = proc

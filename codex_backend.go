@@ -426,6 +426,7 @@ func (cb *codexBackend) failInit(stage, msg string) {
 	}
 	combined := stage + ": " + msg
 	cb.initErr.Store(&combined)
+	recordCodexHandshake(false)
 	cb.emit(UnifiedEvent{
 		Kind: UEvtBackendError,
 		Payload: mustMarshalRaw(map[string]any{
@@ -468,11 +469,21 @@ func (cb *codexBackend) runHandshake() {
 		return
 	}
 
-	startParams := &CodexThreadStartParams{
-		Model:             cb.model,
-		Cwd:               cb.cwd,
-		ApprovalPolicy:    cb.approvalPolicy,
-		PermissionProfile: cb.permissionProfile,
+	// Build thread/start params via map[string]any so we can selectively
+	// include permissionProfile only when it's a typed object — codex
+	// rejects bare strings like "workspaceWrite" with
+	//   "expected internally tagged enum PermissionProfile".
+	// The legacy default value (codexDefaultPermissionProfile = "workspaceWrite")
+	// is silently dropped here so the codex server-side default kicks in;
+	// users who want a custom profile can set agents.codex.permission_profile
+	// to a JSON literal like '{"type":"disabled"}' (Round 6+).
+	startParams := map[string]any{
+		"model":          cb.model,
+		"cwd":            cb.cwd,
+		"approvalPolicy": cb.approvalPolicy,
+	}
+	if pp := codexPermissionProfilePayload(cb.permissionProfile); pp != nil {
+		startParams["permissionProfile"] = pp
 	}
 	raw, err := cb.client.Call(ctx, MethodThreadStart, startParams)
 	if err != nil {
@@ -491,9 +502,40 @@ func (cb *codexBackend) runHandshake() {
 	}
 	cb.threadID.Store(&threadID)
 	cb.signalInit()
+	recordCodexHandshake(true)
 	if cb.logger != nil {
 		cb.logger("handshake complete: thread=%s model=%s", threadID, resp.Model)
 	}
+}
+
+// codexPermissionProfilePayload converts a string value (from
+// agents.codex.permission_profile) into the typed object codex's
+// thread/start expects. Recognized:
+//
+//   - ""               → nil (omit, codex uses server default)
+//   - "default" / "workspaceWrite" → nil (legacy magic; treated as omit)
+//   - "disabled"       → {"type":"disabled"}
+//   - "{...}"          → raw JSON, used as-is
+//
+// Anything else is silently dropped to nil; the runbook calls this out.
+// Returns json.RawMessage so it round-trips through the map[string]any
+// without re-encoding.
+func codexPermissionProfilePayload(name string) json.RawMessage {
+	s := strings.TrimSpace(name)
+	if s == "" || s == "default" || s == "workspaceWrite" {
+		return nil
+	}
+	if s == "disabled" {
+		return json.RawMessage(`{"type":"disabled"}`)
+	}
+	if strings.HasPrefix(s, "{") {
+		// Trust the operator if they hand-typed JSON. Decoding it once
+		// here would catch syntax errors but we'd rather codex itself
+		// surface "invalid type" so the user sees the same error message
+		// our docs link to.
+		return json.RawMessage(s)
+	}
+	return nil
 }
 
 // ── Backend interface ──

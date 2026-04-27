@@ -9,6 +9,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ── JSON-RPC 2.0 client (Round 2) ──
@@ -280,6 +281,11 @@ func (c *CodexJSONRPCClient) Notify(method string, params any) error {
 // Call sends a request and blocks until a response is received, ctx is
 // cancelled, or the transport closes. Returns the raw result bytes (caller
 // unmarshals into the appropriate response struct from codex_protocol.go).
+//
+// Round 5: per-call duration is recorded in codex_metrics if the call
+// completes (success or app-level error). Transport-level failures
+// (closed client, ctx cancel, EOF) skip the histogram so we don't
+// poison the latency distribution with sub-millisecond stub samples.
 func (c *CodexJSONRPCClient) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	if c.closedFlag.Load() {
 		return nil, errors.New("jsonrpc client closed")
@@ -287,6 +293,7 @@ func (c *CodexJSONRPCClient) Call(ctx context.Context, method string, params any
 	if ctx == nil {
 		ctx = c.ctx
 	}
+	startedAt := time.Now()
 	id := c.id.Add(1)
 	idJSON, err := json.Marshal(id)
 	if err != nil {
@@ -326,6 +333,7 @@ func (c *CodexJSONRPCClient) Call(ctx context.Context, method string, params any
 	select {
 	case reply := <-pending.resp:
 		cleanup()
+		recordCodexJSONRPCDuration(time.Since(startedAt))
 		if reply.err != nil {
 			return nil, reply.err
 		}
