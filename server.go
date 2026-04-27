@@ -372,10 +372,10 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, resp)
 	})
 
-	// Codex backend metrics (no auth — same posture as /api/health so
-	// heartbeat hooks and prom proxies don't need to ship a token).
+	// Codex backend metrics — authed because the snapshot exposes internal
+	// architecture details (queue depth, session counts, JSON-RPC stats).
 	// See codex_metrics.go for the snapshot shape.
-	mux.HandleFunc("GET /api/codex/metrics", handleCodexMetrics)
+	mux.HandleFunc("GET /api/codex/metrics", authMiddleware(cfg.Token, handleCodexMetrics))
 
 	// Config info (authed)
 	mux.HandleFunc("GET /api/config", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
