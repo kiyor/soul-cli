@@ -633,7 +633,7 @@ func (tb *telegramBridge) createSession(chatID string) (*serverSession, error) {
 		Soul:        true,
 		Category:    CategoryTelegram,
 		Tags:        []string{"telegram", "chat:" + chatID},
-		EnvOverride: telegramModeEnv,
+		EnvOverride: buildTelegramModeEnv(),
 	})
 	if err != nil {
 		return nil, err
@@ -663,9 +663,9 @@ func (tb *telegramBridge) createSession(chatID string) (*serverSession, error) {
 func buildTGContext(chatID string) string {
 	summary := loadTGSummary(chatID)
 	if summary != "" {
-		return fmt.Sprintf("<system-reminder>\nThis is a Telegram conversation with Kiyor. Previous conversation summary:\n\n%s\n\nContinue naturally from where we left off. Respond concisely (Telegram-friendly).\n</system-reminder>\n\n", summary)
+		return fmt.Sprintf("<system-reminder>\nThis is a Telegram conversation with %s. Previous conversation summary:\n\n%s\n\nContinue naturally from where we left off. Respond concisely (Telegram-friendly).\n</system-reminder>\n\n", ownerName, summary)
 	}
-	return "<system-reminder>\nThis is a new Telegram conversation with Kiyor. Respond naturally, keep messages concise (Telegram-friendly). You have full access to your tools and memory.\n</system-reminder>\n\n"
+	return fmt.Sprintf("<system-reminder>\nThis is a new Telegram conversation with %s. Respond naturally, keep messages concise (Telegram-friendly). You have full access to your tools and memory.\n</system-reminder>\n\n", ownerName)
 }
 
 // ── Output bridge (session → TG) ──

@@ -1,15 +1,12 @@
 package main
 
 // netprobe: one-shot local-network probing so the agent only hits ONE
-// approval wall per cycle. The subcommand concurrently checks:
-//   - Agent services on 192.168.10.26 (jira, memory, gallery, prompt, rss, ...)
-//   - GPU box (ComfyUI on 192.168.10.52:8188)
-//   - VPN gateways (SOCKS5 on .21:1080 / .24:1080)
-//   - Infra hosts (PVE, opnsense, fs, qollama)
-//   - K8s contexts (optional, via kubectl cluster-info — skipped by default)
+// approval wall per cycle. The subcommand concurrently checks targets
+// declared in $workspace/netprobe.yaml (HTTP and TCP).
 //
-// Extensible via $workspace/netprobe.yaml (optional). If the file exists,
-// additional targets are appended to the built-in list.
+// Targets are entirely user-defined — soul-cli ships with no built-in
+// LAN topology. See examples/netprobe.yaml.example for a template
+// covering common patterns (agent services, GPU boxes, VPN gateways).
 //
 // Usage:
 //   weiran netprobe                          # probe everything, pretty table
@@ -65,37 +62,14 @@ type netProbeResult struct {
 
 // ── Built-in target list ─────────────────────────────────────────
 
-// defaultNetProbeTargets covers the local services documented in TOOLS.md.
-// Host: 192.168.10.26 is the Mac mini running all agent services.
-// Keep this list tight — it's a fast "is everything alive" sweep.
+// defaultNetProbeTargets returns built-in probe targets.
+//
+// soul-cli intentionally ships zero LAN-specific defaults — every user has
+// a different network topology, and hardcoded IPs are noise (or worse, info
+// leaks) for everyone else. Define your own targets in
+// $workspace/netprobe.yaml; see examples/netprobe.yaml.example for templates.
 func defaultNetProbeTargets() []netProbeTarget {
-	return []netProbeTarget{
-		// ── Agent services on 192.168.10.26 ──
-		{Name: "jira", Category: "service", Kind: "http", URL: "http://192.168.10.26:8081/api/agents/main/checkin", Expect: []int{200, 400, 401, 403, 404, 405}},
-		{Name: "memory", Category: "service", Kind: "http", URL: "http://192.168.10.26:8084/api/health"},
-		{Name: "prompt-manager", Category: "service", Kind: "http", URL: "http://192.168.10.26:8083/api/agents"},
-		{Name: "rss-reader", Category: "service", Kind: "http", URL: "http://192.168.10.26:8088/"},
-		{Name: "rss-weiran", Category: "service", Kind: "http", URL: "http://192.168.10.26:8096/"},
-		{Name: "gen-gallery", Category: "service", Kind: "http", URL: "http://192.168.10.26:8089/api/generations?limit=1"},
-		{Name: "office-dashboard", Category: "service", Kind: "http", URL: "http://192.168.10.26:8080/"},
-		{Name: "plantuml", Category: "service", Kind: "http", URL: "http://192.168.10.26:8093/"},
-		{Name: "feishu-bot", Category: "service", Kind: "http", URL: "http://192.168.10.26:8095/"},
-		{Name: "vault", Category: "service", Kind: "http", URL: "http://192.168.10.26:8200/v1/sys/health", Expect: []int{200, 429, 472, 473, 501, 503}},
-
-		// ── GPU box ──
-		{Name: "comfyui", Category: "gpu", Kind: "http", URL: "http://192.168.10.52:8188/system_stats"},
-		{Name: "qollama", Category: "gpu", Kind: "http", URL: "http://192.168.10.52:11434/api/tags"},
-
-		// ── VPN gateways (SOCKS5 TCP reach only) ──
-		{Name: "vpn-21-socks5", Category: "vpn", Kind: "tcp", Addr: "192.168.10.21:1080", Note: "Zilliz OpenVPN"},
-		{Name: "vpn-24-socks5", Category: "vpn", Kind: "tcp", Addr: "192.168.10.24:1080", Note: "OpenFortiVPN backup"},
-
-		// ── Infra / hosts ──
-		{Name: "opnsense", Category: "infra", Kind: "tcp", Addr: "192.168.10.1:443", Note: "router admin"},
-		{Name: "fs-truenas", Category: "infra", Kind: "tcp", Addr: "192.168.10.70:22", Note: "TrueNAS ssh"},
-		{Name: "pve-23", Category: "infra", Kind: "tcp", Addr: "192.168.10.23:8006", Note: "PVE primary node"},
-		{Name: "javbus", Category: "infra", Kind: "tcp", Addr: "192.168.10.50:22", Note: "k2fs / javbus host"},
-	}
+	return nil
 }
 
 // loadExtraNetProbeTargets reads $workspace/netprobe.yaml if present.
@@ -453,15 +427,16 @@ Usage:
   %s netprobe --extra <url|host:port>  add an ad-hoc target (repeatable)
   %s netprobe --list                   list targets without probing
 
-Categories:
-  service   Mac mini agent services on 192.168.10.26 (jira, memory, ...)
-  gpu       GPU box 192.168.10.52 (comfyui, qollama)
-  vpn       SOCKS5 proxies (.21, .24)
-  infra     Router / TrueNAS / PVE / other LAN hosts
+Categories (user-defined; common conventions):
+  service   Local HTTP services
+  gpu       GPU/inference boxes
+  vpn       VPN / proxy gateways (TCP reach)
+  infra     Router / NAS / hypervisors / other LAN hosts
   extra     Ad-hoc targets added via --extra
 
-Extend targets:
-  Create %s/netprobe.yaml:
+Configure targets:
+  soul-cli ships no built-in targets. Create %s/netprobe.yaml
+  (see examples/netprobe.yaml.example):
     targets:
       - name: myservice
         category: service

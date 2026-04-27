@@ -71,7 +71,7 @@ type serverConfig struct {
 // s3Config holds Wasabi/S3 upload settings for image hosting.
 type s3Config struct {
 	Endpoint string `json:"endpoint"` // e.g. "https://s3.us-west-1.wasabisys.com"
-	Bucket   string `json:"bucket"`   // e.g. "kiyor-agent-images"
+	Bucket   string `json:"bucket"`   // e.g. "my-agent-images"
 	Region   string `json:"region"`   // e.g. "us-west-1"
 	Prefix   string `json:"prefix"`   // e.g. "webui/"
 	Profile  string `json:"profile"`  // AWS credentials profile, e.g. "wasabi"
@@ -458,8 +458,8 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, data)
 	}))
 
-	// Tmux sessions (read-only drawer for Kiyor — he doesn't use tmux himself,
-	// everything shown here is 未然 running long tasks).
+	// Tmux sessions (read-only drawer). When the user doesn't use tmux directly,
+	// everything visible here is the agent (or its spawned tasks) running long jobs.
 	mux.HandleFunc("GET /api/tmux/sessions", authMiddleware(cfg.Token, handleTmuxSessions))
 	mux.HandleFunc("GET /api/tmux/capture", authMiddleware(cfg.Token, handleTmuxCapture))
 
@@ -1749,7 +1749,7 @@ func handleServer(args []string) {
 		}
 		sm.mu.RUnlock()
 
-		// Default: soul enabled (未然). Caller can explicitly disable.
+		// Default: soul enabled. Caller can explicitly disable.
 		soulEnabled := true
 		if req.Soul != nil {
 			soulEnabled = *req.Soul
@@ -1861,7 +1861,7 @@ func handleServer(args []string) {
 
 	// Spawn API — dispatch a task to any agent
 	// Body: {"agent": "intern", "task": "处理 #815", "wait": false}
-	// No auth required — Jira and 未然 both call this
+	// No auth required — external task systems and the agent itself both call this
 	mux.HandleFunc("POST /api/spawn", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Agent string `json:"agent"`

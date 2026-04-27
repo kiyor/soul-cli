@@ -137,7 +137,7 @@ func buildPrompt() buildPromptResult {
 	b.WriteString("\n")
 	sections = append(sections, promptSection{name: "BOOT.md", tokens: estimateTokens(b.String()[secStart:])})
 
-	// CORE.md: read-only rules defined by Kiyor (loaded before soul files)
+	// CORE.md: read-only rules defined by the user (loaded before soul files)
 	if content, ok := loadFileWithBudget(filepath.Join(workspace, "CORE.md"), maxBootstrapFileChars); ok {
 		secStart = b.Len()
 		fmt.Fprintf(&b, "\n# === CORE.md (read-only, do not modify) ===\n\n%s\n", content)
@@ -266,34 +266,33 @@ func buildPrompt() buildPromptResult {
 		galContext = "" // clear legacy global after use
 	}
 
-	// Today + yesterday daily notes (tail-first: newest content preserved on truncation)
+	// Today's daily note only (tail-first: newest content preserved on truncation).
+	// Yesterday/older notes available via FTS5 search when needed.
 	if profile.IncludeDailyNotes {
 		today := time.Now().Format("2006-01-02")
-		yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-		dailyBudget := 15000
+		dailyBudget := 10000
 		if profile.DailyNoteBudget > 0 {
 			dailyBudget = profile.DailyNoteBudget
 		}
-		for _, day := range []string{today, yesterday} {
-			p := filepath.Join(workspace, "memory", day+".md")
-			content, ok := loadFileTailWithBudget(p, dailyBudget)
-			if !ok {
-				continue
-			}
+		p := filepath.Join(workspace, "memory", today+".md")
+		if content, ok := loadFileTailWithBudget(p, dailyBudget); ok {
 			if totalChars+len(content) > maxBootstrapTotalChars {
-				fmt.Fprintf(&b, "\n# === Daily Note: %s ===\n\n⚠️ [skipped: bootstrap total exceeded limit]\n", day)
-				break
+				fmt.Fprintf(&b, "\n# === Daily Note: %s ===\n\n⚠️ [skipped: bootstrap total exceeded limit]\n", today)
+			} else {
+				totalChars += len(content)
+				secStart := b.Len()
+				fmt.Fprintf(&b, "\n# === Daily Note: %s ===\n\n%s\n", today, content)
+				sections = append(sections, promptSection{name: "daily/" + today, tokens: estimateTokens(b.String()[secStart:])})
 			}
-			totalChars += len(content)
-			secStart := b.Len()
-			fmt.Fprintf(&b, "\n# === Daily Note: %s ===\n\n%s\n", day, content)
-			sections = append(sections, promptSection{name: "daily/" + day, tokens: estimateTokens(b.String()[secStart:])})
 		}
 	}
 
 	// Recent 5 Claude Code session user prompt summaries
-	if profile.IncludeCCSessions {
-		ccCtx := buildCCSessionContext(5, 3000)
+	// Skip when resuming — CC already has full history via --resume <ccID>,
+	// and re-injecting the summary on every resume causes stacking bloat.
+	skipCC := activeOverrides != nil && activeOverrides.SkipCCSessions
+	if profile.IncludeCCSessions && !skipCC {
+		ccCtx := buildCCSessionContext(3, 2000)
 		if ccCtx != "" {
 			secStart := b.Len()
 			fmt.Fprintf(&b, "\n# === Recent Claude Code session summaries ===\n\n%s\n", ccCtx)
@@ -303,7 +302,7 @@ func buildPrompt() buildPromptResult {
 
 	// Telegram current session conversation history (tail, within token limit)
 	if profile.IncludeTelegram {
-		if tgCtx, tgPath := buildTelegramContext(8000); tgCtx != "" {
+		if tgCtx, tgPath := buildTelegramContext(4000); tgCtx != "" {
 			secStart := b.Len()
 			fmt.Fprintf(&b, "\n# === Telegram current conversation (recent) ===\n\n")
 			fmt.Fprintf(&b, "> Full session JSONL: `%s`\n\n", tgPath)
@@ -992,6 +991,9 @@ type promptOverrides struct {
 	Mode           string // override currentMode for prompt profile selection
 	GalContext     string // GAL save JSON injected into prompt for resume
 	EnvOverride    string // replaces the environment section in BOOT.md
+	SkipCCSessions bool   // skip "Recent Claude Code session summaries" injection
+	// (resume paths already have full CC history via --resume <ccID>;
+	// only fresh/spawn sessions like relay/review need the summary injection)
 }
 
 // activeOverrides is set before calling buildPrompt() and cleared after.
@@ -1026,37 +1028,49 @@ func buildPromptWithOverrides(ovr promptOverrides) buildPromptResult {
 // Kept only for non-server callsites (main.go interactive mode).
 var sessionEnvOverride string
 
-const telegramModeEnv = `## Current Environment
+// buildTelegramModeEnv builds the Telegram-mode environment block at runtime.
+// Three slots:
+//   - %[1]s = agentNick — agent's self-reference name (e.g. "未然", "Kuro")
+//   - %[2]s = appName   — binary code name for CLI commands (e.g. "weiran")
+//   - %[3]s = ownerName — human user's display name (e.g. "Kiyor", "Alice")
+// soul-cli is open-source: never hardcode any specific value here.
+func buildTelegramModeEnv() string {
+	return fmt.Sprintf(`## Current Environment
 
-You are running in **Weiran Server (Telegram)** mode, interacting with Kiyor via Telegram DM.
-Available: file read/write, bash, git, jira-cli, curl, weiran CLI, all local tools.
+You are running in **%[1]s Server (Telegram)** mode, interacting with %[3]s via Telegram DM.
+Available: file read/write, bash, git, jira-cli, curl, %[2]s CLI, all local tools.
 Limited: Images delivered via Telegram sendPhoto (use selfie skill normally).
 Unavailable: IndexTTS voice, temperature control.
 
 ### Telegram Specifics
 - **Keep messages concise** — Telegram is mobile-first, long walls of text are hard to read.
-- **Images**: Use ` + "`![caption](url)`" + ` markdown — the server automatically extracts these and sends via Telegram sendPhoto API. During streaming, a [caption] placeholder is shown; at turn end, the real photo is delivered.
-- **Web UI components supported**: ` + "`weiran-choices`" + `, ` + "`weiran-chips`" + `, ` + "`weiran-rating`" + `, ` + "`weiran-gallery`" + ` are automatically converted to Telegram-friendly text (numbered options, pipe-separated chips, etc.). Use them normally — especially for GAL.
+- **Images**: Use `+"`![caption](url)`"+` markdown — the server automatically extracts these and sends via Telegram sendPhoto API. During streaming, a [caption] placeholder is shown; at turn end, the real photo is delivered.
+- **Web UI components supported**: `+"`%[2]s-choices`"+`, `+"`%[2]s-chips`"+`, `+"`%[2]s-rating`"+`, `+"`%[2]s-gallery`"+` are automatically converted to Telegram-friendly text (numbered options, pipe-separated chips, etc.). Use them normally — especially for GAL.
 - **Markdown**: Telegram supports basic Markdown (bold, italic, code, links). No tables, no HTML.
 - **Multiple messages OK** — For complex responses, break into multiple short messages rather than one huge block.
 - **Code blocks**: Use single backticks for inline code, triple backticks for blocks. Keep them short.
-- **User photos**: When the user sends a photo, it is downloaded locally and the path is provided as ` + "`[User sent a photo: /tmp/tg-photo-xxx.jpg]`" + `. Use the Read tool to view it.
+- **User photos**: When the user sends a photo, it is downloaded locally and the path is provided as `+"`[User sent a photo: /tmp/tg-photo-xxx.jpg]`"+`. Use the Read tool to view it.
 
-Jira token is set via JIRA_TOKEN env var. Run ` + "`weiran --help`" + ` for all subcommands.`
+Jira token is set via JIRA_TOKEN env var. Run `+"`%[2]s --help`"+` for all subcommands.`, agentNick, appName, ownerName)
+}
 
-const serverModeEnv = `## Current Environment
+// buildServerModeEnv builds the Web UI-mode environment block at runtime.
+// Slots: %[1]s=agentNick, %[2]s=appName, %[3]s=ownerName.
+func buildServerModeEnv() string {
+	return fmt.Sprintf(`## Current Environment
 
-You are running in **Weiran Server (Web UI)** mode, interacting with Kiyor via a browser.
-Available: file read/write, bash, git, jira-cli, curl, weiran CLI, all local tools.
-Limited: ` + "`weiran notify \"message\"`" + ` to send Telegram messages to Kiyor.
+You are running in **%[1]s Server (Web UI)** mode, interacting with %[3]s via a browser.
+Available: file read/write, bash, git, jira-cli, curl, %[2]s CLI, all local tools.
+Limited: `+"`%[2]s notify \"message\"`"+` to send Telegram messages to %[3]s.
 Unavailable: IndexTTS voice, temperature control.
 
 ### Web UI Specifics
-- **Images**: Use markdown image syntax ` + "`![caption](URL)`" + ` directly — the Web UI renders images inline. For selfie/image generation skills, send the S3 URL directly instead of downloading to /tmp and using Read tool.
+- **Images**: Use markdown image syntax `+"`![caption](URL)`"+` directly — the Web UI renders images inline. For selfie/image generation skills, send the S3 URL directly instead of downloading to /tmp and using Read tool.
 - **Link previews**: URLs in messages are automatically rendered with OG tag preview cards.
 - **Tool chain**: Hidden by default on mobile — only final results and a thinking animation are shown.
 
-Jira token is set via JIRA_TOKEN env var. Run ` + "`weiran --help`" + ` for all subcommands.`
+Jira token is set via JIRA_TOKEN env var. Run `+"`%[2]s --help`"+` for all subcommands.`, agentNick, appName, ownerName)
+}
 
 func injectServerModeContext(content string) string {
 	// Replace the environment section with server mode version
@@ -1070,12 +1084,12 @@ func injectServerModeContext(content string) string {
 		rest := content[idx+len(marker):]
 		endIdx := strings.Index(rest, "\n## ")
 		if endIdx < 0 {
-			return content[:idx] + serverModeEnv + "\n"
+			return content[:idx] + buildServerModeEnv() + "\n"
 		}
-		return content[:idx] + serverModeEnv + "\n" + rest[endIdx+1:]
+		return content[:idx] + buildServerModeEnv() + "\n" + rest[endIdx+1:]
 	}
 	// No section found, append
-	return content + "\n" + serverModeEnv + "\n"
+	return content + "\n" + buildServerModeEnv() + "\n"
 }
 
 // injectServerModeContext2 replaces the environment section with a custom override.

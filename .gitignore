@@ -8,6 +8,7 @@ weiran
 soul-cli
 soul
 /bin/
-Makefile
 site/
 hengzhun
+# legacy hardcoded plist, replaced by launchagent.plist.tmpl
+com.kiyor.weiran-server.plist

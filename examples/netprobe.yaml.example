@@ -1,0 +1,72 @@
+# netprobe.yaml — local-network health probe targets for `<app> netprobe`.
+#
+# Copy this file to $workspace/netprobe.yaml (e.g. ~/.openclaw/workspace/netprobe.yaml)
+# and edit to match your topology. soul-cli ships zero built-in targets —
+# every user has a different network, so hardcoded IPs would just be noise.
+#
+# Each target is probed concurrently. The whole sweep is one Bash approval
+# from the agent's perspective (instead of one approval per `curl`).
+#
+# Schema:
+#   name      string  — display name (unique within file)
+#   category  string  — service | gpu | vpn | infra | extra (or any label)
+#   kind      string  — http | tcp
+#   url       string  — required when kind=http (full URL)
+#   addr      string  — required when kind=tcp (host:port)
+#   expect    [int]   — optional accepted HTTP status codes (default 2xx/3xx)
+#   timeout   string  — optional Go duration (e.g. "2s"), default 3s
+#   note      string  — optional human-readable hint
+
+targets:
+  # ── Example: local HTTP services on a single home server ─────────
+  - name: my-jira
+    category: service
+    kind: http
+    url: http://10.0.0.10:8081/api/health
+    expect: [200, 401, 404]
+
+  - name: memory-service
+    category: service
+    kind: http
+    url: http://10.0.0.10:8084/api/health
+
+  - name: gallery
+    category: service
+    kind: http
+    url: http://10.0.0.10:8089/
+
+  # ── Example: GPU / inference box ─────────────────────────────────
+  - name: comfyui
+    category: gpu
+    kind: http
+    url: http://10.0.0.20:8188/system_stats
+
+  - name: ollama
+    category: gpu
+    kind: http
+    url: http://10.0.0.20:11434/api/tags
+
+  # ── Example: VPN / proxy reachability (TCP only) ─────────────────
+  - name: vpn-socks5
+    category: vpn
+    kind: tcp
+    addr: 10.0.0.30:1080
+    note: corp VPN SOCKS5 entry
+
+  # ── Example: infra hosts ─────────────────────────────────────────
+  - name: router
+    category: infra
+    kind: tcp
+    addr: 10.0.0.1:443
+    note: router admin
+
+  - name: nas-ssh
+    category: infra
+    kind: tcp
+    addr: 10.0.0.40:22
+
+  - name: hypervisor
+    category: infra
+    kind: tcp
+    addr: 10.0.0.50:8006
+    note: PVE / ESXi

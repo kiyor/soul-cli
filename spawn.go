@@ -144,7 +144,14 @@ func buildAgentPrompt(agent *agentDef) string {
 	// Current time
 	now := time.Now()
 	fmt.Fprintf(&b, "\n> **Current time**: %s (%s)\n", now.Format("2006-01-02 15:04 MST"), now.Weekday())
-	fmt.Fprintf(&b, "\n> **Spawned by**: %s (未然)\n", appName)
+	// Show "Nick (App)" so spawned agents see who summoned them in
+	// human-readable form, plus the binary identifier for tooling.
+	// When agentNick == appName (no nickname configured), show only the name.
+	if agentNick != "" && agentNick != appName {
+		fmt.Fprintf(&b, "\n> **Spawned by**: %s (%s)\n", agentNick, appName)
+	} else {
+		fmt.Fprintf(&b, "\n> **Spawned by**: %s\n", appName)
+	}
 
 	return b.String()
 }

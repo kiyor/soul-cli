@@ -63,6 +63,28 @@ var (
 
 	jiraToken string // read from config.json or JIRA_TOKEN env var
 
+	// ownerName is the human user's display name (e.g. "Kiyor", "Alice").
+	// Resolved at startup from (in priority order):
+	//   1. config.json "ownerName"
+	//   2. <APPNAME>_OWNER_NAME env var
+	//   3. USER.md frontmatter "Name:" line
+	//   4. fallback: "the user"
+	// Used wherever framework code needs to address the user by name in
+	// runtime-visible strings (prompts, system reminders, TG context). Never
+	// hardcode a specific name — soul-cli is open-source.
+	ownerName string
+
+	// agentNick is the AI agent's display name / nickname (e.g. "未然", "Kuro").
+	// Distinct from appName (binary code name like "weiran") and agentName
+	// (multi-agent ID). Used wherever the agent self-references in prompts /
+	// messages so the user sees the personality name, not the binary path.
+	// Resolved at startup from (in priority order):
+	//   1. config.json "agentNick"
+	//   2. <APPNAME>_AGENT_NICK env var
+	//   3. IDENTITY.md frontmatter "Name:" line
+	//   4. fallback: appName
+	agentNick string
+
 	isServerMode    bool   // set to true when running as `weiran server`
 	serverPort      int    // port the server is listening on (set in handleServer)
 	serverAuthToken string // auth token for server API (set in handleServer)
@@ -413,6 +435,8 @@ func loadConfig() {
 		TelegramChatID       string   `json:"telegramChatID"`
 		ProjectRoots         []string `json:"projectRoots"`
 		AgentName            string   `json:"agentName"`
+		AgentNick            string   `json:"agentNick"`            // agent's display name / nickname (e.g. "未然")
+		OwnerName            string   `json:"ownerName"`            // human user's display name (e.g. "Alice")
 		AvatarURL            string   `json:"avatarUrl"`            // optional avatar image URL for WebUI
 		UserAvatarURL        string   `json:"userAvatarUrl"`        // optional user avatar image URL for WebUI
 		WelcomeImage         string   `json:"welcomeImage"`         // optional full-body welcome page image URL
@@ -452,6 +476,34 @@ func loadConfig() {
 	// agentName: config.json override (if openclaw.json didn't set it)
 	if cfg.AgentName != "" && agentName == appName {
 		agentName = cfg.AgentName
+	}
+
+	// ownerName: config.json > <APPNAME>_OWNER_NAME env > USER.md frontmatter > "the user"
+	if cfg.OwnerName != "" {
+		ownerName = cfg.OwnerName
+	}
+	if envOwner := os.Getenv(upperName + "_OWNER_NAME"); envOwner != "" {
+		ownerName = envOwner
+	}
+	if ownerName == "" {
+		ownerName = readNameFromMD(filepath.Join(workspace, "USER.md"))
+	}
+	if ownerName == "" {
+		ownerName = "the user"
+	}
+
+	// agentNick: config.json > <APPNAME>_AGENT_NICK env > IDENTITY.md frontmatter > appName
+	if cfg.AgentNick != "" {
+		agentNick = cfg.AgentNick
+	}
+	if envNick := os.Getenv(upperName + "_AGENT_NICK"); envNick != "" {
+		agentNick = envNick
+	}
+	if agentNick == "" {
+		agentNick = readNameFromMD(filepath.Join(workspace, "IDENTITY.md"))
+	}
+	if agentNick == "" {
+		agentNick = appName
 	}
 
 	// avatarUrl: config.json
@@ -498,6 +550,43 @@ func loadConfig() {
 	if cfg.SoulSessionMaxRounds > 0 {
 		soulSessionMaxRounds = cfg.SoulSessionMaxRounds
 	}
+}
+
+// readNameFromMD scans the given markdown file's first ~30 lines for a
+// "Name:" or "**Name:**" line and returns the value. Used to discover
+// ownerName from USER.md and agentNick from IDENTITY.md. Returns empty
+// string if not found or file missing.
+func readNameFromMD(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(raw), "\n")
+	limit := 30
+	if len(lines) < limit {
+		limit = len(lines)
+	}
+	for _, line := range lines[:limit] {
+		l := strings.TrimSpace(line)
+		// strip leading list markers / bold
+		l = strings.TrimPrefix(l, "- ")
+		l = strings.TrimPrefix(l, "* ")
+		l = strings.TrimPrefix(l, "**")
+		// match "Name:" or "Name**:" (markdown bold close mid-key)
+		for _, prefix := range []string{"Name:", "Name**:"} {
+			if strings.HasPrefix(l, prefix) {
+				v := strings.TrimSpace(strings.TrimPrefix(l, prefix))
+				v = strings.TrimPrefix(v, "**")
+				v = strings.TrimSpace(v)
+				// stop at first parenthesis or comma (avoid "Alice (alias)")
+				if i := strings.IndexAny(v, "(,"); i >= 0 {
+					v = strings.TrimSpace(v[:i])
+				}
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // loadBuildMeta reads buildCommit / buildDate from an external meta file next
