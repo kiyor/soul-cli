@@ -112,6 +112,12 @@ type serverSession struct {
 	// reload / session switch, rather than flashing 0% until the next turn.
 	PeakContextTokens int64 `json:"peak_context_tokens,omitempty"`
 
+	// Backend identifies which Backend implementation drives this session.
+	// "cc" (default) for claudeBackend / Claude Code stream-json subprocess;
+	// "codex" for codexBackend / OpenAI codex app-server JSON-RPC. Surfaced
+	// in snapshot() so the Web UI can render a backend badge per session.
+	Backend BackendKind `json:"backend,omitempty"`
+
 	// process is the active Backend driving this session. Today the only
 	// concrete type is *claudeBackend (CC stream-json subprocess); Round 3
 	// adds *codexBackend (JSON-RPC app-server). The field name is left as
@@ -366,11 +372,16 @@ func (s *serverSession) snapshot() map[string]any {
 	}
 	spawnedBy := s.SpawnedBy
 	peakCtx := s.PeakContextTokens
+	backendKind := s.Backend
+	if backendKind == "" {
+		backendKind = BackendCC
+	}
 	snap := map[string]any{
 		"id":                   id,
 		"name":                 s.Name,
 		"project":              s.Project,
 		"model":                s.Model,
+		"backend":              string(backendKind),
 		"status":               s.Status,
 		"category":             s.Category,
 		"tags":                 tags,
@@ -1004,6 +1015,10 @@ type sessionCreateOpts struct {
 	ReplaceSoul bool     // 本我模式 — use --system-prompt-file instead of --append-system-prompt-file
 	ResumeID    string   // Claude Code session ID to resume (adds --resume <id>)
 	SpawnedBy   string   // parent session ID that spawned this one
+	// Backend selects which Backend implementation drives the session.
+	// Empty defaults through resolveBackendKind: explicit > model auto-route
+	// > BackendCC. BackendCodex routes through spawnCodex (Round 4).
+	Backend BackendKind
 }
 
 // createSession spawns a new Claude Code session.
@@ -1068,11 +1083,16 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		tags = []string{}
 	}
 
+	// Backend selection: explicit (from API body / spawn flag) > model
+	// auto-route > BackendCC default. resolveBackendKind handles the priority.
+	backendKind := resolveBackendKind(opts.Backend, opts.Model)
+
 	sess := &serverSession{
 		ID:          id,
 		Name:        opts.Name,
 		Project:     opts.Project,
 		Model:       opts.Model,
+		Backend:     backendKind,
 		Status:      "starting",
 		Category:    category,
 		Tags:        tags,
@@ -1128,7 +1148,9 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		sess.promptFile = promptFile
 	}
 
-	// Spawn Claude Code process
+	// Spawn the chosen Backend. spawnOpts is shared across both paths so
+	// the WorkDir / Model / Resume semantics stay identical; only the
+	// process implementation differs.
 	spawnOpts := sessionOpts{
 		WorkDir:          opts.Project,
 		SystemPromptFile: promptFile,
@@ -1137,11 +1159,24 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		ReplaceSoul:      opts.ReplaceSoul,
 		ResumeID:         opts.ResumeID,
 		ServerSessionID:  id,
+		Backend:          backendKind,
 	}
-	proc, err := spawnClaude(spawnOpts)
-	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("spawn claude: %w", err)
+	var proc Backend
+	switch backendKind {
+	case BackendCodex:
+		cb, err := spawnCodex(spawnOpts)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("spawn codex: %w", err)
+		}
+		proc = cb
+	default:
+		ccb, err := spawnClaude(spawnOpts)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("spawn claude: %w", err)
+		}
+		proc = ccb
 	}
 	sess.mu.Lock()
 	sess.process = proc
@@ -1175,8 +1210,19 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		setSoulEnabledDB(id, false)
 	}
 
-	// Attach stdout→SSE bridge, exit watcher, and stderr drain
-	attachProcessBridge(proc, sess, "server-create", true)
+	// Attach stdout/event → SSE bridge, exit watcher, and stderr drain.
+	// Dispatch on Backend type — codex flows through attachCodexBridge,
+	// CC keeps the existing stream-json bridge.
+	switch p := proc.(type) {
+	case *codexBackend:
+		attachCodexBridge(p, sess, "server-create", true)
+	case *claudeBackend:
+		attachProcessBridge(p, sess, "server-create", true)
+	default:
+		// Should never happen — every Backend in tree is one of the above.
+		fmt.Fprintf(os.Stderr, "[%s] server: unknown backend type %T for session %s\n",
+			appName, proc, shortID(id))
+	}
 
 	return sess, nil
 }

@@ -180,6 +180,7 @@ func handleSpawn(args []string) {
 	bareModel := ""
 	bareName := ""
 	bareProject := ""
+	bareBackend := ""
 	var positional []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -203,6 +204,13 @@ func handleSpawn(args []string) {
 			if i+1 < len(args) {
 				i++
 				bareProject = args[i]
+			}
+		case "--backend":
+			// Round 4: opt into the codex backend (or pin cc explicitly).
+			// Empty / "auto" lets the server auto-route by model.
+			if i+1 < len(args) {
+				i++
+				bareBackend = args[i]
 			}
 		default:
 			positional = append(positional, args[i])
@@ -234,7 +242,7 @@ func handleSpawn(args []string) {
 		if bareName == "" {
 			bareName = fmt.Sprintf("bare-%s", time.Now().Format("0102-1504"))
 		}
-		handleBareSpawn(bareName, bareModel, bareProject, task, wait)
+		handleBareSpawn(bareName, bareModel, bareProject, task, wait, bareBackend)
 		return
 	}
 
@@ -247,7 +255,7 @@ func handleSpawn(args []string) {
 		}
 		fmt.Fprintf(os.Stderr, "usage: %s spawn <agent> \"task\" [--wait]\n", appName)
 		fmt.Fprintf(os.Stderr, "       %s spawn --self main \"task\" [--wait] [--model <model>]  — spawn with own soul\n", appName)
-		fmt.Fprintf(os.Stderr, "       %s spawn --bare --model <model> --project <path> \"task\" [--wait]\n", appName)
+		fmt.Fprintf(os.Stderr, "       %s spawn --bare --model <model> --project <path> [--backend cc|codex|auto] \"task\" [--wait]\n", appName)
 		fmt.Fprintf(os.Stderr, "       %s spawn list          — show recent spawns\n", appName)
 		fmt.Fprintf(os.Stderr, "       %s spawn log <id>      — view spawn output\n\n", appName)
 		fmt.Fprintln(os.Stderr, "Available agents:")
@@ -894,7 +902,11 @@ func (api *serverAPI) waitSession(sessionID string) error {
 
 // handleBareSpawn creates a session without soul files via server API.
 // Used for pure-role tasks like code review where persona is noise.
-func handleBareSpawn(name, model, project, task string, wait bool) {
+//
+// backend (Round 4) is forwarded as the "backend" body field. Empty / "auto"
+// lets the server auto-route by model; "cc" pins Claude Code; "codex" pins
+// the OpenAI codex JSON-RPC backend.
+func handleBareSpawn(name, model, project, task string, wait bool, backend string) {
 	api := newServerAPI()
 	if api == nil {
 		fmt.Fprintf(os.Stderr, "[%s] --bare requires server to be running\n", appName)
@@ -910,6 +922,9 @@ func handleBareSpawn(name, model, project, task string, wait bool) {
 	}
 	if project != "" {
 		payload["project"] = project
+	}
+	if backend != "" {
+		payload["backend"] = backend
 	}
 
 	result, err := api.createSession(payload)

@@ -739,6 +739,11 @@ func handleServer(args []string) {
 			ReplaceSoul    *bool    `json:"replace_soul"` // nil → use config default
 			Mode           string   `json:"mode"`         // "weiran"|"benwo"|"cc"; overrides legacy bools when set
 			SpawnedBy      string   `json:"spawned_by"`   // parent session ID
+			// Backend selects the harness implementation: "cc" (default,
+			// Claude Code stream-json) or "codex" (OpenAI codex JSON-RPC,
+			// Round 4). Empty triggers resolveBackendKind which auto-routes
+			// based on model prefix / agents.codex.model_map.
+			Backend string `json:"backend"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -781,6 +786,30 @@ func handleServer(args []string) {
 			model = cfg.DefaultInteractiveModel
 		}
 
+		// Backend kind: explicit body field wins; empty → auto-route by model.
+		// Validate the explicit value so a typo doesn't silently fall back.
+		var backendKind BackendKind
+		switch strings.ToLower(strings.TrimSpace(req.Backend)) {
+		case "", "auto":
+			// Empty / "auto" → resolveBackendKind decides.
+			backendKind = ""
+		case string(BackendCC), "claude", "claude-code":
+			backendKind = BackendCC
+		case string(BackendCodex), "openai-codex":
+			if !codexEnabled {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "backend=codex requested but agents.codex.enabled=false in config.json",
+				})
+				return
+			}
+			backendKind = BackendCodex
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("unknown backend %q (expected cc|codex|auto)", req.Backend),
+			})
+			return
+		}
+
 		sess, err := sm.createSessionWithOpts(sessionCreateOpts{
 			Name:        req.Name,
 			Project:     req.Project,
@@ -792,6 +821,7 @@ func handleServer(args []string) {
 			Tags:        req.Tags,
 			ReplaceSoul: replaceSoul,
 			SpawnedBy:   req.SpawnedBy,
+			Backend:     backendKind,
 		})
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})

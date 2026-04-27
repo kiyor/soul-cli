@@ -101,11 +101,28 @@ const (
 	codexDefaultApprovalPolicy    = "never"
 )
 
-// codexBackendApprovalDeclineReason is the reason string codex's logs will
-// see attached to default-decline responses in Round 3. Surfaces in the
-// codex side telemetry so you can grep for "weiran-r3-default-decline" and
-// see the round 3 stub at work.
-const codexBackendApprovalDeclineReason = "weiran-r3-default-decline"
+// codexApprovalWaitTimeout caps how long handleApprovalRequest blocks
+// waiting for sendPermissionDecision (or the bridge's hook decision) to
+// reply. Default-decline fires on expiry so the codex turn never deadlocks.
+// 30s matches CC's sendPermissionDecision practical SLA — long enough for
+// the hook chain (in-process) plus user hooks (ms) plus a network-bound
+// AskUserQuestion (multi-second).
+//
+// Declared as a var (not const) so tests can shorten it; production code
+// must not mutate this at runtime.
+var codexApprovalWaitTimeout = 30 * time.Second
+
+// pendingCodexApproval is one in-flight approval request. The handler
+// goroutine blocks on `reply`; sendPermissionDecision (or the timeout
+// path inside handleApprovalRequest) writes the decision payload onto
+// the channel. The handler then converts the generic decision map into
+// the typed CodexCommandExecApprovalResponse / FileChangeApprovalResponse
+// / PermissionsApprovalResponse and returns it to the JSON-RPC client.
+type pendingCodexApproval struct {
+	method string                  // ServerReq* method this approval belongs to
+	params json.RawMessage         // raw params for diagnostics if anything errors out
+	reply  chan map[string]any     // 1-buffered; handler reads, decision-sender writes
+}
 
 // ── Backend struct ──
 
@@ -197,6 +214,16 @@ type codexBackend struct {
 	// kind we mapped) can re-derive its UnifiedItemKind.
 	itemKindMu     sync.Mutex
 	itemKindByID   map[string]UnifiedItemKind
+
+	// pendingApprovals tracks in-flight server-initiated approval requests
+	// (Round 4 async pattern). Keyed by the synthetic approvalID we mint
+	// in handleApprovalRequest and emit on UEvtApproval. The bridge layer
+	// (server_process_codex.go) calls sendPermissionDecision(approvalID,
+	// decision) once it has a verdict from the tool-hook chain or the
+	// human; that decision is delivered onto the entry's reply channel,
+	// the handler converts it to the typed codex response, and returns.
+	approvalsMu      sync.Mutex
+	pendingApprovals map[string]*pendingCodexApproval
 }
 
 // newCodexBackend constructs a codexBackend with default fields populated.
@@ -211,17 +238,36 @@ func newCodexBackend(opts SessionOpts) *codexBackend {
 			cwd = wd
 		}
 	}
+	// Resolve model name through agents.codex.model_map (Round 4) so a
+	// weiran-side identifier like "opus[1m]" can transparently route to
+	// the configured codex model. codexResolveModel falls through to the
+	// raw input when no mapping exists.
+	model := codexResolveModel(opts.Model)
+
+	// Resolve permission profile / approval policy from global config
+	// (agents.codex.* in config.json), falling back to the package
+	// constants if the loader didn't populate them (e.g. in tests).
+	permissionProfile := codexPermissionProfile
+	if permissionProfile == "" {
+		permissionProfile = codexDefaultPermissionProfile
+	}
+	approvalPolicy := codexApprovalPolicy
+	if approvalPolicy == "" {
+		approvalPolicy = codexDefaultApprovalPolicy
+	}
+
 	return &codexBackend{
 		ctx:               ctx,
 		cancel:            cancel,
-		model:             opts.Model,
+		model:             model,
 		cwd:               cwd,
-		permissionProfile: codexDefaultPermissionProfile,
-		approvalPolicy:    codexDefaultApprovalPolicy,
+		permissionProfile: permissionProfile,
+		approvalPolicy:    approvalPolicy,
 		eventsCh:          make(chan UnifiedEvent, codexEventsChanCapacity),
 		initReady:         make(chan struct{}),
 		done:              make(chan struct{}),
 		itemKindByID:      make(map[string]UnifiedItemKind),
+		pendingApprovals:  make(map[string]*pendingCodexApproval),
 	}
 }
 
@@ -238,7 +284,11 @@ func spawnCodex(opts SessionOpts) (*codexBackend, error) {
 
 	// CommandContext means cancel(cb.ctx) → SIGKILL the codex process.
 	// That's the right behavior for both shutdown and ctx-driven cleanup.
-	cmd := exec.CommandContext(cb.ctx, "codex", "app-server", "--listen", "stdio://")
+	binary := codexBinary
+	if binary == "" {
+		binary = "codex"
+	}
+	cmd := exec.CommandContext(cb.ctx, binary, "app-server", "--listen", "stdio://")
 	cmd.Dir = cb.cwd
 	// Inherit env — codex relies on $HOME, $XDG_*, $CODEX_HOME, $OPENAI_API_KEY.
 	cmd.Env = os.Environ()
@@ -537,20 +587,49 @@ func (cb *codexBackend) sendMessage(content string) error {
 	return nil
 }
 
-// sendPermissionDecision is a Round 3 stub. The synchronous default-decline
-// path inside handleApprovalRequest already responded by the time any
-// caller could receive the UEvtApproval event and reply, so this method is
-// effectively a logging hook for Round 4 to refactor.
+// sendPermissionDecision delivers a hook-/UI-supplied decision for an
+// approval request previously emitted as UEvtApproval. The handler
+// goroutine inside handleApprovalRequest is blocked on the matching
+// pendingCodexApproval.reply channel; we look it up by approvalID,
+// remove it from the pending map (no double-deliveries possible), and
+// hand off the decision payload non-blockingly.
 //
-// Round 4 plan: change handleApprovalRequest to register the envelope ID in
-// a pending-approvals map and block on a per-approval reply channel; this
-// method then performs the lookup and triggers the reply.
+// Decision shape mirrors CC's control_response payload to keep the
+// bridge's hook-chain translation backend-agnostic:
+//
+//	map[string]any{
+//	    "behavior":     "allow" | "deny",
+//	    "message":      "<reason>",         // optional, used for deny
+//	    "scope":        "turn" | "session", // optional, permissions only
+//	}
+//
+// codexBackend converts these into the typed Codex* response inside the
+// pending handler so callers don't have to know the codex protocol.
+//
+// Returns an error if the approval id is unknown (already replied to via
+// timeout, or never seen) so the caller can log the dead drop. The handler
+// path is unaffected — pending approvals always either get a real decision
+// or trigger the timeout default-decline.
 func (cb *codexBackend) sendPermissionDecision(requestID string, decision map[string]any) error {
 	if cb == nil {
 		return fmt.Errorf("codex backend: nil receiver")
 	}
-	if cb.logger != nil {
-		cb.logger("sendPermissionDecision(req=%s) — Round 3 stub: default-decline already sent", requestID)
+	cb.approvalsMu.Lock()
+	pending, ok := cb.pendingApprovals[requestID]
+	if ok {
+		delete(cb.pendingApprovals, requestID)
+	}
+	cb.approvalsMu.Unlock()
+	if !ok {
+		return fmt.Errorf("codex backend: no pending approval %q (already decided or expired)", requestID)
+	}
+	// reply is buffered 1; this never blocks because no one else writes here.
+	select {
+	case pending.reply <- decision:
+	default:
+		if cb.logger != nil {
+			cb.logger("sendPermissionDecision(req=%s) — reply channel was already written; dropping", requestID)
+		}
 	}
 	return nil
 }
@@ -1032,14 +1111,39 @@ func (cb *codexBackend) handleErrorNotif(params json.RawMessage) {
 
 // ── Internal: server-initiated request handlers (approvals) ──
 
-// handleApprovalRequest builds a method-aware request handler. Round 3 emits
-// a UEvtApproval for observability and synchronously default-declines, so
-// the backend doesn't deadlock waiting for a hook chain that isn't wired up
-// yet. Round 4 will refactor: register pending → emit → wait → respond.
+// handleApprovalRequest builds a method-aware request handler that
+// implements the Round 4 async approval pattern:
+//
+//  1. Register a pendingCodexApproval keyed by a synthetic approval id.
+//  2. Emit UEvtApproval so the bridge layer (server_process_codex.go) can
+//     run the tool-hook chain and call sendPermissionDecision.
+//  3. Block waiting for either:
+//       - a decision delivered onto pending.reply, OR
+//       - codexApprovalWaitTimeout firing (default-decline), OR
+//       - the backend ctx / done channel signaling shutdown (decline +
+//         cleanup so we don't leak).
+//  4. Translate the generic decision map into the typed Codex response
+//     and return it. The JSON-RPC client serializes our return value back
+//     to the codex process as the response payload for the open request.
+//
+// If sendPermissionDecision wins the race the pending entry is removed
+// there. If the timeout fires first we remove the entry ourselves before
+// returning so a late sendPermissionDecision call gets a clean
+// "no pending approval" error instead of writing into a dropped channel.
 func (cb *codexBackend) handleApprovalRequest(method string) JSONRPCRequestHandler {
 	return func(params json.RawMessage) (any, error) {
 		approvalID := uuid.NewString()
 		subtype, toolName, useID, input := codexApprovalDigest(method, params)
+
+		pending := &pendingCodexApproval{
+			method: method,
+			params: params,
+			reply:  make(chan map[string]any, 1),
+		}
+		cb.approvalsMu.Lock()
+		cb.pendingApprovals[approvalID] = pending
+		cb.approvalsMu.Unlock()
+
 		cb.emit(UnifiedEvent{
 			Kind: UEvtApproval,
 			Payload: mustMarshalRaw(UnifiedApproval{
@@ -1052,10 +1156,82 @@ func (cb *codexBackend) handleApprovalRequest(method string) JSONRPCRequestHandl
 			Raw: params,
 		})
 		if cb.logger != nil {
-			cb.logger("approval %s: default-decline (Round 4 will route through hooks)", method)
+			cb.logger("approval %s id=%s: emitted UEvtApproval, waiting for decision", method, approvalID)
 		}
-		return codexDefaultDecline(method), nil
+
+		var decision map[string]any
+		select {
+		case decision = <-pending.reply:
+			if cb.logger != nil {
+				cb.logger("approval %s id=%s: decision received (behavior=%v)", method, approvalID, decision["behavior"])
+			}
+		case <-time.After(codexApprovalWaitTimeout):
+			cb.approvalsMu.Lock()
+			delete(cb.pendingApprovals, approvalID)
+			cb.approvalsMu.Unlock()
+			if cb.logger != nil {
+				cb.logger("approval %s id=%s: timed out after %s; default-decline", method, approvalID, codexApprovalWaitTimeout)
+			}
+			return codexDefaultDecline(method), nil
+		case <-cb.done:
+			cb.approvalsMu.Lock()
+			delete(cb.pendingApprovals, approvalID)
+			cb.approvalsMu.Unlock()
+			if cb.logger != nil {
+				cb.logger("approval %s id=%s: backend exiting; decline", method, approvalID)
+			}
+			return codexDefaultDecline(method), nil
+		case <-cb.ctx.Done():
+			cb.approvalsMu.Lock()
+			delete(cb.pendingApprovals, approvalID)
+			cb.approvalsMu.Unlock()
+			return codexDefaultDecline(method), nil
+		}
+
+		return codexDecisionToResponse(method, decision), nil
 	}
+}
+
+// codexDecisionToResponse converts the generic CC-shaped decision map
+// (behavior=allow|deny, message?, scope?) into the typed codex protocol
+// response for the matching server request. Unknown shapes default-decline
+// so the codex turn never deadlocks on a malformed reply from a hook.
+func codexDecisionToResponse(method string, decision map[string]any) any {
+	behavior, _ := decision["behavior"].(string)
+	switch method {
+	case ServerReqCommandExecApproval:
+		if behavior == "allow" {
+			return &CodexCommandExecApprovalResponse{Decision: CodexCommandExecApprovalAccept}
+		}
+		return &CodexCommandExecApprovalResponse{Decision: CodexCommandExecApprovalDecline}
+	case ServerReqFileChangeApproval:
+		if behavior == "allow" {
+			return &CodexFileChangeApprovalResponse{Decision: CodexFileChangeApprovalAccept}
+		}
+		return &CodexFileChangeApprovalResponse{Decision: CodexFileChangeApprovalDecline}
+	case ServerReqPermissionsApproval:
+		// Permissions has no allow/deny — codex always wants a permissions
+		// payload + scope. Pass through the requested permissions when the
+		// hook chain says "allow"; otherwise reply with empty perms (no
+		// new grants this turn). Scope defaults to "turn" — the safer
+		// shorter window.
+		scope, _ := decision["scope"].(string)
+		if scope == "" {
+			scope = CodexPermissionsScopeTurn
+		}
+		permsRaw := json.RawMessage(`{}`)
+		if v, ok := decision["permissions"]; ok {
+			if raw, err := json.Marshal(v); err == nil {
+				permsRaw = raw
+			}
+		}
+		return &CodexPermissionsApprovalResponse{
+			Permissions: permsRaw,
+			Scope:       scope,
+		}
+	}
+	// Unknown method — return generic decline.
+	return map[string]any{"decision": "decline"}
 }
 
 // handleUnknownServerRequest catches any */requestApproval or other

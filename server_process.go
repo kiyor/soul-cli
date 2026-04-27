@@ -122,6 +122,12 @@ type sessionOpts struct {
 	// ServerSessionID — the server session ID, injected as
 	// {APPNAME}_SESSION_ID env var for IPC CLI commands.
 	ServerSessionID string
+
+	// Backend selects which Backend implementation to spawn. Empty defaults
+	// to BackendCC (current behavior). BackendCodex routes through
+	// spawnCodex (Round 4). createSessionWithOpts uses resolveBackendKind
+	// to derive this from the session opts + model + global config.
+	Backend BackendKind
 }
 
 // claudeBackend wraps a running Claude Code subprocess with stream-json

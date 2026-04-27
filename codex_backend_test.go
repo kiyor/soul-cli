@@ -307,9 +307,17 @@ found:
 }
 
 // TestCodexBackendApprovalDefaultDecline verifies that a server-initiated
-// command-execution approval gets a decline response within the test
-// deadline AND emits a UEvtApproval for observability.
+// command-execution approval gets a decline response when no hook chain
+// answers within the timeout, AND emits a UEvtApproval for observability.
+//
+// Round 4 changed the default-decline path from synchronous to timeout-
+// based. The test compresses the timeout to 50ms so it can verify the
+// behavior without waiting 30s.
 func TestCodexBackendApprovalDefaultDecline(t *testing.T) {
+	saved := codexApprovalWaitTimeout
+	codexApprovalWaitTimeout = 100 * time.Millisecond
+	defer func() { codexApprovalWaitTimeout = saved }()
+
 	fs := &codexFakeServer{}
 	cb, sw, closer := startCodexBackend(t, fs)
 	defer closer()
@@ -379,6 +387,84 @@ func TestCodexBackendApprovalDefaultDecline(t *testing.T) {
 		}
 	}
 	t.Fatal("never received decline reply")
+}
+
+// TestCodexBackendApprovalAcceptViaSendDecision exercises the Round 4 async
+// pattern: the server pushes an approval, the bridge layer (simulated here
+// by directly reading cb.events()) gets UEvtApproval with the synthetic
+// approval id, calls cb.sendPermissionDecision(id, behavior=allow), and the
+// codex protocol response on the wire encodes accept.
+func TestCodexBackendApprovalAcceptViaSendDecision(t *testing.T) {
+	fs := &codexFakeServer{}
+	cb, sw, closer := startCodexBackend(t, fs)
+	defer closer()
+
+	if !cb.waitInit(2 * time.Second) {
+		t.Fatal("init failed")
+	}
+
+	approvalReq := JSONRPCEnvelope{
+		ID:     json.RawMessage(`"approval-2"`),
+		Method: ServerReqCommandExecApproval,
+		Params: mustRaw(map[string]any{
+			"threadId": "thr_test", "turnId": "turn_test", "itemId": "item_test",
+			"command": "ls /tmp", "cwd": "/tmp",
+		}),
+	}
+	b, _ := json.Marshal(approvalReq)
+	if _, err := sw.Write(append(b, '\n')); err != nil {
+		t.Fatalf("server write: %v", err)
+	}
+
+	// Read UEvtApproval, extract approval id, hand back an "allow".
+	var approvalID string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && approvalID == "" {
+		select {
+		case ev := <-cb.events():
+			if ev.Kind == UEvtApproval {
+				var ua UnifiedApproval
+				if err := json.Unmarshal(ev.Payload, &ua); err != nil {
+					t.Fatalf("decode UnifiedApproval: %v", err)
+				}
+				approvalID = ua.RequestID
+			}
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if approvalID == "" {
+		t.Fatal("never received UEvtApproval id")
+	}
+
+	if err := cb.sendPermissionDecision(approvalID, map[string]any{"behavior": "allow"}); err != nil {
+		t.Fatalf("sendPermissionDecision: %v", err)
+	}
+
+	// Expect accept on the wire.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case env := <-fs.clientReplies:
+			if string(env.ID) != `"approval-2"` {
+				continue
+			}
+			var resp CodexCommandExecApprovalResponse
+			if err := json.Unmarshal(env.Result, &resp); err != nil {
+				t.Fatalf("decode accept: %v", err)
+			}
+			if resp.Decision != CodexCommandExecApprovalAccept {
+				t.Errorf("got decision %q, want accept", resp.Decision)
+			}
+			// Second sendPermissionDecision for the same id should error
+			// (already removed from pending).
+			if err := cb.sendPermissionDecision(approvalID, map[string]any{"behavior": "deny"}); err == nil {
+				t.Errorf("second sendPermissionDecision should error, got nil")
+			}
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	t.Fatal("never received accept reply")
 }
 
 // TestCodexBackendItemNotificationToUnified verifies that a complete item
