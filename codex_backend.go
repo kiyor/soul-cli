@@ -101,16 +101,17 @@ const (
 	codexDefaultApprovalPolicy    = "never"
 )
 
-// codexApprovalWaitTimeout caps how long handleApprovalRequest blocks
-// waiting for sendPermissionDecision (or the bridge's hook decision) to
-// reply. Default-decline fires on expiry so the codex turn never deadlocks.
-// 30s matches CC's sendPermissionDecision practical SLA — long enough for
-// the hook chain (in-process) plus user hooks (ms) plus a network-bound
-// AskUserQuestion (multi-second).
+// codexDefaultApprovalWaitTimeout caps how long handleApprovalRequest
+// blocks waiting for sendPermissionDecision (or the bridge's hook decision)
+// to reply. Default-decline fires on expiry so the codex turn never
+// deadlocks. 30s matches CC's sendPermissionDecision practical SLA — long
+// enough for the hook chain (in-process) plus user hooks (ms) plus a
+// network-bound AskUserQuestion (multi-second).
 //
-// Declared as a var (not const) so tests can shorten it; production code
-// must not mutate this at runtime.
-var codexApprovalWaitTimeout = 30 * time.Second
+// Per-backend overrides live on codexBackend.approvalWaitTimeout so tests
+// can shorten the timeout per-instance instead of mutating a package var
+// (which broke under t.Parallel() / -count N).
+const codexDefaultApprovalWaitTimeout = 30 * time.Second
 
 // pendingCodexApproval is one in-flight approval request. The handler
 // goroutine blocks on `reply`; sendPermissionDecision (or the timeout
@@ -162,6 +163,11 @@ type codexBackend struct {
 	// can override via SessionOpts in Round 4.
 	permissionProfile string
 	approvalPolicy    string
+
+	// approvalWaitTimeout caps how long handleApprovalRequest blocks
+	// waiting for a decision before default-declining. Initialized from
+	// codexDefaultApprovalWaitTimeout; tests override per-instance.
+	approvalWaitTimeout time.Duration
 
 	// threadID is the codex thread.id captured from thread/start's response
 	// (and re-confirmed by the thread/started notification). atomic.Pointer
@@ -257,17 +263,18 @@ func newCodexBackend(opts SessionOpts) *codexBackend {
 	}
 
 	return &codexBackend{
-		ctx:               ctx,
-		cancel:            cancel,
-		model:             model,
-		cwd:               cwd,
-		permissionProfile: permissionProfile,
-		approvalPolicy:    approvalPolicy,
-		eventsCh:          make(chan UnifiedEvent, codexEventsChanCapacity),
-		initReady:         make(chan struct{}),
-		done:              make(chan struct{}),
-		itemKindByID:      make(map[string]UnifiedItemKind),
-		pendingApprovals:  make(map[string]*pendingCodexApproval),
+		ctx:                 ctx,
+		cancel:              cancel,
+		model:               model,
+		cwd:                 cwd,
+		permissionProfile:   permissionProfile,
+		approvalPolicy:      approvalPolicy,
+		approvalWaitTimeout: codexDefaultApprovalWaitTimeout,
+		eventsCh:            make(chan UnifiedEvent, codexEventsChanCapacity),
+		initReady:           make(chan struct{}),
+		done:                make(chan struct{}),
+		itemKindByID:        make(map[string]UnifiedItemKind),
+		pendingApprovals:    make(map[string]*pendingCodexApproval),
 	}
 }
 
@@ -1207,12 +1214,12 @@ func (cb *codexBackend) handleApprovalRequest(method string) JSONRPCRequestHandl
 			if cb.logger != nil {
 				cb.logger("approval %s id=%s: decision received (behavior=%v)", method, approvalID, decision["behavior"])
 			}
-		case <-time.After(codexApprovalWaitTimeout):
+		case <-time.After(cb.approvalWaitTimeout):
 			cb.approvalsMu.Lock()
 			delete(cb.pendingApprovals, approvalID)
 			cb.approvalsMu.Unlock()
 			if cb.logger != nil {
-				cb.logger("approval %s id=%s: timed out after %s; default-decline", method, approvalID, codexApprovalWaitTimeout)
+				cb.logger("approval %s id=%s: timed out after %s; default-decline", method, approvalID, cb.approvalWaitTimeout)
 			}
 			return codexDefaultDecline(method), nil
 		case <-cb.done:

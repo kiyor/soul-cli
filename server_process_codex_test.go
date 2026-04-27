@@ -278,12 +278,9 @@ func TestAttachCodexBridge_SuppressNextCloseSkipsClose(t *testing.T) {
 }
 
 func TestAttachCodexBridge_ApprovalDefaultAllowsWhenNoRule(t *testing.T) {
-	// Override timeout to keep the test fast.
-	saved := codexApprovalWaitTimeout
-	codexApprovalWaitTimeout = 100 * time.Millisecond
-	defer func() { codexApprovalWaitTimeout = saved }()
-
 	sess, cb, _ := newCodexBridgeTestSession(t)
+	// Override timeout per-instance to keep the test fast.
+	cb.approvalWaitTimeout = 100 * time.Millisecond
 	attachCodexBridge(cb, sess, "server-create", false)
 
 	// Manually register a pending approval (simulates handleApprovalRequest

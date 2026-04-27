@@ -314,13 +314,10 @@ found:
 // based. The test compresses the timeout to 50ms so it can verify the
 // behavior without waiting 30s.
 func TestCodexBackendApprovalDefaultDecline(t *testing.T) {
-	saved := codexApprovalWaitTimeout
-	codexApprovalWaitTimeout = 100 * time.Millisecond
-	defer func() { codexApprovalWaitTimeout = saved }()
-
 	fs := &codexFakeServer{}
 	cb, sw, closer := startCodexBackend(t, fs)
 	defer closer()
+	cb.approvalWaitTimeout = 100 * time.Millisecond
 
 	if !cb.waitInit(2 * time.Second) {
 		t.Fatal("init failed")
