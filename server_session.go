@@ -1251,6 +1251,11 @@ func (sm *sessionManager) listSessions() []map[string]any {
 // setChrome reloads a session's underlying claude process with --chrome
 // toggled on/off. The serverSession (broadcaster, history, name, etc.) is
 // preserved across the reload — only the subprocess is swapped.
+//
+// Codex backend: chrome is a CC-only concept. Returning an error here
+// prevents silently swapping the codex subprocess for a fresh CC process
+// and losing thread state. The HTTP handler surfaces the error to the
+// caller as 5xx.
 func (sm *sessionManager) setChrome(id string, enabled bool) error {
 	sess := sm.getSession(id)
 	if sess == nil {
@@ -1258,6 +1263,10 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 	}
 
 	sess.mu.Lock()
+	if sess.Backend == BackendCodex {
+		sess.mu.Unlock()
+		return fmt.Errorf("setChrome not supported on codex backend")
+	}
 	if sess.ChromeEnabled == enabled && sess.process != nil && sess.process.alive() {
 		sess.mu.Unlock()
 		return nil // no-op
@@ -1355,6 +1364,13 @@ func (sm *sessionManager) setMode(id, mode string) error {
 	}
 
 	sess.mu.Lock()
+	// Codex backend: mode (weiran/benwo/cc) is a CC system-prompt concept.
+	// Reloading would silently swap the codex subprocess for a CC process
+	// and lose thread state. Return an error instead.
+	if sess.Backend == BackendCodex {
+		sess.mu.Unlock()
+		return fmt.Errorf("setMode not supported on codex backend")
+	}
 	// No-op if already in target mode and process alive
 	if sess.SoulEnabled == soulEnabled && sess.ReplaceSoul == replaceSoul &&
 		sess.process != nil && sess.process.alive() {
@@ -1446,6 +1462,14 @@ func (sm *sessionManager) setModel(id string, model string) error {
 	}
 
 	sess.mu.Lock()
+	// Codex backend: codex doesn't support mid-thread setModel (per
+	// codex_backend.go header comment). A future implementation would
+	// thread/resume the codex process to swap models; until then, return
+	// an error rather than silently swapping for a CC process.
+	if sess.Backend == BackendCodex {
+		sess.mu.Unlock()
+		return fmt.Errorf("setModel not supported on codex backend")
+	}
 	if sess.Model == model && sess.process != nil && sess.process.alive() {
 		sess.mu.Unlock()
 		return nil // no-op
