@@ -117,10 +117,9 @@ func runCodexEventLoop(cb *codexBackend, sess *serverSession, source string, ful
 
 	for {
 		select {
-		case ev, ok := <-cb.events():
-			if !ok {
-				return
-			}
+		case ev := <-cb.events():
+			// eventsCh is never closed by the producer; backend exit is
+			// signaled exclusively via cb.done. No `!ok` check needed.
 			handleCodexUnifiedEvent(cb, sess, ev, &initEmitted, source, fullSync)
 		case <-cb.done:
 			// Drain any events the producer wrote before close so the front-end
@@ -137,10 +136,9 @@ func runCodexEventLoop(cb *codexBackend, sess *serverSession, source string, ful
 func drainCodexEvents(cb *codexBackend, sess *serverSession, initEmitted *bool, source string, fullSync bool) {
 	for {
 		select {
-		case ev, ok := <-cb.events():
-			if !ok {
-				return
-			}
+		case ev := <-cb.events():
+			// eventsCh is never closed; we drain whatever is buffered then
+			// exit on the default branch when empty.
 			handleCodexUnifiedEvent(cb, sess, ev, initEmitted, source, fullSync)
 		default:
 			return
