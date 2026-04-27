@@ -400,9 +400,9 @@ func watchCodexExit(cb *codexBackend, sess *serverSession) {
 		sess.setStatus("error")
 		return
 	}
-	if cb.exitCode != 0 || cb.rateLimited.Load() {
+	if exitCode := cb.exitCode.Load(); exitCode != 0 || cb.rateLimited.Load() {
 		fmt.Fprintf(os.Stderr, "[%s] server: codex session %s exited code=%d rate_limited=%v\n",
-			appName, shortID(sess.ID), cb.exitCode, cb.rateLimited.Load())
+			appName, shortID(sess.ID), exitCode, cb.rateLimited.Load())
 		sess.setStatus("error")
 		return
 	}

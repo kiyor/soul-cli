@@ -187,7 +187,7 @@ type codexBackend struct {
 	// transport closes (test path). doneOnce prevents double-close.
 	done     chan struct{}
 	doneOnce sync.Once
-	exitCode int
+	exitCode atomic.Int32
 
 	// rateLimited / suppressNextCloseFlag mirror the same atomic flags on
 	// claudeBackend. The latter is consulted by Round 4's bridge to skip
@@ -380,9 +380,9 @@ func (cb *codexBackend) watchProcessExit() {
 	}
 	if err := cb.cmd.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			cb.exitCode = exitErr.ExitCode()
+			cb.exitCode.Store(int32(exitErr.ExitCode()))
 		} else {
-			cb.exitCode = 1
+			cb.exitCode.Store(1)
 		}
 	}
 	cb.markDone()
