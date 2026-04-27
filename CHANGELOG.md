@@ -1,6 +1,71 @@
 # Changelog
 
-## Unreleased
+## v1.12.0
+
+### Tmux Drawer (Web UI)
+
+- **Read-only tmux session snoop** in the right-side drawer: lists active panes with last activity, opens individual pane scrollback. Alpine.js declarative port (-115 LOC net vs imperative).
+- **Subagent panel backfill**: `/api/sessions/{id}/subagents` endpoint + frontend backfill on session switch — Claude Code native subagents now show in the drawer with full history (prior version showed `1/1` with no list).
+
+### DB Explorer UI
+
+- **`/api/db/{sources,tables,schema,query,ui}`**: read-only SQLite explorer. SELECT-only with row cap + timeout. Minimal embedded HTML at `/api/db/ui` (textarea + Run + table) for ad-hoc queries against `sessions.db` and friends.
+
+### Tool-Hook System
+
+- **`tool_hook` subcommand**: PreToolUse + PostToolUse path-aware system-reminder injection. YAML rules in `tool-hooks.yaml` matched against tool name + path globs, audit table in `sessions.db`.
+- **Event dispatcher**: covers PreToolUse, PostToolUse, UserPromptSubmit, Stop, SessionStart, SessionEnd. All events audited.
+- **`tool-hook stats / search`**: per-rule hit counts and full-text search across audit log; weekly cleanup of zero-hit rules.
+- **`tool-hook disable`**: temporarily silence rules without editing YAML.
+- **Skip-input mirror**: PostToolUse handler now respects `skip_input` the same way PreToolUse does (was missing — fixed after a degraded session showed 5 ignored corrections).
+
+### Evolve Cycle Log
+
+- **`evolve_db`**: persists structured evolve cycle summaries (mode, started_at, files_touched, errors, charter_drift) to SQLite — queryable history of self-evolution runs without grepping markdown reports.
+- **Charter enforcement**: evolve refuses to roll back uncommitted changes; `srcDir` auto-detection; per-skill telemetry (which skills fired, hit rates).
+
+### Provider Refactor
+
+- **`pkg/provider/{openai,gemini,ollama}`**: embedded provider proxies extracted into separate packages — clearer ownership, easier to test in isolation.
+- **Gemini provider**: server-hosted gemini proxy wired through `resolveProvider` + `injectProviderEnv`. `--model gemini/...` routes correctly.
+- **Ollama provider**: Anthropic→Ollama protocol proxy (Anthropic messages → OpenAI-compatible `/v1/chat`).
+
+### Proxy / Translator Hardening
+
+- **Always route through local monitoring proxy**, regardless of OAuth state — telemetry is never lost.
+- **OAuth warming**: keep OAuth token validated in background; only inject proxy URL when token is valid.
+- **Translator gap fixes**: `stop_reason` mapping, `thinking` blocks, `effort` → `thinking` mapping, tool stripping for non-tool-capable models.
+- **Codex error mapping**: proper error type + `Retry-After` header propagation.
+- **gpt-5.4 family**: downgrade `effort=minimal` to `none` (model rejects `minimal`).
+- **TZ fix**: usage 1h/6h window filter was silently broken by mac/linux TZ mismatch.
+- **Concurrent-map panic fix**: proxy log writes serialized.
+
+### Session & UI
+
+- **Stable session ID across resume & rehydrate**: weiran session ID persists, decoupled from underlying CC session ID.
+- **Session mode enum**: `weiran` / `benwo` / `cc` — explicit mode field instead of inferring from flags. CC sessions get stable URL by `cc-id`.
+- **Compact UI**: subagent drawer, path completion in input box, batch session meta fetch (1 round trip vs N), dynamic branding from config.
+- **Session search optimizations**: recent-cmd shortcut, timestamp fix, auto-index on first search.
+- **`netprobe` subcommand**: built-in network reachability probe (ICMP + TCP + DNS) for diagnosing proxy/upstream issues.
+- **Web split**: CSS + components moved to separate files; Alpine.js added for declarative panels.
+- **AUQ auto-skip**: AskUserQuestion auto-skip when input is unambiguous.
+- **Ctx % peak restore**: context window peak indicator restored across resumes.
+
+### Reliability
+
+- **JSONL scanner buffer bump**: 64 MB max line size — large tool result blocks no longer truncate.
+- **Background task tracker**: `/api/sessions/{id}/state` endpoint exposes tool calls in flight, queue depth, last activity.
+- **`limitedBuffer` data race fix**, **flaky TG test fix**.
+- **Linux bootstrap** + deployment guide; `claudeBin` PATH fallback for non-mac hosts.
+- **Model fallback chain**: when primary model fails, fall back through configured chain; opus[1m] context window suffix preserved.
+
+### Security & Code Review
+
+- Multiple rounds of code review fixes: template injection, model validation, bridge cleanup, concurrency bugs, nil panics, FTS segmentation edge cases.
+
+### Open-Source Adaptation
+
+- **Stripped personal hardcodes**: agent nick (`weiran` / `未然`), owner name, vendor string now come from compile-time `-ldflags` knobs (`agentNick`, `ownerName`, `VENDOR`) — same binary buildable as `weiran`, `soul`, or any other identity.
 
 ### Session Rehydration (Server Restart Resilience)
 
