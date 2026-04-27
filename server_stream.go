@@ -194,7 +194,7 @@ func serveSSE(w http.ResponseWriter, r *http.Request, broadcaster *sseBroadcaste
 // Web UI through an ask_user_question SSE event. If the callback is nil
 // or returns false, bridgeStdout auto-allows the tool (preserving prior
 // bypassPermissions behavior for tools that unexpectedly reach this path).
-func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage), onMemoryAudit func(*memoryAuditEntry), onCanUseTool func(json.RawMessage) bool, onTask func(event string, raw json.RawMessage), onUsage func(total int64)) {
+func bridgeStdout(proc *claudeBackend, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage), onMemoryAudit func(*memoryAuditEntry), onCanUseTool func(json.RawMessage) bool, onTask func(event string, raw json.RawMessage), onUsage func(total int64)) {
 	// Track pending memory tool_use ops waiting for their tool_result
 	pendingMemOps := make(map[string]*pendingMemoryOp)
 
@@ -291,7 +291,7 @@ func bridgeStdout(proc *claudeProcess, broadcaster *sseBroadcaster, onInit func(
 // responsible for eventually writing the matching control_response. For
 // any other outcome (non-can_use_tool, unrecognized tool, callback absent
 // or returns false), auto-allow so bypassPermissions mode keeps working.
-func handleCanUseTool(proc *claudeProcess, raw json.RawMessage, onCanUseTool func(json.RawMessage) bool) {
+func handleCanUseTool(proc *claudeBackend, raw json.RawMessage, onCanUseTool func(json.RawMessage) bool) {
 	var peek struct {
 		RequestID string `json:"request_id"`
 		Request   struct {

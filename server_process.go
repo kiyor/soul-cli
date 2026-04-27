@@ -124,8 +124,11 @@ type sessionOpts struct {
 	ServerSessionID string
 }
 
-// claudeProcess wraps a running Claude Code subprocess with stream-json pipes.
-type claudeProcess struct {
+// claudeBackend wraps a running Claude Code subprocess with stream-json
+// pipes. It is one of the two Backend implementations (the other is
+// codexBackend in Round 3); both satisfy the Backend interface defined in
+// backend.go via lowercase package-private methods.
+type claudeBackend struct {
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 	stdout   io.ReadCloser
@@ -157,8 +160,15 @@ type claudeProcess struct {
 	waiters   map[string]chan json.RawMessage
 }
 
-// spawnClaude starts a Claude Code subprocess in stream-json mode.
-func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
+// spawnCC starts a Claude Code subprocess in stream-json mode and returns a
+// fully-initialized *claudeBackend ready for waitInit + sendMessage.
+//
+// Naming: the Backend abstraction calls this "starting CC", matching the
+// equivalent codex factory spawnCodex in Round 3. The previous name
+// (spawnClaude) is preserved as a thin alias below so external in-tree
+// references — notably the Haiku worker pool that holds *claudeBackend
+// directly — keep compiling without churn.
+func spawnCC(opts sessionOpts) (*claudeBackend, error) {
 	args := []string{
 		"-p",
 		"--input-format", "stream-json",
@@ -253,7 +263,7 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 		return nil, fmt.Errorf("start: %w", err)
 	}
 
-	proc := &claudeProcess{
+	proc := &claudeBackend{
 		cmd:        cmd,
 		stdin:      stdin,
 		stdout:     stdout,
@@ -282,7 +292,7 @@ func spawnClaude(opts sessionOpts) (*claudeProcess, error) {
 
 // signalInit marks the process as initialized and ready to accept user messages.
 // Called by bridgeStdout when the init message is received. Safe to call multiple times.
-func (p *claudeProcess) signalInit() {
+func (p *claudeBackend) signalInit() {
 	select {
 	case <-p.initReady:
 		// already signaled
@@ -293,7 +303,7 @@ func (p *claudeProcess) signalInit() {
 
 // waitInit blocks until the process emits its init message or the timeout expires.
 // Returns true if init was received, false on timeout or process exit.
-func (p *claudeProcess) waitInit(timeout time.Duration) bool {
+func (p *claudeBackend) waitInit(timeout time.Duration) bool {
 	select {
 	case <-p.initReady:
 		return true
@@ -307,7 +317,7 @@ func (p *claudeProcess) waitInit(timeout time.Duration) bool {
 // sendMessage writes a user message to Claude Code's stdin.
 // If the message contains ![alt](url) image patterns, extracts images and
 // sends a content array with text + image blocks (base64 encoded).
-func (p *claudeProcess) sendMessage(content string) error {
+func (p *claudeBackend) sendMessage(content string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -337,7 +347,7 @@ func (p *claudeProcess) sendMessage(content string) error {
 // subprocess blocks until we reply. For 'allow', pass updatedInput
 // (already merged with the answers the user picked). For 'deny', pass
 // a reason in message and leave updatedInput as nil.
-func (p *claudeProcess) sendPermissionDecision(requestID string, decision map[string]any) error {
+func (p *claudeBackend) sendPermissionDecision(requestID string, decision map[string]any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -493,7 +503,7 @@ func guessMediaType(filename string) string {
 }
 
 // controlRequest sends a control request (interrupt, set_model, context_usage, etc.).
-func (p *claudeProcess) controlRequest(subtype string, extra map[string]any) error {
+func (p *claudeBackend) controlRequest(subtype string, extra map[string]any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -517,7 +527,7 @@ func (p *claudeProcess) controlRequest(subtype string, extra map[string]any) err
 }
 
 // controlRequestSync sends a control request and waits for the matching response.
-func (p *claudeProcess) controlRequestSync(subtype string, extra map[string]any, timeout time.Duration) (json.RawMessage, error) {
+func (p *claudeBackend) controlRequestSync(subtype string, extra map[string]any, timeout time.Duration) (json.RawMessage, error) {
 	reqID := fmt.Sprintf("req_%d_%s", time.Now().UnixMilli(), randHex(4))
 
 	// Register waiter before sending
@@ -569,7 +579,7 @@ func (p *claudeProcess) controlRequestSync(subtype string, extra map[string]any,
 // deliverResponse routes a control_response to the matching waiter (if any).
 // Claude Code format: {"type":"control_response","response":{"subtype":"success","request_id":"req_xxx","response":{...}}}
 // Returns true if a waiter consumed it.
-func (p *claudeProcess) deliverResponse(raw json.RawMessage) bool {
+func (p *claudeBackend) deliverResponse(raw json.RawMessage) bool {
 	var peek struct {
 		Response struct {
 			RequestID string `json:"request_id"`
@@ -593,7 +603,7 @@ func (p *claudeProcess) deliverResponse(raw json.RawMessage) bool {
 
 // shutdown gracefully stops the Claude Code process.
 // Close stdin → wait 5s → SIGTERM → wait 5s → SIGKILL.
-func (p *claudeProcess) shutdown() {
+func (p *claudeBackend) shutdown() {
 	p.mu.Lock()
 	p.stdin.Close()
 	p.mu.Unlock()
@@ -613,9 +623,50 @@ func (p *claudeProcess) shutdown() {
 	<-p.done
 }
 
+// info returns the backend's static identity. The session-id field is
+// best-effort: the CC subprocess only emits its own session id on the
+// first init message, so callers that need it before init landed should
+// fall back to the persisted DB record (server_session.go does both).
+func (p *claudeBackend) info() BackendInfo {
+	return BackendInfo{Kind: BackendCC}
+}
+
+// markRateLimited flags this backend as rate-limited. Setting the atomic
+// flag is also done directly by drainStderr (which holds *claudeBackend),
+// but session-layer code that only sees the Backend interface goes through
+// this method so the rateLimited atomic stays an internal CC field.
+func (p *claudeBackend) markRateLimited() {
+	if p == nil {
+		return
+	}
+	p.rateLimited.Store(true)
+}
+
+// killProcess sends SIGKILL to the underlying CC process. Used by
+// ephemeral session rate-limit fallback paths to force-terminate even
+// when CC would otherwise exit cleanly on 429.
+func (p *claudeBackend) killProcess() {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return
+	}
+	_ = p.cmd.Process.Kill()
+}
+
+// suppressNextClose flags this backend so its SSE bridge skips the
+// trailing "close" event on the next process exit. Used by reload paths
+// (chrome / mode / model toggle) where the UI must NOT see "Session
+// ended." between the old and new subprocess. Wraps the suppressClose
+// atomic so session-layer code can stay backend-agnostic.
+func (p *claudeBackend) suppressNextClose() {
+	if p == nil {
+		return
+	}
+	p.suppressClose.Store(true)
+}
+
 // alive returns true if the process hasn't exited yet.
 // Safe to call on nil receiver (returns false).
-func (p *claudeProcess) alive() bool {
+func (p *claudeBackend) alive() bool {
 	if p == nil {
 		return false
 	}
@@ -630,7 +681,7 @@ func (p *claudeProcess) alive() bool {
 // readLines reads stdout line by line, parses JSON, and calls handler for each valid message.
 // Non-JSON lines (e.g. [SandboxDebug]) are silently skipped.
 // Blocks until stdout is closed (process exits or stdin closed).
-func (p *claudeProcess) readLines(handler func(msgType string, raw json.RawMessage)) {
+func (p *claudeBackend) readLines(handler func(msgType string, raw json.RawMessage)) {
 	scanner := bufio.NewScanner(p.stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024) // 1MB buffer
 
@@ -659,6 +710,16 @@ func (p *claudeProcess) readLines(handler func(msgType string, raw json.RawMessa
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] readLines scanner error: %v\n", appName, err)
 	}
+}
+
+// spawnClaude is the legacy name for spawnCC. Kept as a thin alias so
+// in-tree callers that hold *claudeBackend directly (e.g. haikuPool.ensureSession,
+// session manager spawn paths) keep compiling without churn while Round 1
+// extracts the Backend abstraction. Both names produce the exact same
+// *claudeBackend; new code should prefer spawnCC for symmetry with the
+// codex factory landing in Round 3.
+func spawnClaude(opts sessionOpts) (*claudeBackend, error) {
+	return spawnCC(opts)
 }
 
 // ── Helpers ──

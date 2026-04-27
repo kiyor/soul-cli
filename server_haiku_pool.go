@@ -23,7 +23,7 @@ const (
 
 type haikuPool struct {
 	mu          sync.Mutex
-	proc        *claudeProcess
+	proc        *claudeBackend
 	scanner     *lineScanner
 	totalTokens int
 	lastUsed    time.Time
