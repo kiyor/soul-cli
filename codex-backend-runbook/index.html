@@ -1,0 +1,1792 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Give your Claude Code a persistent soul — identity, memory, and self-evolution across sessions.">
+      
+      
+      
+        <link rel="canonical" href="https://kiyor.github.io/soul-cli/codex-backend-runbook/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Codex Backend — Operations Runbook - soul-cli</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="pink">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#codex-backend-operations-runbook" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="soul-cli" class="md-header__button md-logo" aria-label="soul-cli" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            soul-cli
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Codex Backend — Operations Runbook
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="pink"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="pink"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/kiyor/soul-cli" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    kiyor/soul-cli
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="soul-cli" class="md-nav__button md-logo" aria-label="soul-cli" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    soul-cli
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/kiyor/soul-cli" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    kiyor/soul-cli
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core Concepts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/soul-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Soul Files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory System
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Server Mode & Web UI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/automation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Automation (Cron / Heartbeat / Evolve)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/multi-agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multiple Agents
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Server API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    FAQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-tldr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1 — TL;DR
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2 — Installation
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2 — Installation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-codex-cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 codex CLI
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-authenticate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 Authenticate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#23-weiran-build-with-codex-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.3 weiran build with codex backend
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#24-restart-the-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.4 Restart the server
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-enabling-the-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3 — Enabling the backend
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-switching-a-session-to-codex" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4 — Switching a session to codex
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4 — Switching a session to codex">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-explicit-per-session-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 Explicit per-session (API)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-spawn-flag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 spawn flag
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#43-auto-route-by-model-name" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 Auto-route by model name
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#44-resuming" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.4 Resuming
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-codex-absent-handshake-failure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5 — Codex absent / handshake failure
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-metrics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6 — Metrics
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-hook-behavior-cc-vs-codex" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7 — Hook behavior — CC vs Codex
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-known-limitations-round-5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8 — Known limitations (Round 5)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="8 — Known limitations (Round 5)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#81-no-mid-thread-set_model-resume" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 No mid-thread set_model / resume
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#82-no-fallback-chain" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2 No fallback chain
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#83-front-end-render" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.3 Front-end render
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#84-tool-hook-audit-absent-for-codex" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.4 Tool-hook audit absent for codex
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#85-permission_profile-is-a-typed-enum-not-a-string" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.5 permission_profile is a typed enum, not a string
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9 — Troubleshooting
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="9 — Troubleshooting">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#91-codex-backend-not-enabled-http-400-on-post-apisessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.1 "codex backend not enabled" (HTTP 400 on POST /api/sessions)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#92-failinitinitialize-eof-after-spawn" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2 failInit("initialize", "EOF") after spawn
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#93-failinitthreadstart-invalid-type-string" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.3 failInit("thread/start", "invalid type: string ...")
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#94-approvals-never-resolve-turn-hangs-at-thinking-indefinitely" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.4 Approvals never resolve (turn hangs at "thinking" indefinitely)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#95-smoke-script-stage-1-passes-stage-2-fails" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.5 Smoke script stage 1 passes, stage 2 fails
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#96-heartbeat-sent-a-codex-self-check-failed-telegram" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.6 Heartbeat sent a "[codex-self-check] FAILED" Telegram
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10-rollback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10 — Rollback
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11-files-of-interest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11 — Files of interest
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#12-round-6-open-items" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12 — Round 6+ open items
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/kiyor/soul-cli/edit/master/docs/codex-backend-runbook.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="codex-backend-operations-runbook">Codex Backend — Operations Runbook<a class="headerlink" href="#codex-backend-operations-runbook" title="Permanent link">&para;</a></h1>
+<blockquote>
+<p>Round 5 deliverable. Reflects state at commit <code>feat/codex-backend@&lt;HEAD&gt;</code>.
+Companion docs: <a href="../codex-backend-plan/"><code>codex-backend-plan.md</code></a> (architecture)
+· <a href="../codex-app-server/"><code>codex-app-server.md</code></a> (protocol summary)</p>
+</blockquote>
+<p>This runbook is for the operator who has to install, enable, switch on,
+debug or roll back the codex backend on a running weiran server.</p>
+<hr />
+<h2 id="1-tldr">1 — TL;DR<a class="headerlink" href="#1-tldr" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What is "codex backend"?</td>
+<td>A second Backend implementation that drives <code>codex app-server</code> over JSON-RPC 2.0 instead of <code>claude</code> over stream-json. Same <code>Backend</code> interface, same SSE / IPC / Telegram fanout.</td>
+</tr>
+<tr>
+<td>Default?</td>
+<td><strong>No.</strong> All existing sessions still spawn <code>claude</code>. Codex is opt-in per <code>agents.codex.enabled = true</code> and per-session via <code>backend: "codex"</code> or a model-prefix / <code>model_map</code> lookup.</td>
+</tr>
+<tr>
+<td>Smallest experiment</td>
+<td><code>bash scripts/codex-smoke.sh</code> (stage 1 only — no server needed)</td>
+</tr>
+<tr>
+<td>Production smoke</td>
+<td>Same script with <code>WEIRAN_SERVER_URL</code> + <code>WEIRAN_AUTH_TOKEN</code> set</td>
+</tr>
+<tr>
+<td>Where do metrics live?</td>
+<td><code>GET /api/codex/metrics</code> (no auth) — see §6</td>
+</tr>
+<tr>
+<td>Daily liveness check</td>
+<td><code>hooks/heartbeat.d/95-codex-self-check.sh</code> runs once/day at 04:00 local</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="2-installation">2 — Installation<a class="headerlink" href="#2-installation" title="Permanent link">&para;</a></h2>
+<h3 id="21-codex-cli">2.1 codex CLI<a class="headerlink" href="#21-codex-cli" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>npm<span class="w"> </span>install<span class="w"> </span>-g<span class="w"> </span>@openai/codex
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>which<span class="w"> </span>codex<span class="w">                        </span><span class="c1"># /opt/homebrew/bin/codex on mac</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>codex<span class="w"> </span>--version<span class="w">                    </span><span class="c1"># codex-cli 0.125.0 or newer</span>
+</code></pre></div>
+<h3 id="22-authenticate">2.2 Authenticate<a class="headerlink" href="#22-authenticate" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>codex<span class="w"> </span>login
+</code></pre></div>
+<p>This populates <code>~/.codex/</code> (auth.json, config.toml, etc.). Without it
+<code>codex app-server</code> will start but every <code>thread/start</code> rejects.</p>
+<p>Verify:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>ls<span class="w"> </span>~/.codex/auth.json<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span>OK
+</code></pre></div>
+<h3 id="23-weiran-build-with-codex-backend">2.3 weiran build with codex backend<a class="headerlink" href="#23-weiran-build-with-codex-backend" title="Permanent link">&para;</a></h3>
+<p>The codex backend lives on <code>feat/codex-backend</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nb">cd</span><span class="w"> </span>~/.openclaw/workspace/scripts/weiran
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>git<span class="w"> </span>checkout<span class="w"> </span>feat/codex-backend
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>make<span class="w">            </span><span class="c1"># build with ldflags + codesign</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>make<span class="w"> </span>install<span class="w">    </span><span class="c1"># → ~/.local/bin/weiran</span>
+</code></pre></div>
+<p><strong>Always <code>make</code>. Never bare <code>go build</code></strong> — the codesign step is needed
+on macOS for Keychain access (Telegram tokens etc.).</p>
+<h3 id="24-restart-the-server">2.4 Restart the server<a class="headerlink" href="#24-restart-the-server" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>make<span class="w"> </span>server-restart
+</code></pre></div>
+<p>This stops the launchd <code>weiran</code> job, replaces the binary, starts it
+again. Existing CC sessions are rehydrated; codex sessions (none yet)
+would not be (no resume implemented yet — see §8).</p>
+<hr />
+<h2 id="3-enabling-the-backend">3 — Enabling the backend<a class="headerlink" href="#3-enabling-the-backend" title="Permanent link">&para;</a></h2>
+<p>Edit <code>~/.openclaw/data/config.json</code> (the file the server reads on
+startup; <code>weiran config</code> shows the resolved values):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>{
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>  &quot;agents&quot;: {
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>    &quot;codex&quot;: {
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>      &quot;enabled&quot;: true,
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>      &quot;binary&quot;: &quot;codex&quot;,                                  // optional, PATH lookup
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>      &quot;model_map&quot;: {
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>        &quot;opus[1m]&quot;:             &quot;gpt-5.5&quot;,                // weiran name → codex name
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>        &quot;codex/gpt-5.4-codex&quot;:  &quot;gpt-5.4-codex&quot;
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>      },
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>      &quot;approval_policy&quot;: &quot;never&quot;,                         // codex-side default
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>      &quot;permission_profile&quot;: &quot;&quot;                             // see §7
+<a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>    }
+<a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>  }
+<a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a>}
+</code></pre></div>
+<p>After edit:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>make<span class="w"> </span>server-restart
+</code></pre></div>
+<p>Quick sanity check:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8090/api/codex/metrics<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+<p>You should see the JSON snapshot with <code>backend_sessions_total</code> empty
+and <code>codex_handshake.ok_total = 0</code>. The endpoint existing at all is
+proof the Round 5 binary is live.</p>
+<hr />
+<h2 id="4-switching-a-session-to-codex">4 — Switching a session to codex<a class="headerlink" href="#4-switching-a-session-to-codex" title="Permanent link">&para;</a></h2>
+<p>Three ways, in priority order:</p>
+<h3 id="41-explicit-per-session-api">4.1 Explicit per-session (API)<a class="headerlink" href="#41-explicit-per-session-api" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://127.0.0.1:8090/api/sessions<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="nv">$WEIRAN_AUTH_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="s1">    &quot;name&quot;:&quot;my-codex-test&quot;,</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="s1">    &quot;backend&quot;:&quot;codex&quot;,</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="s1">    &quot;model&quot;:&quot;gpt-5.5&quot;,</span>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="s1">    &quot;project&quot;:&quot;/tmp&quot;,</span>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="s1">    &quot;initial_message&quot;:&quot;reply ok&quot;</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="s1">  }&#39;</span>
+</code></pre></div>
+<p>Strict validation: <code>backend</code> must be <code>cc</code>, <code>codex</code>, or <code>auto</code>. <code>codex</code>
+without <code>agents.codex.enabled</code> returns HTTP 400.</p>
+<h3 id="42-spawn-flag">4.2 spawn flag<a class="headerlink" href="#42-spawn-flag" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>weiran<span class="w"> </span>spawn<span class="w"> </span>--bare<span class="w"> </span>--backend<span class="w"> </span>codex<span class="w"> </span>--model<span class="w"> </span>gpt-5.5<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span>--project<span class="w"> </span>/tmp<span class="w"> </span><span class="s1">&#39;reply with one word: ok&#39;</span>
+</code></pre></div>
+<p><code>--backend auto</code> (default) is identical to omitting the flag — let the
+model name auto-route.</p>
+<h3 id="43-auto-route-by-model-name">4.3 Auto-route by model name<a class="headerlink" href="#43-auto-route-by-model-name" title="Permanent link">&para;</a></h3>
+<p><code>resolveBackendKind</code> in <code>codex_routing.go</code> runs:</p>
+<ol>
+<li>Explicit <code>backend: "codex"</code> → codex (caller wins).</li>
+<li>Explicit <code>backend: "cc"</code> → cc.</li>
+<li><code>agents.codex.enabled=false</code> → cc (default).</li>
+<li>Model has <code>codex/</code> prefix → codex.</li>
+<li>Model is a key in <code>model_map</code> → codex.</li>
+<li>Otherwise → cc.</li>
+</ol>
+<p>So with the example <code>model_map</code> above:</p>
+<table>
+<thead>
+<tr>
+<th>Model passed in</th>
+<th>Backend</th>
+<th>Codex-side model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>opus[1m]</code></td>
+<td>codex</td>
+<td><code>gpt-5.5</code></td>
+</tr>
+<tr>
+<td><code>codex/gpt-5.4-codex</code></td>
+<td>codex</td>
+<td><code>gpt-5.4-codex</code></td>
+</tr>
+<tr>
+<td><code>claude-haiku</code></td>
+<td>cc</td>
+<td>n/a</td>
+</tr>
+</tbody>
+</table>
+<h3 id="44-resuming">4.4 Resuming<a class="headerlink" href="#44-resuming" title="Permanent link">&para;</a></h3>
+<p><strong>Codex backend has no resume yet.</strong> Round 5 leaves <code>set_model</code> and
+<code>thread/resume</code> unimplemented. A weiran session that ran on codex,
+then is restarted, will not pick up where the codex thread left off.
+The CC backend's resume flow is unchanged.</p>
+<hr />
+<h2 id="5-codex-absent-handshake-failure">5 — Codex absent / handshake failure<a class="headerlink" href="#5-codex-absent-handshake-failure" title="Permanent link">&para;</a></h2>
+<p>What happens when codex is broken:</p>
+<ol>
+<li>
+<p><strong>Binary missing</strong> (<code>codex</code> not on PATH) → <code>spawnCodex</code> returns
+   <code>codex start: exec: "codex": executable file not found in $PATH</code>.
+   The session create returns HTTP 500 with that message in the body.
+   The session is never registered in the manager.</p>
+</li>
+<li>
+<p><strong><code>codex</code> runs but <code>app-server</code> rejects</strong> (e.g. version too old) →
+   handshake stage 1 (<code>initialize</code>) errors out, <code>failInit("initialize",
+   …)</code> runs, the codex backend transitions to <code>error</code>, and a
+   <code>codex_backend_error</code> SSE event is broadcast with <code>stage</code> + <code>reason</code>.</p>
+</li>
+<li>
+<p><strong><code>thread/start</code> rejected</strong> (auth bad, model unknown) → same path,
+   <code>failInit("thread/start", …)</code>. The runbook §9 has the diagnosis
+   table.</p>
+</li>
+<li>
+<p><strong>Codex hangs after handshake start</strong> → 10s <code>codexHandshakeTimeout</code>
+   in <code>codex_backend.go</code> fires <code>failInit("initialize", "context
+   deadline exceeded")</code>. Session moves to <code>error</code>.</p>
+</li>
+</ol>
+<p>In all four cases, <code>codex_handshake.failures_total</code> is incremented
+(see §6). No silent downgrade to CC ever happens — that would mask
+misconfiguration. To fall back to cc, the operator either:</p>
+<ul>
+<li>Removes <code>agents.codex.enabled = true</code> from config and restarts, or</li>
+<li>Calls the API again with <code>backend: "cc"</code>, or</li>
+<li>Fixes the underlying codex problem.</li>
+</ul>
+<hr />
+<h2 id="6-metrics">6 — Metrics<a class="headerlink" href="#6-metrics" title="Permanent link">&para;</a></h2>
+<p><code>GET /api/codex/metrics</code> (no auth) returns:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="p">{</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span><span class="nt">&quot;uptime_seconds&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3601</span><span class="p">,</span>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">  </span><span class="nt">&quot;backend_sessions_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="w">    </span><span class="nt">&quot;cc&quot;</span><span class="p">:</span><span class="w">    </span><span class="mi">127</span><span class="p">,</span>
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">    </span><span class="nt">&quot;codex&quot;</span><span class="p">:</span><span class="w">   </span><span class="mi">3</span>
+<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="w">  </span><span class="p">},</span>
+<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="w">  </span><span class="nt">&quot;codex_handshake&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="w">    </span><span class="nt">&quot;ok_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="w">    </span><span class="nt">&quot;failures_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span>
+<a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="w">  </span><span class="p">},</span>
+<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="w">  </span><span class="nt">&quot;codex_approvals&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a><span class="w">    </span><span class="nt">&quot;allow_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span>
+<a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="w">    </span><span class="nt">&quot;deny_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a><span class="w">    </span><span class="nt">&quot;ask_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a><span class="w">    </span><span class="nt">&quot;timeout_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a><span class="w">    </span><span class="nt">&quot;default_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">17</span>
+<a id="__codelineno-10-17" name="__codelineno-10-17" href="#__codelineno-10-17"></a><span class="w">  </span><span class="p">},</span>
+<a id="__codelineno-10-18" name="__codelineno-10-18" href="#__codelineno-10-18"></a><span class="w">  </span><span class="nt">&quot;codex_jsonrpc&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-10-19" name="__codelineno-10-19" href="#__codelineno-10-19"></a><span class="w">    </span><span class="nt">&quot;calls_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">412</span><span class="p">,</span>
+<a id="__codelineno-10-20" name="__codelineno-10-20" href="#__codelineno-10-20"></a><span class="w">    </span><span class="nt">&quot;sum_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">19387</span><span class="p">,</span>
+<a id="__codelineno-10-21" name="__codelineno-10-21" href="#__codelineno-10-21"></a><span class="w">    </span><span class="nt">&quot;mean_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">47.05</span><span class="p">,</span>
+<a id="__codelineno-10-22" name="__codelineno-10-22" href="#__codelineno-10-22"></a><span class="w">    </span><span class="nt">&quot;buckets_le_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-10-23" name="__codelineno-10-23" href="#__codelineno-10-23"></a><span class="w">      </span><span class="nt">&quot;50&quot;</span><span class="p">:</span><span class="w">     </span><span class="mi">312</span><span class="p">,</span>
+<a id="__codelineno-10-24" name="__codelineno-10-24" href="#__codelineno-10-24"></a><span class="w">      </span><span class="nt">&quot;200&quot;</span><span class="p">:</span><span class="w">     </span><span class="mi">85</span><span class="p">,</span>
+<a id="__codelineno-10-25" name="__codelineno-10-25" href="#__codelineno-10-25"></a><span class="w">      </span><span class="nt">&quot;1000&quot;</span><span class="p">:</span><span class="w">    </span><span class="mi">13</span><span class="p">,</span>
+<a id="__codelineno-10-26" name="__codelineno-10-26" href="#__codelineno-10-26"></a><span class="w">      </span><span class="nt">&quot;5000&quot;</span><span class="p">:</span><span class="w">     </span><span class="mi">2</span><span class="p">,</span>
+<a id="__codelineno-10-27" name="__codelineno-10-27" href="#__codelineno-10-27"></a><span class="w">      </span><span class="nt">&quot;30000&quot;</span><span class="p">:</span><span class="w">    </span><span class="mi">0</span><span class="p">,</span>
+<a id="__codelineno-10-28" name="__codelineno-10-28" href="#__codelineno-10-28"></a><span class="w">      </span><span class="nt">&quot;+Inf&quot;</span><span class="p">:</span><span class="w">     </span><span class="mi">0</span>
+<a id="__codelineno-10-29" name="__codelineno-10-29" href="#__codelineno-10-29"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-10-30" name="__codelineno-10-30" href="#__codelineno-10-30"></a><span class="w">  </span><span class="p">},</span>
+<a id="__codelineno-10-31" name="__codelineno-10-31" href="#__codelineno-10-31"></a><span class="w">  </span><span class="nt">&quot;generated_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-04-27T22:15:01Z&quot;</span>
+<a id="__codelineno-10-32" name="__codelineno-10-32" href="#__codelineno-10-32"></a><span class="p">}</span>
+</code></pre></div>
+<p>Counter semantics:</p>
+<table>
+<thead>
+<tr>
+<th>Counter</th>
+<th>Incremented by</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>backend_sessions_total{kind}</code></td>
+<td>createSessionWithOpts</td>
+<td>Every successful spawn — bumped after the backend is in <code>sess.process</code></td>
+</tr>
+<tr>
+<td><code>codex_handshake.{ok,failures}_total</code></td>
+<td>runHandshake / failInit</td>
+<td>Each thread/start completion or any of the 4 fail paths</td>
+</tr>
+<tr>
+<td><code>codex_approvals.{allow,deny,ask,timeout,default}_total</code></td>
+<td>handleCodexApproval</td>
+<td>One per <code>UEvtApproval</code> after the hook chain decides</td>
+</tr>
+<tr>
+<td><code>codex_jsonrpc.calls_total</code> + buckets</td>
+<td>CodexJSONRPCClient.Call</td>
+<td>Per-call, only on completion (not on transport-level errors)</td>
+</tr>
+</tbody>
+</table>
+<p>There is <strong>no</strong> prometheus exporter. If you want Grafana, scrape the
+JSON via your existing <code>node-exporter</code> or write a thin Go shim. The
+shape is stable.</p>
+<hr />
+<h2 id="7-hook-behavior-cc-vs-codex">7 — Hook behavior — CC vs Codex<a class="headerlink" href="#7-hook-behavior-cc-vs-codex" title="Permanent link">&para;</a></h2>
+<p>Both backends route tool approvals through the same <code>tool-hook</code> rules
+in <code>tool-hooks.yaml</code>, but the wire path differs:</p>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>CC backend</th>
+<th>Codex backend</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Hook entry</td>
+<td><code>claude</code> invokes <code>~/.claude/hooks/PreToolUse</code> (subprocess)</td>
+<td><code>codex_app-server</code> sends a JSON-RPC server request, weiran receives it inside the same Go process</td>
+</tr>
+<tr>
+<td>Evaluator</td>
+<td><code>tool_hook.go</code> PreToolUse handler runs as subprocess, reads stdin/stdout</td>
+<td><code>tool_hook.go evaluateToolHookForApproval</code> (in-process function — Round 4 addition)</td>
+</tr>
+<tr>
+<td>Decision shape</td>
+<td>stdout JSON <code>{permissionDecision: allow|deny|ask, …}</code></td>
+<td>typed <code>Codex{CommandExec,FileChange,Permissions}ApprovalResponse</code> (<code>accept</code> / <code>decline</code>)</td>
+</tr>
+<tr>
+<td>Audit</td>
+<td><code>tool_hook_audit</code> table in <code>sessions.db</code></td>
+<td><strong>Not currently audited</strong> (Round 5 limitation, see §8)</td>
+</tr>
+<tr>
+<td><code>ask_user_question</code></td>
+<td>SSE event from CC → existing /answer-question endpoint → CC stdin</td>
+<td>SSE event → /answer-question → <code>sess.process.sendPermissionDecision</code> (Backend interface — backend-agnostic)</td>
+</tr>
+<tr>
+<td>Default if no rule</td>
+<td>bypassPermissions = allow</td>
+<td>Same — handleCodexApproval auto-allows</td>
+</tr>
+<tr>
+<td>Default on bridge dead</td>
+<td>n/a (CC dies takes session with it)</td>
+<td>30s <code>codexApprovalWaitTimeout</code> → default-decline so codex thread doesn't deadlock</td>
+</tr>
+</tbody>
+</table>
+<p>Decision <strong>semantics</strong> match. Decision <strong>plumbing</strong> differs.</p>
+<p>If you change a tool-hook YAML rule, both backends pick it up — the
+codex side reads the same <code>loadToolHookConfig</code>.</p>
+<hr />
+<h2 id="8-known-limitations-round-5">8 — Known limitations (Round 5)<a class="headerlink" href="#8-known-limitations-round-5" title="Permanent link">&para;</a></h2>
+<p>These will be addressed in subsequent rounds; they are not bugs.</p>
+<h3 id="81-no-mid-thread-set_model-resume">8.1 No mid-thread set_model / resume<a class="headerlink" href="#81-no-mid-thread-set_model-resume" title="Permanent link">&para;</a></h3>
+<p><code>codexBackend.controlRequest</code> returns an error for <code>set_model</code>. Codex
+doesn't support changing the model on an existing thread; the only path
+is to call <code>thread/resume</code> with a new thread, which weiran does not
+yet wire into the CC-style fallback chain.</p>
+<p>If you change a session's model and that session is on codex, the
+control request errors out and the SSE shows <code>error_response</code> — the
+backend stays alive and on the original model.</p>
+<h3 id="82-no-fallback-chain">8.2 No fallback chain<a class="headerlink" href="#82-no-fallback-chain" title="Permanent link">&para;</a></h3>
+<p>For CC, when a session hits 429 / token-budget-exhausted, weiran can
+restart it on the next entry of <code>defaultModelFallbacks</code>. The codex
+backend doesn't participate in that chain yet — <code>watchCodexExit</code> flips
+the session to <code>error</code> and the operator retries manually.</p>
+<h3 id="83-front-end-render">8.3 Front-end render<a class="headerlink" href="#83-front-end-render" title="Permanent link">&para;</a></h3>
+<p>The Web UI doesn't have a renderer for the new <code>codex_*</code> SSE event
+types (<code>codex_turn_started</code>, <code>codex_item_delta</code>, etc.). It will
+display the synthesized CC-shaped <code>result</code> event correctly so basic
+"did the turn finish? was there an error?" works, but per-token
+streaming for codex turns isn't visualized — it shows up only in the
+SSE log.</p>
+<p>The fix is <code>web/dashboard/handlers.ts</code> — add cases that mirror the
+CC <code>assistant</code> handler for the codex event names. Rough outline lives
+as a TODO in <code>server_process_codex.go</code> near the SSE emission switch.</p>
+<h3 id="84-tool-hook-audit-absent-for-codex">8.4 Tool-hook audit absent for codex<a class="headerlink" href="#84-tool-hook-audit-absent-for-codex" title="Permanent link">&para;</a></h3>
+<p>The CC stream-json hook subprocess writes to <code>tool_hook_audit</code> so we
+can run weekly stats with <code>weiran tool-hook stats --days 7</code>. The
+in-process codex evaluator (<code>evaluateToolHookForApproval</code>) does not.
+Audit-equivalent path: read <code>codex_approvals.*</code> from
+<code>/api/codex/metrics</code> for aggregate counts; per-rule attribution
+requires Round 6.</p>
+<h3 id="85-permission_profile-is-a-typed-enum-not-a-string">8.5 <code>permission_profile</code> is a typed enum, not a string<a class="headerlink" href="#85-permission_profile-is-a-typed-enum-not-a-string" title="Permanent link">&para;</a></h3>
+<p>Codex 0.125.0 changed <code>permissionProfile</code> from a string ("workspaceWrite",
+"disabled", …) to an internally-tagged enum:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>{ &quot;type&quot;: &quot;managed&quot;,  &quot;network&quot;: {...}, &quot;fileSystem&quot;: {...} }
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>{ &quot;type&quot;: &quot;disabled&quot; }
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>{ &quot;type&quot;: &quot;external&quot;, &quot;network&quot;: {...} }
+</code></pre></div>
+<p><code>codex_backend.go runHandshake</code> calls <code>codexPermissionProfilePayload</code>
+which:</p>
+<ul>
+<li>omits the field when value is <code>""</code>, <code>"default"</code>, or <code>"workspaceWrite"</code>
+  (so codex's own default kicks in),</li>
+<li>emits <code>{"type":"disabled"}</code> when value is <code>"disabled"</code>,</li>
+<li>passes any value starting with <code>{</code> through verbatim as raw JSON.</li>
+</ul>
+<p>Other strings are silently dropped. To set a managed profile right now,
+write the full JSON literal in <code>agents.codex.permission_profile</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>&quot;permission_profile&quot;: &quot;{\&quot;type\&quot;:\&quot;managed\&quot;,\&quot;network\&quot;:{\&quot;allowAll\&quot;:true},\&quot;fileSystem\&quot;:{\&quot;allowAll\&quot;:true}}&quot;
+</code></pre></div>
+<p>A typed config field is on the Round 6 list.</p>
+<hr />
+<h2 id="9-troubleshooting">9 — Troubleshooting<a class="headerlink" href="#9-troubleshooting" title="Permanent link">&para;</a></h2>
+<h3 id="91-codex-backend-not-enabled-http-400-on-post-apisessions">9.1 "codex backend not enabled" (HTTP 400 on POST /api/sessions)<a class="headerlink" href="#91-codex-backend-not-enabled-http-400-on-post-apisessions" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>{&quot;error&quot;:&quot;backend codex not enabled (agents.codex.enabled = false)&quot;}
+</code></pre></div>
+<p>Fix: edit <code>config.json</code>, <code>agents.codex.enabled = true</code>, then
+<code>make server-restart</code>. Verify with <code>curl /api/codex/metrics</code>.</p>
+<h3 id="92-failinitinitialize-eof-after-spawn">9.2 <code>failInit("initialize", "EOF")</code> after spawn<a class="headerlink" href="#92-failinitinitialize-eof-after-spawn" title="Permanent link">&para;</a></h3>
+<p>Codex died before responding. Common causes:</p>
+<ol>
+<li>Binary not codex (e.g. an old one) — <code>codex --version</code> should be
+   ≥ 0.125.0 for the current protocol.</li>
+<li>Crashed at startup. Reproduce with the smoke script — it dumps the
+   last 20 lines of codex stderr on failure.</li>
+</ol>
+<h3 id="93-failinitthreadstart-invalid-type-string">9.3 <code>failInit("thread/start", "invalid type: string ...")</code><a class="headerlink" href="#93-failinitthreadstart-invalid-type-string" title="Permanent link">&para;</a></h3>
+<p>Codex's <code>thread/start</code> validator rejected one of our typed fields.
+Most common: <code>permissionProfile</code> set to a bare string (see §8.5).
+Fix: leave the value empty in config, or set it to a JSON literal.</p>
+<h3 id="94-approvals-never-resolve-turn-hangs-at-thinking-indefinitely">9.4 Approvals never resolve (turn hangs at "thinking" indefinitely)<a class="headerlink" href="#94-approvals-never-resolve-turn-hangs-at-thinking-indefinitely" title="Permanent link">&para;</a></h3>
+<ol>
+<li>Check <code>/api/codex/metrics</code> <code>codex_approvals.timeout_total</code> — if
+   that's growing, the bridge is alive but the hook chain is
+   indecisive (defaults to <code>default-decline</code> after 30s).</li>
+<li>Check tool-hook YAML for stale <code>tool</code> matchers — the codex <code>toolName</code>
+   is the codex protocol name (<code>commandExec</code>, <code>fileChange</code>,
+   <code>permissionsRequest</code>), not the CC tool name. Rules written for
+   CC's <code>Bash</code>/<code>Edit</code>/etc. won't fire.</li>
+<li>SSE log shows <code>codex_hook_decision</code> events when a hook actually
+   decided. No <code>codex_hook_decision</code> event after the <code>ask_user_question</code>
+   event = the user never answered the prompt.</li>
+</ol>
+<h3 id="95-smoke-script-stage-1-passes-stage-2-fails">9.5 Smoke script stage 1 passes, stage 2 fails<a class="headerlink" href="#95-smoke-script-stage-1-passes-stage-2-fails" title="Permanent link">&para;</a></h3>
+<p>That means the codex protocol works but the weiran wiring is broken.
+Check in order:</p>
+<ul>
+<li>Server logs (<code>tail -50 ~/.openclaw/data/server.log</code> or
+  <code>journalctl --user -u weiran</code> depending on platform).</li>
+<li><code>/api/codex/metrics</code> returns 200 → server has Round 5 endpoints.</li>
+<li>POST /api/sessions response body — usually has the actual error.</li>
+</ul>
+<h3 id="96-heartbeat-sent-a-codex-self-check-failed-telegram">9.6 Heartbeat sent a "[codex-self-check] FAILED" Telegram<a class="headerlink" href="#96-heartbeat-sent-a-codex-self-check-failed-telegram" title="Permanent link">&para;</a></h3>
+<p>The 04:00 daily probe failed. The Telegram message has the last 20
+lines of stderr; the most common causes are §9.2 and §9.3. The
+heartbeat hook never blocks the heartbeat itself (always exits 0) so
+the <code>*-codex-*</code> failure won't cascade.</p>
+<p>To re-run manually:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="nv">WEIRAN_DB</span><span class="o">=</span>/tmp<span class="w"> </span>/Users/kiyor/.openclaw/workspace/scripts/weiran/hooks/heartbeat.d/95-codex-self-check.sh
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>ls<span class="w"> </span>/tmp/.codex-self-check-*<span class="w">    </span><span class="c1"># marker so it doesn&#39;t re-run today</span>
+</code></pre></div>
+<p>(Setting <code>WEIRAN_DB=/tmp</code> writes the once-per-day marker to /tmp instead
+of the production state dir, so the real state isn't poisoned.)</p>
+<hr />
+<h2 id="10-rollback">10 — Rollback<a class="headerlink" href="#10-rollback" title="Permanent link">&para;</a></h2>
+<p>Codex backend is opt-in. To turn it off without rebuilding:</p>
+<ol>
+<li>Edit <code>config.json</code> → <code>agents.codex.enabled: false</code>.</li>
+<li><code>make server-restart</code>.</li>
+</ol>
+<p>Existing codex sessions are not migrated — they get killed when the
+server restarts (the codex subprocess exits). The CC sessions go
+through the normal rehydrate path.</p>
+<p>To go further and remove the binary entirely, check out <code>main</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>git<span class="w"> </span>checkout<span class="w"> </span>main
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>make<span class="w"> </span>install
+<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>make<span class="w"> </span>server-restart
+</code></pre></div>
+<p>The CC backend behavior is identical between branches — Round 1
+preserved every CC code path verbatim.</p>
+<hr />
+<h2 id="11-files-of-interest">11 — Files of interest<a class="headerlink" href="#11-files-of-interest" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>What's in it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>backend.go</code></td>
+<td><code>Backend</code> interface, <code>BackendKind</code>, <code>BackendInfo</code>, <code>SessionOpts</code></td>
+</tr>
+<tr>
+<td><code>unified_events.go</code></td>
+<td><code>UnifiedEvent</code> envelope; <code>UEvt*</code> kinds</td>
+</tr>
+<tr>
+<td><code>codex_jsonrpc.go</code></td>
+<td>JSON-RPC 2.0 client (NDJSON over stdio); request/notification dispatch; per-call latency record</td>
+</tr>
+<tr>
+<td><code>codex_protocol.go</code></td>
+<td>Typed Go structs for the codex app-server protocol subset</td>
+</tr>
+<tr>
+<td><code>codex_backend.go</code></td>
+<td><code>Backend</code> impl wrapping the codex subprocess; handshake; approval async pending; shutdown</td>
+</tr>
+<tr>
+<td><code>codex_routing.go</code></td>
+<td><code>resolveBackendKind</code> / <code>isCodexModel</code> / <code>codexResolveModel</code></td>
+</tr>
+<tr>
+<td><code>codex_metrics.go</code></td>
+<td>In-process counters + <code>/api/codex/metrics</code> handler</td>
+</tr>
+<tr>
+<td><code>server_process_codex.go</code></td>
+<td>Bridge from <code>cb.events()</code> → SSE; approval routing through <code>evaluateToolHookForApproval</code></td>
+</tr>
+<tr>
+<td><code>tool_hook.go evaluateToolHookForApproval</code></td>
+<td>In-process PreToolUse evaluator codex shares with CC</td>
+</tr>
+<tr>
+<td><code>scripts/codex-smoke.sh</code></td>
+<td>This runbook's <code>make smoke</code></td>
+</tr>
+<tr>
+<td><code>hooks/heartbeat.d/95-codex-self-check.sh</code></td>
+<td>Daily 04:00 liveness probe</td>
+</tr>
+<tr>
+<td><code>docs/codex-backend-plan.md</code></td>
+<td>Full architecture design</td>
+</tr>
+<tr>
+<td><code>docs/codex-app-server.md</code></td>
+<td>Protocol summary (initialize / thread / turn / item / approval)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="12-round-6-open-items">12 — Round 6+ open items<a class="headerlink" href="#12-round-6-open-items" title="Permanent link">&para;</a></h2>
+<p>Tracked here for the next person who touches this code:</p>
+<ul class="task-list">
+<li class="task-list-item"><label class="task-list-control"><input type="checkbox" disabled/><span class="task-list-indicator"></span></label> <code>set_model</code> via <code>thread/resume</code> — needs codex-side thread persistence and a resumeID survives across weiran restarts.</li>
+<li class="task-list-item"><label class="task-list-control"><input type="checkbox" disabled/><span class="task-list-indicator"></span></label> Codex into the fallback model chain — <code>watchCodexExit</code> calls <code>tryNextFallback</code> on rate-limit.</li>
+<li class="task-list-item"><label class="task-list-control"><input type="checkbox" disabled/><span class="task-list-indicator"></span></label> Front-end renderer for <code>codex_*</code> SSE events.</li>
+<li class="task-list-item"><label class="task-list-control"><input type="checkbox" disabled/><span class="task-list-indicator"></span></label> <code>tool_hook_audit</code> write from <code>evaluateToolHookForApproval</code> (currently CC-only).</li>
+<li class="task-list-item"><label class="task-list-control"><input type="checkbox" disabled/><span class="task-list-indicator"></span></label> Typed <code>permission_profile</code> config field (object, not string with JSON-escape).</li>
+<li class="task-list-item"><label class="task-list-control"><input type="checkbox" disabled/><span class="task-list-indicator"></span></label> Prometheus <code>/metrics</code> endpoint exposing the codex counters in standard exposition format.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/kiyor/soul-cli" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.tracking", "navigation.sections", "navigation.expand", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate", "content.tabs.link", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
