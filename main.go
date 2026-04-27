@@ -108,6 +108,16 @@ var (
 	// 0 = disabled. Default 30 (~7.5h at 15-min intervals).
 	soulSessionMaxRounds int
 
+	// Codex backend config (from config.json "agents.codex.*"). Round 4
+	// adds the OpenAI codex app-server JSON-RPC backend as an alternative
+	// to the CC stream-json subprocess. All fields optional; codexEnabled
+	// defaults to false so existing users see no behavior change.
+	codexEnabled           bool              // master switch
+	codexBinary            string            // path to codex binary; default "codex" via PATH
+	codexModelMap          map[string]string // weiran model name → codex model name (e.g. "opus[1m]" → "gpt-5.1-codex-max")
+	codexPermissionProfile string            // default codex permission profile (e.g. "workspaceWrite")
+	codexApprovalPolicy    string            // default codex approval policy (e.g. "never")
+
 	launchDir  string // original working directory before chdir to workspace
 	galContext string // GAL save JSON injected into prompt for resume
 
@@ -430,6 +440,20 @@ func loadConfig() {
 	type serverBlock struct {
 		DefaultInteractiveModel string `json:"defaultInteractiveModel"` // default model for interactive sessions (e.g. "opus[1m]")
 	}
+	// codexBlock is the agents.codex.* sub-tree of config.json. All fields
+	// optional. Round 4 introduces the OpenAI codex app-server backend as an
+	// alternative to the CC stream-json subprocess. Disabled by default —
+	// users opt in by setting `agents.codex.enabled: true`.
+	type codexBlock struct {
+		Enabled           bool              `json:"enabled"`            // master switch
+		Binary            string            `json:"binary"`             // path to codex binary; default "codex" via PATH
+		ModelMap          map[string]string `json:"model_map"`          // weiran model name → codex model name
+		PermissionProfile string            `json:"permission_profile"` // codex permission profile (default "workspaceWrite")
+		ApprovalPolicy    string            `json:"approval_policy"`    // codex approval policy (default "never")
+	}
+	type agentsBlock struct {
+		Codex codexBlock `json:"codex"`
+	}
 	type appConfig struct {
 		JiraToken            string   `json:"jiraToken"`
 		TelegramChatID       string   `json:"telegramChatID"`
@@ -444,6 +468,7 @@ func loadConfig() {
 		DefaultModelFallbacks []string `json:"defaultModelFallbacks"` // fallback models for non-interactive modes (e.g. ["minimax/MiniMax-M2.7-highspeed"])
 		SoulSessionMaxRounds  int      `json:"soulSessionMaxRounds"`  // 0 = disabled, default 30
 		Server                serverBlock `json:"server"`             // server-side config (shared with server mode)
+		Agents                agentsBlock `json:"agents"`             // per-backend agent config (Round 4: codex)
 	}
 	var cfg appConfig
 	if cfgData != nil {
@@ -549,6 +574,23 @@ func loadConfig() {
 	soulSessionMaxRounds = 30 // default
 	if cfg.SoulSessionMaxRounds > 0 {
 		soulSessionMaxRounds = cfg.SoulSessionMaxRounds
+	}
+
+	// agents.codex.* — Round 4 backend config. Disabled by default; users
+	// opt in via agents.codex.enabled in config.json.
+	codexEnabled = cfg.Agents.Codex.Enabled
+	codexBinary = cfg.Agents.Codex.Binary
+	if codexBinary == "" {
+		codexBinary = "codex"
+	}
+	codexModelMap = cfg.Agents.Codex.ModelMap
+	codexPermissionProfile = cfg.Agents.Codex.PermissionProfile
+	if codexPermissionProfile == "" {
+		codexPermissionProfile = codexDefaultPermissionProfile
+	}
+	codexApprovalPolicy = cfg.Agents.Codex.ApprovalPolicy
+	if codexApprovalPolicy == "" {
+		codexApprovalPolicy = codexDefaultApprovalPolicy
 	}
 }
 

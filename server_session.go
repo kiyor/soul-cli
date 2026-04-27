@@ -112,7 +112,20 @@ type serverSession struct {
 	// reload / session switch, rather than flashing 0% until the next turn.
 	PeakContextTokens int64 `json:"peak_context_tokens,omitempty"`
 
-	process     *claudeProcess
+	// Backend identifies which Backend implementation drives this session.
+	// "cc" (default) for claudeBackend / Claude Code stream-json subprocess;
+	// "codex" for codexBackend / OpenAI codex app-server JSON-RPC. Surfaced
+	// in snapshot() so the Web UI can render a backend badge per session.
+	Backend BackendKind `json:"backend,omitempty"`
+
+	// process is the active Backend driving this session. Today the only
+	// concrete type is *claudeBackend (CC stream-json subprocess); Round 3
+	// adds *codexBackend (JSON-RPC app-server). The field name is left as
+	// "process" for diff continuity with the pre-Backend codebase — every
+	// existing call site (sess.process.alive(), sess.process.sendMessage()
+	// …) keeps compiling because the lowercase methods on Backend match
+	// claudeBackend's existing method set.
+	process     Backend
 	broadcaster *sseBroadcaster
 	bridgeDone  chan struct{} // closed when the current bridgeStdout goroutine exits
 	promptFile  string        // temp file for soul prompt
@@ -359,11 +372,16 @@ func (s *serverSession) snapshot() map[string]any {
 	}
 	spawnedBy := s.SpawnedBy
 	peakCtx := s.PeakContextTokens
+	backendKind := s.Backend
+	if backendKind == "" {
+		backendKind = BackendCC
+	}
 	snap := map[string]any{
 		"id":                   id,
 		"name":                 s.Name,
 		"project":              s.Project,
 		"model":                s.Model,
+		"backend":              string(backendKind),
 		"status":               s.Status,
 		"category":             s.Category,
 		"tags":                 tags,
@@ -467,9 +485,14 @@ func makeOnResult(sess *serverSession, fullSync bool) func(json.RawMessage) {
 						strings.Contains(lower, "too many requests") || strings.Contains(lower, "quota exceeded") {
 						proc := sess.process
 						sess.mu.Unlock()
-						proc.rateLimited.Store(true)
+						// Route through Backend methods so this code path
+						// works for any Backend (CC today, codex Round 3).
+						// The atomic flag and SIGKILL are CC implementation
+						// details, but markRateLimited / killProcess are
+						// part of the interface contract.
+						proc.markRateLimited()
 						fmt.Fprintf(os.Stderr, "[%s] server: detected 429/rate-limit in result message, killing process for fallback\n", appName)
-						proc.cmd.Process.Kill()
+						proc.killProcess()
 						return
 					}
 				}
@@ -513,11 +536,15 @@ func makeOnResult(sess *serverSession, fullSync bool) func(json.RawMessage) {
 	}
 }
 
-// watchExit monitors process exit and updates session status.
-// For ephemeral sessions (heartbeat/cron/evolve), if the exit is classified as
-// rate_limit and fallback models are available, automatically retries with the
-// next fallback model.
-func watchExit(proc *claudeProcess, sess *serverSession) {
+// watchExit monitors a CC backend process exit and updates session status.
+// For ephemeral sessions (heartbeat/cron/evolve), if the exit is classified
+// as rate_limit and fallback models are available, automatically retries
+// with the next fallback model.
+//
+// Takes *claudeBackend (not Backend) because rate-limit classification reads
+// CC-specific atomic / stderr fields directly. Round 3's codexBackend gets
+// its own watchExit equivalent that classifies JSON-RPC error codes.
+func watchExit(proc *claudeBackend, sess *serverSession) {
 	go func() {
 		<-proc.done
 		sess.mu.Lock()
@@ -674,10 +701,15 @@ func (s *serverSession) waitBridgeDone() {
 }
 
 // drainStderr reads stderr to prevent pipe deadlock, capturing the last 4KB
-// in proc.stderrTail for exit event classification (e.g. rate_limit detection).
-// For ephemeral sessions with fallback models, it also detects 429/rate-limit
-// errors in real time and kills the process to trigger model fallback via watchExit.
-func drainStderr(proc *claudeProcess, sess *serverSession) {
+// in proc.stderrTail for exit event classification (e.g. rate_limit
+// detection). For ephemeral sessions with fallback models, it also detects
+// 429/rate-limit errors in real time and kills the process to trigger
+// model fallback via watchExit.
+//
+// CC-specific: takes *claudeBackend directly because it pulls bytes off the
+// CC stderr pipe and writes the captured tail into a CC field. Round 3's
+// codex backend will have its own drain equivalent.
+func drainStderr(proc *claudeBackend, sess *serverSession) {
 	// Determine if we should monitor for rate-limit errors
 	sess.mu.Lock()
 	shouldMonitor := isEphemeralCategory(sess.Category) && len(sess.fallbackModels) > 0
@@ -709,10 +741,19 @@ func drainStderr(proc *claudeProcess, sess *serverSession) {
 	}()
 }
 
-// attachProcessBridge sets up stdout→SSE bridge, exit watcher, and stderr drain.
+// attachProcessBridge sets up stdout→SSE bridge, exit watcher, and stderr
+// drain for a freshly-spawned CC backend.
+//
+// CC-specific: takes *claudeBackend rather than Backend because the SSE
+// bridge consumes the stream-json line stream off the CC stdout pipe.
+// Round 3's codexBackend will have its own attachCodexBridge that consumes
+// JSON-RPC notifications from the codex client and emits SSE events with
+// the same schema (so the Web UI stays unchanged).
+//
 // source: "server-create"/"server-resume" for full init, "" for reload.
-// fullSync: true for create/resume (CC name sync + auto-rename), false for reload.
-func attachProcessBridge(proc *claudeProcess, sess *serverSession, source string, fullSync bool) {
+// fullSync: true for create/resume (CC name sync + auto-rename), false for
+// reload.
+func attachProcessBridge(proc *claudeBackend, sess *serverSession, source string, fullSync bool) {
 	doneCh := make(chan struct{})
 	go func() {
 		bridgeStdout(proc, sess.broadcaster, makeOnInit(sess, source), makeOnResult(sess, fullSync), func(todos json.RawMessage) {
@@ -974,6 +1015,10 @@ type sessionCreateOpts struct {
 	ReplaceSoul bool     // 本我模式 — use --system-prompt-file instead of --append-system-prompt-file
 	ResumeID    string   // Claude Code session ID to resume (adds --resume <id>)
 	SpawnedBy   string   // parent session ID that spawned this one
+	// Backend selects which Backend implementation drives the session.
+	// Empty defaults through resolveBackendKind: explicit > model auto-route
+	// > BackendCC. BackendCodex routes through spawnCodex (Round 4).
+	Backend BackendKind
 }
 
 // createSession spawns a new Claude Code session.
@@ -1038,11 +1083,16 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		tags = []string{}
 	}
 
+	// Backend selection: explicit (from API body / spawn flag) > model
+	// auto-route > BackendCC default. resolveBackendKind handles the priority.
+	backendKind := resolveBackendKind(opts.Backend, opts.Model)
+
 	sess := &serverSession{
 		ID:          id,
 		Name:        opts.Name,
 		Project:     opts.Project,
 		Model:       opts.Model,
+		Backend:     backendKind,
 		Status:      "starting",
 		Category:    category,
 		Tags:        tags,
@@ -1098,7 +1148,9 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		sess.promptFile = promptFile
 	}
 
-	// Spawn Claude Code process
+	// Spawn the chosen Backend. spawnOpts is shared across both paths so
+	// the WorkDir / Model / Resume semantics stay identical; only the
+	// process implementation differs.
 	spawnOpts := sessionOpts{
 		WorkDir:          opts.Project,
 		SystemPromptFile: promptFile,
@@ -1107,11 +1159,26 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		ReplaceSoul:      opts.ReplaceSoul,
 		ResumeID:         opts.ResumeID,
 		ServerSessionID:  id,
+		Backend:          backendKind,
 	}
-	proc, err := spawnClaude(spawnOpts)
-	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("spawn claude: %w", err)
+	var proc Backend
+	switch backendKind {
+	case BackendCodex:
+		cb, err := spawnCodex(spawnOpts)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("spawn codex: %w", err)
+		}
+		proc = cb
+		recordBackendStart(BackendCodex)
+	default:
+		ccb, err := spawnClaude(spawnOpts)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("spawn claude: %w", err)
+		}
+		proc = ccb
+		recordBackendStart(BackendCC)
 	}
 	sess.mu.Lock()
 	sess.process = proc
@@ -1145,8 +1212,19 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		setSoulEnabledDB(id, false)
 	}
 
-	// Attach stdout→SSE bridge, exit watcher, and stderr drain
-	attachProcessBridge(proc, sess, "server-create", true)
+	// Attach stdout/event → SSE bridge, exit watcher, and stderr drain.
+	// Dispatch on Backend type — codex flows through attachCodexBridge,
+	// CC keeps the existing stream-json bridge.
+	switch p := proc.(type) {
+	case *codexBackend:
+		attachCodexBridge(p, sess, "server-create", true)
+	case *claudeBackend:
+		attachProcessBridge(p, sess, "server-create", true)
+	default:
+		// Should never happen — every Backend in tree is one of the above.
+		fmt.Fprintf(os.Stderr, "[%s] server: unknown backend type %T for session %s\n",
+			appName, proc, shortID(id))
+	}
 
 	return sess, nil
 }
@@ -1173,6 +1251,11 @@ func (sm *sessionManager) listSessions() []map[string]any {
 // setChrome reloads a session's underlying claude process with --chrome
 // toggled on/off. The serverSession (broadcaster, history, name, etc.) is
 // preserved across the reload — only the subprocess is swapped.
+//
+// Codex backend: chrome is a CC-only concept. Returning an error here
+// prevents silently swapping the codex subprocess for a fresh CC process
+// and losing thread state. The HTTP handler surfaces the error to the
+// caller as 5xx.
 func (sm *sessionManager) setChrome(id string, enabled bool) error {
 	sess := sm.getSession(id)
 	if sess == nil {
@@ -1180,6 +1263,10 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 	}
 
 	sess.mu.Lock()
+	if sess.Backend == BackendCodex {
+		sess.mu.Unlock()
+		return fmt.Errorf("setChrome not supported on codex backend")
+	}
 	if sess.ChromeEnabled == enabled && sess.process != nil && sess.process.alive() {
 		sess.mu.Unlock()
 		return nil // no-op
@@ -1204,7 +1291,7 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 	// Mark the old process so its bridgeStdout doesn't broadcast a "close"
 	// SSE event when it exits — this is an intentional reload.
 	if oldProc != nil {
-		oldProc.suppressClose.Store(true)
+		oldProc.suppressNextClose()
 		if oldProc.alive() {
 			oldProc.shutdown()
 		}
@@ -1277,6 +1364,13 @@ func (sm *sessionManager) setMode(id, mode string) error {
 	}
 
 	sess.mu.Lock()
+	// Codex backend: mode (weiran/benwo/cc) is a CC system-prompt concept.
+	// Reloading would silently swap the codex subprocess for a CC process
+	// and lose thread state. Return an error instead.
+	if sess.Backend == BackendCodex {
+		sess.mu.Unlock()
+		return fmt.Errorf("setMode not supported on codex backend")
+	}
 	// No-op if already in target mode and process alive
 	if sess.SoulEnabled == soulEnabled && sess.ReplaceSoul == replaceSoul &&
 		sess.process != nil && sess.process.alive() {
@@ -1319,7 +1413,7 @@ func (sm *sessionManager) setMode(id, mode string) error {
 	}
 
 	if oldProc != nil {
-		oldProc.suppressClose.Store(true)
+		oldProc.suppressNextClose()
 		if oldProc.alive() {
 			oldProc.shutdown()
 		}
@@ -1368,6 +1462,14 @@ func (sm *sessionManager) setModel(id string, model string) error {
 	}
 
 	sess.mu.Lock()
+	// Codex backend: codex doesn't support mid-thread setModel (per
+	// codex_backend.go header comment). A future implementation would
+	// thread/resume the codex process to swap models; until then, return
+	// an error rather than silently swapping for a CC process.
+	if sess.Backend == BackendCodex {
+		sess.mu.Unlock()
+		return fmt.Errorf("setModel not supported on codex backend")
+	}
 	if sess.Model == model && sess.process != nil && sess.process.alive() {
 		sess.mu.Unlock()
 		return nil // no-op
@@ -1387,7 +1489,7 @@ func (sm *sessionManager) setModel(id string, model string) error {
 	sess.mu.Unlock()
 
 	if oldProc != nil {
-		oldProc.suppressClose.Store(true)
+		oldProc.suppressNextClose()
 		if oldProc.alive() {
 			oldProc.shutdown()
 		}

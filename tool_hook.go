@@ -1830,3 +1830,110 @@ func trimForDisplay(s string, n int) string {
 	}
 	return s
 }
+
+// ── In-process evaluator (Round 4: codex backend approval bridge) ──
+//
+// evaluateToolHookForApproval runs the PreToolUse rule chain on a synthesized
+// ToolHookInput and returns the matching decision in-process. Used by
+// server_process_codex.go (attachCodexBridge → handleCodexApproval) to route
+// codex's */requestApproval through the same rule set CC's PreToolUse hook
+// does. CC continues to use the subprocess hook handler (runPreToolUseHook
+// + emitDecision) — this is a parallel path, not a replacement.
+//
+// Returns:
+//
+//	decision = "deny" | "ask" | "allow" | ""   (empty = no rule fired)
+//	reason   = the rule's Inject body (truncated to its budget) for the
+//	           first decision rule that fired, or the concatenated injects
+//	           from non-decision rules when no decision rule matched
+//	contexts = ordered list of "[rule:<id>] <inject body>" strings for
+//	           non-decision rules whose injections would have been
+//	           additionalContext under the subprocess path. The codex
+//	           bridge surfaces these on a codex_hook_decision SSE for
+//	           observability; they don't change the allow/deny outcome.
+//
+// Budget / dedupe behavior matches runPreToolUseHook so the two paths can't
+// diverge silently. Audit rows are NOT written here — the codex bridge
+// writes its own SSE event for visibility, and the subprocess path remains
+// the canonical source of audit data for CC sessions. (We could add audit
+// here but Round 4 keeps schema impact minimal.)
+//
+// Decision precedence: rules are evaluated in YAML order. The first rule
+// with a non-empty Decision short-circuits — same as runPreToolUseHook.
+// Rules without Decision contribute their Inject body to contexts and
+// continue.
+func evaluateToolHookForApproval(in ToolHookInput) (decision, reason string, contexts []string) {
+	cfgPath := defaultToolHookConfigPath()
+	cfg, err := loadToolHookConfig(cfgPath)
+	if err != nil {
+		// Config missing or malformed → no policy → caller's default applies.
+		return "", "", nil
+	}
+
+	path := extractToolPath(in.ToolName, in.ToolInput)
+	budgetRemaining := cfg.Budget
+	if budgetRemaining <= 0 {
+		budgetRemaining = 1500
+	}
+
+	for _, rule := range cfg.Rules {
+		if rule.Disabled || rule.ID == "" {
+			continue
+		}
+		if isTempDisabled(&rule) {
+			continue
+		}
+		if !rule.eventMatches(HookEventPreToolUse) {
+			continue
+		}
+		if !rule.toolMatches(in.ToolName) {
+			continue
+		}
+		hasPathMatch := len(rule.Match) > 0
+		hasInputMatch := len(rule.MatchInput) > 0
+		if !hasPathMatch && !hasInputMatch {
+			continue
+		}
+		if hasPathMatch && !matchesGlob(path, rule.Match) {
+			continue
+		}
+		if hasInputMatch && !matchesInputRegex(in.ToolInput, rule.MatchInput) {
+			continue
+		}
+		if matchesInputRegex(in.ToolInput, rule.SkipInput) {
+			continue
+		}
+
+		body := strings.TrimSpace(rule.Inject)
+		ruleBudget := rule.Budget
+		if ruleBudget <= 0 {
+			ruleBudget = 500
+		}
+		if len(body) > ruleBudget {
+			body = body[:ruleBudget]
+		}
+
+		if rule.Decision != "" {
+			if !validDecision(rule.Decision) {
+				continue
+			}
+			if len(body) > budgetRemaining {
+				continue
+			}
+			return rule.Decision, body, contexts
+		}
+
+		if len(body) > budgetRemaining {
+			continue
+		}
+		contexts = append(contexts, fmt.Sprintf("[rule:%s] %s", rule.ID, body))
+		budgetRemaining -= len(body)
+	}
+
+	// No decision rule fired → caller (handleCodexApproval) defaults to allow.
+	// Surface the contexts so the bridge can log them for observability.
+	if len(contexts) > 0 {
+		reason = strings.Join(contexts, "\n")
+	}
+	return "", reason, contexts
+}
