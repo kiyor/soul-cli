@@ -88,6 +88,23 @@ Scan the last 3 days of daily notes for patterns where the user corrected behavi
 - If new pattern found → create draft in ` + "`memory/evolve/new/feedback_<name>.md`" + ` with v2 frontmatter
 - **Do NOT auto-move to topics/** — drafts wait for human approval
 
+## Phase 2.5: Micro Patch Merge (always run — DO NOT SKIP)
+List ` + "`{{.Workspace}}/memory/evolve/micro/`" + `. For EVERY file present (regardless of date):
+
+1. **Read** the patch — frontmatter (date, trigger, source) + body.
+2. **Decide merge target** by trigger type:
+   - ` + "`trigger: feedback`" + ` (user correction / preference rule) → create or extend ` + "`memory/topics/feedback_<name>.md`" + ` with v2 frontmatter (name/description/type/status/test_scenarios). Reuse existing feedback file if same topic.
+   - ` + "`trigger: preference`" + ` (taste / aesthetic) → append to ` + "`memory/topics/kiyor.md`" + ` or ` + "`memory/topics/kiyor-aesthetic.md`" + `, or update relevant skill SKILL.md (e.g. selfie default preset).
+   - ` + "`trigger: identity / self`" + ` → append to SOUL.md relevant section.
+   - Other → judge by content; if unclear, leave the micro file and flag in report.
+3. **Write** the merge target (Edit/Write tool).
+4. **Delete** the micro file (` + "`trash <file>`" + `) — only after the merge target write succeeded.
+5. If a micro file is older than 3 days AND still present after this phase, that's a bug — flag in report ` + "`needs_human_review: true`" + `.
+
+**Why this phase exists**: AGENTS.md says "deep evolve 时合并 micro patches 然后清空 micro/"。Without this explicit phase, micro patches accumulated for 12+ days (2026-04-16 → 2026-04-28) before being noticed manually. This is the merge step — do not skip.
+
+**Blast radius note**: Each micro merge counts toward the per-cycle file/line cap. If micro/ has >5 files, batch-merge but stop at the cap and continue next cycle.
+
 ## Phase 3: Active Feedback Probing (sample 3)
 Run ` + "`{{.CLI}} evolve-probe --sample 3`" + ` to test 3 least-recently-probed active feedback rules.
 
