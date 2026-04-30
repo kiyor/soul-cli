@@ -17,7 +17,14 @@ import (
 //go:embed FRAMEWORK.md
 var frameworkRules string
 
-const maxBootstrapFileChars = 20000   // per-file limit
+// C-4: per-file budget raised 20000 → 30000 to fit TOOLS.md (22163 chars)
+// without truncation. Side-effect: legacy (flag-off) SOUL.md (24412 chars)
+// also stops truncating, which restores ~4.5k chars of self that were being
+// silently dropped before (see B-4 byte-diff report §2.2 observation #5).
+// 30000 leaves ~25% headroom for both files to grow without re-tuning.
+// Total bootstrap budget unchanged — 30k is per-file, no individual file
+// is anywhere near the 150k aggregate.
+const maxBootstrapFileChars = 30000   // per-file limit
 const maxBootstrapTotalChars = 150000 // total bootstrap budget
 const promptTokenLimit = 100000       // 100k tokens
 
