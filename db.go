@@ -113,6 +113,26 @@ func openDB() (*sql.DB, error) {
 		`CREATE INDEX IF NOT EXISTS idx_thook_rule ON tool_hook_audit(rule_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_thook_path ON tool_hook_audit(path)`,
 		`CREATE INDEX IF NOT EXISTS idx_thook_tool ON tool_hook_audit(tool_name)`,
+		// prompt_routing_audit: every buildPrompt invocation records which soul
+		// mode was selected, what signals drove the decision, and the assembled
+		// prompt size. Used to verify the lazy-load persona router is making
+		// reasonable routing decisions without manual session-by-session inspection.
+		`CREATE TABLE IF NOT EXISTS prompt_routing_audit (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp       TEXT NOT NULL,
+			cli_mode        TEXT NOT NULL DEFAULT '',
+			soul_mode       TEXT NOT NULL DEFAULT '',
+			signals_json    TEXT NOT NULL DEFAULT '{}',
+			fragments_json  TEXT NOT NULL DEFAULT '[]',
+			tokens_est      INTEGER NOT NULL DEFAULT 0,
+			char_size       INTEGER NOT NULL DEFAULT 0,
+			session_id      TEXT NOT NULL DEFAULT '',
+			launch_dir      TEXT NOT NULL DEFAULT '',
+			source          TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_proute_ts ON prompt_routing_audit(timestamp)`,
+		`CREATE INDEX IF NOT EXISTS idx_proute_soul ON prompt_routing_audit(soul_mode)`,
+		`CREATE INDEX IF NOT EXISTS idx_proute_cli ON prompt_routing_audit(cli_mode)`,
 	}
 	for _, s := range schemas {
 		if _, err := db.Exec(s); err != nil {

@@ -330,7 +330,26 @@ func buildPrompt() buildPromptResult {
 		}
 	}
 
-	return buildPromptResult{content: b.String(), sections: sections}
+	content := b.String()
+
+	// Phase A: persona router audit. detectSoulMode runs but its result is not
+	// yet applied to fragment loading — output stays byte-equivalent with the
+	// pre-router prompt. We only record what *would* have been chosen so we
+	// can validate routing logic before flipping the switch in Phase C.
+	signals := gatherRoutingSignals()
+	soulMode := detectSoulMode(signals)
+	recordRoutingAudit(PromptRoutingDecision{
+		Timestamp:     time.Now(),
+		CLIMode:       currentMode,
+		SoulMode:      soulMode,
+		Signals:       signals,
+		FragmentsUsed: nil, // Phase B
+		TokensEst:     estimateTokens(content),
+		CharSize:      len(content),
+		// SessionID populated by the server when known; CLI runs leave it empty.
+	})
+
+	return buildPromptResult{content: content, sections: sections}
 }
 
 // ── Prompt safety utilities ──
