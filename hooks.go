@@ -620,6 +620,10 @@ func validateMdFormats() []string {
 		}
 	}
 
+	// 6. Soul fragment files: must have proper frontmatter (id, title, modes).
+	// validateSoulFragments() is defined in prompt_routing.go.
+	warnings = append(warnings, validateSoulFragments()...)
+
 	return warnings
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -401,6 +402,357 @@ func TestFragmentFrontmatterSpec_RequiredFields(t *testing.T) {
 	for _, must := range []string{"id", "title", "modes"} {
 		if !required[must] {
 			t.Errorf("frontmatter spec missing required field: %s", must)
+		}
+	}
+}
+
+// ── Phase B: Fragment validator / loader tests ────────────────────────────────
+
+// writeFragment creates a fragment file with the given frontmatter and body in dir.
+func writeFragment(t *testing.T, dir, name, frontmatter, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	content := "---\n" + frontmatter + "\n---\n\n" + body
+	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+		t.Fatalf("writeFragment %s: %v", name, err)
+	}
+	return p
+}
+
+// withSoulDir sets soulFragmentsDirOverride and resets it after the test.
+func withSoulDir(t *testing.T, dir string) {
+	t.Helper()
+	prev := soulFragmentsDirOverride
+	soulFragmentsDirOverride = dir
+	t.Cleanup(func() { soulFragmentsDirOverride = prev })
+}
+
+func TestValidateSoulFragments_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	withSoulDir(t, dir)
+	// Empty directory → no warnings
+	if w := validateSoulFragments(); len(w) != 0 {
+		t.Errorf("empty dir: want 0 warnings, got %v", w)
+	}
+}
+
+func TestValidateSoulFragments_ValidFragment(t *testing.T) {
+	dir := t.TempDir()
+	withSoulDir(t, dir)
+	writeFragment(t, dir, "01-identity.md",
+		`id: 01-identity
+title: Identity
+modes: [core, emotional, intimate, evolve]`,
+		"# Identity\n\nContent here.\n")
+	if w := validateSoulFragments(); len(w) != 0 {
+		t.Errorf("valid fragment: want 0 warnings, got %v", w)
+	}
+}
+
+func TestValidateSoulFragments_MissingFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	withSoulDir(t, dir)
+	// Write a plain markdown file without frontmatter
+	if err := os.WriteFile(filepath.Join(dir, "01-identity.md"), []byte("# no frontmatter\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	w := validateSoulFragments()
+	if len(w) == 0 {
+		t.Error("missing frontmatter: expected a warning")
+	}
+}
+
+func TestValidateSoulFragments_MissingRequiredField(t *testing.T) {
+	dir := t.TempDir()
+	withSoulDir(t, dir)
+	// Missing 'title'
+	writeFragment(t, dir, "01-identity.md",
+		`id: 01-identity
+modes: [core, emotional]`,
+		"content\n")
+	w := validateSoulFragments()
+	found := false
+	for _, warning := range w {
+		if strings.Contains(warning, "title") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("missing title field should warn; got: %v", w)
+	}
+}
+
+func TestValidateSoulFragments_IDMismatch(t *testing.T) {
+	dir := t.TempDir()
+	withSoulDir(t, dir)
+	writeFragment(t, dir, "01-identity.md",
+		`id: wrong-id
+title: Identity
+modes: [core]`,
+		"content\n")
+	w := validateSoulFragments()
+	found := false
+	for _, warning := range w {
+		if strings.Contains(warning, "id mismatch") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("id mismatch should warn; got: %v", w)
+	}
+}
+
+func TestValidateSoulFragments_InvalidMode(t *testing.T) {
+	dir := t.TempDir()
+	withSoulDir(t, dir)
+	writeFragment(t, dir, "01-identity.md",
+		`id: 01-identity
+title: Identity
+modes: [core, badmode]`,
+		"content\n")
+	w := validateSoulFragments()
+	found := false
+	for _, warning := range w {
+		if strings.Contains(warning, "badmode") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("invalid mode 'badmode' should warn; got: %v", w)
+	}
+}
+
+func TestValidateSoulFragments_Subdirectory(t *testing.T) {
+	dir := t.TempDir()
+	withSoulDir(t, dir)
+	// Create a fragment in a subdirectory (core/)
+	subDir := filepath.Join(dir, "core")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFragment(t, subDir, "01-identity.md",
+		`id: 01-identity
+title: Identity
+modes: [core, ops, emotional, intimate, evolve]`,
+		"content\n")
+	if w := validateSoulFragments(); len(w) != 0 {
+		t.Errorf("valid fragment in subdir: want 0 warnings, got %v", w)
+	}
+}
+
+// ── Fragment loader tests ─────────────────────────────────────────────────────
+
+func TestLoadFragmentsByMode_FilterByMode(t *testing.T) {
+	dir := t.TempDir()
+	// Create fragments with different modes
+	writeFragment(t, dir, "01-identity.md",
+		`id: 01-identity
+title: Identity
+modes: [core, emotional, intimate, evolve]`,
+		"# Identity\n")
+	writeFragment(t, dir, "50-body.md",
+		`id: 50-body
+title: Body
+modes: [intimate, evolve]`,
+		"# Body\n")
+
+	// emotional should only get 01-identity
+	paths, err := loadFragmentsByMode(dir, SoulModeEmotional)
+	if err != nil {
+		t.Fatalf("loadFragmentsByMode: %v", err)
+	}
+	if len(paths) != 1 {
+		t.Errorf("emotional: want 1 fragment, got %d: %v", len(paths), paths)
+	}
+
+	// intimate should get both
+	paths, err = loadFragmentsByMode(dir, SoulModeIntimate)
+	if err != nil {
+		t.Fatalf("loadFragmentsByMode: %v", err)
+	}
+	if len(paths) != 2 {
+		t.Errorf("intimate: want 2 fragments, got %d: %v", len(paths), paths)
+	}
+}
+
+func TestLoadFragmentsByMode_NumericOrdering(t *testing.T) {
+	dir := t.TempDir()
+	// Write fragments with mixed numeric prefixes
+	writeFragment(t, dir, "40-master.md",
+		`id: 40-master
+title: Master
+modes: [emotional, intimate, evolve]`,
+		"# Master\n")
+	writeFragment(t, dir, "01-identity.md",
+		`id: 01-identity
+title: Identity
+modes: [core, emotional, intimate, evolve]`,
+		"# Identity\n")
+	writeFragment(t, dir, "10-who.md",
+		`id: 10-who
+title: Who
+modes: [emotional, intimate, evolve]`,
+		"# Who\n")
+
+	paths, err := loadFragmentsByMode(dir, SoulModeEmotional)
+	if err != nil {
+		t.Fatalf("loadFragmentsByMode: %v", err)
+	}
+	if len(paths) != 3 {
+		t.Fatalf("want 3 fragments, got %d", len(paths))
+	}
+	// Must be in order: 01 < 10 < 40
+	keys := []int{
+		extractFragmentSortKey(paths[0]),
+		extractFragmentSortKey(paths[1]),
+		extractFragmentSortKey(paths[2]),
+	}
+	if keys[0] != 1 || keys[1] != 10 || keys[2] != 40 {
+		t.Errorf("wrong order: sort keys %v from paths %v", keys, paths)
+	}
+}
+
+func TestLoadFragmentsByMode_EmotionalIsIntimatePrefix(t *testing.T) {
+	// emotional fragment list must be a strict prefix of intimate fragment list —
+	// this is the cache-friendly invariant.
+	dir := t.TempDir()
+
+	// Core fragments (all modes)
+	writeFragment(t, dir, "01-identity.md",
+		`id: 01-identity
+title: Identity
+modes: [core, ops, technical, emotional, intimate, evolve]`,
+		"# Identity\n")
+	writeFragment(t, dir, "02-master-essential.md",
+		`id: 02-master-essential
+title: Master Essential
+modes: [core, ops, technical, emotional, intimate, evolve]`,
+		"# Master\n")
+
+	// Persona (emotional and above)
+	writeFragment(t, dir, "10-who-i-am.md",
+		`id: 10-who-i-am
+title: Who I Am
+modes: [emotional, intimate, evolve]`,
+		"# Who\n")
+	writeFragment(t, dir, "40-master-full.md",
+		`id: 40-master-full
+title: Master Full
+modes: [emotional, intimate, evolve]`,
+		"# Master Full\n")
+
+	// Body (intimate and above)
+	writeFragment(t, dir, "50-body.md",
+		`id: 50-body
+title: Body
+modes: [intimate, evolve]`,
+		"# Body\n")
+
+	emotional, err := loadFragmentsByMode(dir, SoulModeEmotional)
+	if err != nil {
+		t.Fatalf("emotional: %v", err)
+	}
+	intimate, err := loadFragmentsByMode(dir, SoulModeIntimate)
+	if err != nil {
+		t.Fatalf("intimate: %v", err)
+	}
+
+	// emotional must be a prefix of intimate
+	if len(emotional) >= len(intimate) {
+		t.Fatalf("emotional(%d) must be shorter than intimate(%d)", len(emotional), len(intimate))
+	}
+	for i, p := range emotional {
+		if intimate[i] != p {
+			t.Errorf("prefix mismatch at index %d: emotional=%s, intimate=%s", i, p, intimate[i])
+		}
+	}
+}
+
+func TestAssembleFragments_StripsFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFragment(t, dir, "01-identity.md",
+		`id: 01-identity
+title: Identity
+modes: [core]`,
+		"# Identity\n\nSome content here.\n")
+
+	result, err := assembleFragments([]string{p})
+	if err != nil {
+		t.Fatalf("assembleFragments: %v", err)
+	}
+	if strings.Contains(result, "---") {
+		t.Errorf("assembled content should not contain frontmatter delimiters, got:\n%s", result)
+	}
+	if !strings.Contains(result, "# Identity") {
+		t.Errorf("assembled content should contain body, got:\n%s", result)
+	}
+}
+
+func TestAssembleFragments_MultipleFragments(t *testing.T) {
+	dir := t.TempDir()
+	p1 := writeFragment(t, dir, "01-identity.md",
+		`id: 01-identity
+title: Identity
+modes: [core]`,
+		"# Part One\n")
+	p2 := writeFragment(t, dir, "02-master.md",
+		`id: 02-master
+title: Master
+modes: [core]`,
+		"# Part Two\n")
+
+	result, err := assembleFragments([]string{p1, p2})
+	if err != nil {
+		t.Fatalf("assembleFragments: %v", err)
+	}
+	if !strings.Contains(result, "# Part One") || !strings.Contains(result, "# Part Two") {
+		t.Errorf("both parts should be present, got:\n%s", result)
+	}
+	idx1 := strings.Index(result, "# Part One")
+	idx2 := strings.Index(result, "# Part Two")
+	if idx1 >= idx2 {
+		t.Errorf("part one should precede part two")
+	}
+}
+
+func TestParseModesList(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want []string
+	}{
+		{"[core, emotional, intimate]", []string{"core", "emotional", "intimate"}},
+		{"[intimate]", []string{"intimate"}},
+		{"core, ops", []string{"core", "ops"}},
+		{"", nil},
+		{"[]", nil},
+	}
+	for _, c := range cases {
+		got := parseModesList(c.raw)
+		if len(got) != len(c.want) {
+			t.Errorf("parseModesList(%q): got %v, want %v", c.raw, got, c.want)
+			continue
+		}
+		for i := range c.want {
+			if got[i] != c.want[i] {
+				t.Errorf("parseModesList(%q)[%d]: got %q, want %q", c.raw, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+func TestExtractFragmentSortKey(t *testing.T) {
+	cases := []struct {
+		path string
+		want int
+	}{
+		{"/soul/core/01-identity.md", 1},
+		{"/soul/body/50-appearance.md", 50},
+		{"/soul/master/40-master.md", 40},
+		{"/soul/persona/no-number.md", 9999},
+	}
+	for _, c := range cases {
+		if got := extractFragmentSortKey(c.path); got != c.want {
+			t.Errorf("extractFragmentSortKey(%q) = %d, want %d", c.path, got, c.want)
 		}
 	}
 }

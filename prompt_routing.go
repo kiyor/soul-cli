@@ -37,9 +37,12 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -370,4 +373,216 @@ func writeRoutingAudit(db *sql.DB, d PromptRoutingDecision) {
 		d.Signals.LaunchDir,
 		d.Signals.Source,
 	)
+}
+
+// ── Phase B: Fragment Loader ──────────────────────────────────────────────────
+//
+// Soul fragments live under <workspace>/soul/**/*.md. Each fragment has YAML
+// frontmatter declaring its id, title, and modes. The loader scans the directory,
+// filters by mode, sorts by numeric filename prefix, and assembles content.
+//
+// Feature flag: enableFragmentLoading (env WEIRAN_FRAGMENT_LOADING=1, default false).
+// When false, buildPrompt() is byte-identical to Phase A (legacy SOUL.md path).
+// When true, the soul section is replaced by assembled fragments for the detected mode.
+
+// enableFragmentLoading is the Phase-B feature flag.
+// Default false = old SOUL.md path, byte-identical to pre-Phase-B output.
+// Set WEIRAN_FRAGMENT_LOADING=1 to activate fragment-based assembly.
+var enableFragmentLoading = os.Getenv("WEIRAN_FRAGMENT_LOADING") == "1"
+
+// soulFragmentsDirOverride allows tests to inject a custom soul fragments directory.
+// Empty string = use default (<workspace>/soul/).
+var soulFragmentsDirOverride = ""
+
+// getSoulFragmentsDir returns the soul fragments base directory.
+func getSoulFragmentsDir() string {
+	if soulFragmentsDirOverride != "" {
+		return soulFragmentsDirOverride
+	}
+	return filepath.Join(workspace, "soul")
+}
+
+// parseModesList parses a YAML-inline list string like "[emotional, intimate, evolve]"
+// into a slice of trimmed strings. Also handles bare comma-separated values.
+func parseModesList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.Trim(raw, "[]")
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		s := strings.TrimSpace(p)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// fragmentModeIncludes reports whether mode is present in a raw modes string
+// (e.g., "[emotional, intimate, evolve]").
+func fragmentModeIncludes(modesStr string, mode SoulMode) bool {
+	for _, m := range parseModesList(modesStr) {
+		if m == string(mode) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractFragmentSortKey extracts the leading integer from a filename for ordering.
+// "01-identity.md" → 1, "50-appearance.md" → 50, "no-number.md" → 9999.
+func extractFragmentSortKey(path string) int {
+	base := filepath.Base(path)
+	var numStr strings.Builder
+	for _, c := range base {
+		if c >= '0' && c <= '9' {
+			numStr.WriteRune(c)
+		} else {
+			break
+		}
+	}
+	if numStr.Len() == 0 {
+		return 9999
+	}
+	n, _ := strconv.Atoi(numStr.String())
+	return n
+}
+
+// loadFragmentsByMode returns the fragment file paths (in assembly order) for mode.
+// It walks soulDir, reads frontmatter, filters by mode, and sorts by numeric prefix.
+func loadFragmentsByMode(soulDir string, mode SoulMode) ([]string, error) {
+	var matches []string
+	err := filepath.Walk(soulDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		fm := parseMdFrontmatter(string(data))
+		if fm == nil {
+			return nil
+		}
+		if fragmentModeIncludes(fm["modes"], mode) {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		ki := extractFragmentSortKey(matches[i])
+		kj := extractFragmentSortKey(matches[j])
+		if ki != kj {
+			return ki < kj
+		}
+		return matches[i] < matches[j] // stable tie-break by path
+	})
+	return matches, nil
+}
+
+// stripFragmentFrontmatter removes the leading YAML frontmatter block (--- ... ---)
+// from markdown content and returns the body, with leading blank lines trimmed.
+func stripFragmentFrontmatter(content string) string {
+	if !strings.HasPrefix(content, "---") {
+		return content
+	}
+	// Find the closing ---
+	rest := content[3:]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return content // malformed frontmatter — return as-is
+	}
+	body := rest[end+4:] // skip past \n---
+	return strings.TrimLeft(body, "\n")
+}
+
+// assembleFragments reads fragment files, strips frontmatter, and concatenates them.
+// Each fragment body is separated by a single blank line.
+func assembleFragments(paths []string) (string, error) {
+	var b strings.Builder
+	for i, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("assembleFragments: read %s: %w", path, err)
+		}
+		body := stripFragmentFrontmatter(string(data))
+		if i > 0 && b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(body)
+		// Ensure fragment body ends with newline
+		if !strings.HasSuffix(body, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	return b.String(), nil
+}
+
+// validateSoulFragments checks all soul/**/*.md files for proper frontmatter.
+// Called by validateMdFormats() (hooks.go) during `weiran lint`.
+// Returns a list of warning strings (empty = all valid).
+func validateSoulFragments() []string {
+	soulDir := getSoulFragmentsDir()
+	if _, err := os.Stat(soulDir); os.IsNotExist(err) {
+		// No soul dir yet — not an error in Phase B (fragments may not exist)
+		return nil
+	}
+
+	var warnings []string
+	_ = filepath.Walk(soulDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		label := "soul/" + strings.TrimPrefix(path, soulDir+"/")
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("📝 cannot read fragment: %s", label))
+			return nil
+		}
+		content := string(data)
+
+		fm := parseMdFrontmatter(content)
+		if fm == nil {
+			warnings = append(warnings, fmt.Sprintf("📝 missing frontmatter: %s", label))
+			return nil
+		}
+
+		// Required fields: id, title, modes
+		for _, field := range fragmentFrontmatterSpec.RequiredFields {
+			if fm[field] == "" {
+				warnings = append(warnings, fmt.Sprintf("📝 missing field '%s': %s", field, label))
+			}
+		}
+
+		// id must match filename stem
+		stem := strings.TrimSuffix(filepath.Base(path), ".md")
+		if fm["id"] != "" && fm["id"] != stem {
+			warnings = append(warnings, fmt.Sprintf("📝 id mismatch: file='%s' but id='%s' in %s", stem, fm["id"], label))
+		}
+
+		// modes: every value must be a valid SoulMode
+		if modesStr := fm["modes"]; modesStr != "" {
+			for _, m := range parseModesList(modesStr) {
+				if !IsValidSoulMode(m) {
+					warnings = append(warnings, fmt.Sprintf("📝 invalid mode '%s' in modes: %s", m, label))
+				}
+			}
+			if len(parseModesList(modesStr)) == 0 {
+				warnings = append(warnings, fmt.Sprintf("📝 empty modes list: %s", label))
+			}
+		}
+
+		return nil
+	})
+	return warnings
 }
