@@ -145,29 +145,27 @@ func buildPrompt() buildPromptResult {
 	}
 
 	// Core identity files (with per-file truncation, filtered by mode profile)
-	// Phase B: when enableFragmentLoading=true, SOUL.md is replaced by mode-specific
-	// fragments assembled from soul/**.md. All other files (IDENTITY.md etc.) still
-	// load from profile.SoulFiles. When flag=false, output is byte-identical to Phase A.
+	//
+	// Phase B+C layout:
+	//
+	//   flag=false (legacy): SOUL.md loads inline with other soul files here, in
+	//   the original profile.SoulFiles order. Output is byte-identical to Phase A.
+	//
+	//   flag=true (Phase C reorder): SOUL.md is SKIPPED here and deferred to load
+	//   AFTER FEEDBACK (just before the dynamic boundary). This puts mode-specific
+	//   content at the end of the static prompt portion, so the longest common
+	//   prefix between two modes (e.g. emotional vs intimate) covers all the
+	//   non-mode-specific sections (BOOT/CORE/IDENTITY/USER/AGENTS/TOOLS/FRAMEWORK/
+	//   MEMORY/FEEDBACK) plus whatever SOUL fragments are shared between the two
+	//   modes. Without this reorder, divergence inside the SOUL block bumps every
+	//   later section's byte offset and kills cache reuse past BOOT+CORE.
 	totalChars := 0
 	if enableFragmentLoading {
-		// Fragment path: detect soul mode, load and assemble matching fragments.
-		// SOUL.md in profile.SoulFiles is skipped here; other files load normally.
-		soulMode := detectSoulMode(gatherRoutingSignals())
-		fragPaths, fragErr := loadFragmentsByMode(getSoulFragmentsDir(), soulMode)
-		if fragErr == nil && len(fragPaths) > 0 {
-			if assembled, aErr := assembleFragments(fragPaths); aErr == nil {
-				if totalChars+len(assembled) <= maxBootstrapTotalChars {
-					totalChars += len(assembled)
-					secStart := b.Len()
-					fmt.Fprintf(&b, "\n# === SOUL.md ===\n\n%s\n", assembled)
-					sections = append(sections, promptSection{name: "SOUL.md", tokens: estimateTokens(b.String()[secStart:])})
-				}
-			}
-		}
-		// Load remaining non-SOUL.md soul files normally.
+		// Reorder branch: load only non-SOUL files here. Mode-specific SOUL
+		// fragments are deferred to after FEEDBACK (search "C-1 deferred SOUL").
 		for _, name := range profile.SoulFiles {
 			if name == "SOUL.md" {
-				continue // replaced by fragments above
+				continue // deferred to end of static prompt
 			}
 			content, ok := loadFileWithBudget(filepath.Join(workspace, name), maxBootstrapFileChars)
 			if !ok {
@@ -186,8 +184,9 @@ func buildPrompt() buildPromptResult {
 			sections = append(sections, promptSection{name: name, tokens: estimateTokens(b.String()[secStart:])})
 		}
 	} else {
-		// Legacy path (Phase A default): load monolithic SOUL.md and other soul files.
-		// Behavior is byte-identical to pre-Phase-B when flag=false.
+		// Legacy path (default until Phase C-2 flips the flag): load monolithic
+		// SOUL.md and other soul files in the original order. Byte-identical to
+		// pre-Phase-B output. Do NOT touch this branch — it's the rollback path.
 		for _, name := range profile.SoulFiles {
 			content, ok := loadFileWithBudget(filepath.Join(workspace, name), maxBootstrapFileChars)
 			if !ok {
@@ -276,9 +275,36 @@ func buildPrompt() buildPromptResult {
 		}
 	}
 
+	// C-1 deferred SOUL: when fragment loading is enabled, mode-specific SOUL
+	// fragments are appended HERE — after FEEDBACK and immediately before the
+	// dynamic boundary. This is the cache-friendly position: every prior section
+	// is mode-invariant, so the longest common prefix between two modes covers
+	// all of them. The actual mode-specific divergence happens inside this
+	// SOUL section, and stays inside it (nothing after this is mode-keyed).
+	//
+	// On the legacy (flag-off) path, SOUL.md was already emitted earlier inline
+	// with the other soul files, so this block is a no-op.
+	if enableFragmentLoading {
+		soulMode := detectSoulMode(gatherRoutingSignals())
+		fragPaths, fragErr := loadFragmentsByMode(getSoulFragmentsDir(), soulMode)
+		if fragErr == nil && len(fragPaths) > 0 {
+			if assembled, aErr := assembleFragments(fragPaths); aErr == nil {
+				if totalChars+len(assembled) <= maxBootstrapTotalChars {
+					totalChars += len(assembled)
+					secStart := b.Len()
+					fmt.Fprintf(&b, "\n# === SOUL.md ===\n\n%s\n", assembled)
+					sections = append(sections, promptSection{name: "SOUL.md", tokens: estimateTokens(b.String()[secStart:])})
+				}
+			}
+		}
+	}
+
 	// ── Dynamic boundary ──
-	// Everything above (BOOT + SOUL + IDENTITY + USER + AGENTS + TOOLS + MEMORY.md)
-	// is static across sessions and changes infrequently.
+	// Everything above (BOOT + CORE + non-SOUL soul files + FRAMEWORK + MEMORY +
+	// HEARTBEAT + FEEDBACK + mode-specific SOUL fragments) is static across
+	// sessions of the same mode and changes infrequently. Cross-mode caching
+	// hits the longest common prefix, which (post C-1 reorder) covers everything
+	// up through whatever SOUL fragments the two modes share.
 	// Everything below (daily notes, TG context, CC sessions, skills, projects)
 	// is dynamic and changes every session/turn.
 	// This boundary mirrors Claude Code's SYSTEM_PROMPT_DYNAMIC_BOUNDARY concept.

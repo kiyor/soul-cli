@@ -756,3 +756,237 @@ func TestExtractFragmentSortKey(t *testing.T) {
 		}
 	}
 }
+
+// ── Phase C-1: assembly reorder tests ────────────────────────────────────────
+//
+// Goal: under flag-on, the SOUL section is loaded LAST in the static portion
+// (just before the dynamic boundary), so the longest common prefix between
+// two modes covers all non-mode-specific sections plus whatever SOUL fragments
+// the modes share. Under flag-off the layout is unchanged (SOUL.md still
+// inline with the other soul files).
+//
+// These tests exercise buildPrompt() against the real workspace, like the
+// other TestBuildPrompt_* tests in prompt_test.go. They only read files —
+// no writes — so they're safe to run against the live workspace.
+
+// staticPortion returns the prompt up to and excluding the dynamic boundary
+// marker. Dynamic content (current time, daily notes, TG context, etc.) is
+// session-state-dependent and can't be byte-compared across calls.
+func staticPortion(s string) string {
+	const marker = "\n# ── 以下为动态内容"
+	if i := strings.Index(s, marker); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// withFragmentLoading toggles enableFragmentLoading for one test and restores it.
+func withFragmentLoading(t *testing.T, on bool) {
+	t.Helper()
+	prev := enableFragmentLoading
+	enableFragmentLoading = on
+	t.Cleanup(func() { enableFragmentLoading = prev })
+}
+
+// withSoulModeEnv sets WEIRAN_SOUL_MODE for one test (auto-restored by t.Setenv).
+func withSoulModeEnv(t *testing.T, mode string) {
+	t.Helper()
+	t.Setenv("WEIRAN_SOUL_MODE", mode)
+}
+
+// soulSectionStart returns the byte index of the SOUL.md section header,
+// or -1 if absent.
+func soulSectionStart(s string) int {
+	return strings.Index(s, "\n# === SOUL.md ===\n")
+}
+
+func identitySectionStart(s string) int {
+	return strings.Index(s, "\n# === IDENTITY.md ===\n")
+}
+
+func feedbackSectionStart(s string) int {
+	return strings.Index(s, "\n# === Feedback (behavioral rules) ===\n")
+}
+
+// TestBuildPrompt_FlagOffLayoutUnchanged confirms that with flag=false the
+// SOUL.md section comes BEFORE IDENTITY.md (legacy order, unchanged from
+// pre-Phase-C). This is the structural counterpart to the byte-diff check
+// captured manually before/after the reorder commit.
+func TestBuildPrompt_FlagOffLayoutUnchanged(t *testing.T) {
+	withFragmentLoading(t, false)
+	result := buildPrompt()
+	soul := soulSectionStart(result.content)
+	ident := identitySectionStart(result.content)
+	if soul < 0 {
+		t.Fatal("flag-off prompt should contain SOUL.md section")
+	}
+	if ident < 0 {
+		t.Fatal("flag-off prompt should contain IDENTITY.md section")
+	}
+	if soul >= ident {
+		t.Errorf("flag-off: SOUL.md should appear BEFORE IDENTITY.md (legacy order); got soul=%d ident=%d", soul, ident)
+	}
+}
+
+// TestBuildPrompt_FlagOnLayoutSoulIsLast confirms that with flag=true the
+// SOUL.md section appears AFTER IDENTITY.md and AFTER the FEEDBACK section,
+// just before the dynamic boundary. This is the C-1 reorder.
+func TestBuildPrompt_FlagOnLayoutSoulIsLast(t *testing.T) {
+	withFragmentLoading(t, true)
+	withSoulModeEnv(t, "emotional")
+	result := buildPrompt()
+	soul := soulSectionStart(result.content)
+	ident := identitySectionStart(result.content)
+	feedback := feedbackSectionStart(result.content)
+	if soul < 0 {
+		t.Fatal("flag-on prompt should still emit a SOUL.md section header (now sourced from fragments)")
+	}
+	if ident < 0 {
+		t.Fatal("flag-on prompt should contain IDENTITY.md section")
+	}
+	if soul <= ident {
+		t.Errorf("flag-on: SOUL.md should appear AFTER IDENTITY.md (reorder); got soul=%d ident=%d", soul, ident)
+	}
+	if feedback >= 0 && soul <= feedback {
+		t.Errorf("flag-on: SOUL.md should appear AFTER FEEDBACK; got soul=%d feedback=%d", soul, feedback)
+	}
+	// SOUL must still be in the static portion (before dynamic boundary).
+	staticEnd := strings.Index(result.content, "\n# ── 以下为动态内容")
+	if staticEnd < 0 {
+		t.Fatal("dynamic boundary marker missing")
+	}
+	if soul >= staticEnd {
+		t.Errorf("flag-on: SOUL.md leaked into dynamic portion; got soul=%d boundary=%d", soul, staticEnd)
+	}
+}
+
+// runStaticPrompt builds a prompt under given flag/mode and returns the static
+// portion. Restores all globals via t.Cleanup.
+func runStaticPrompt(t *testing.T, flagOn bool, soulMode string) string {
+	t.Helper()
+	withFragmentLoading(t, flagOn)
+	if soulMode != "" {
+		withSoulModeEnv(t, soulMode)
+	}
+	r := buildPrompt()
+	return staticPortion(r.content)
+}
+
+// TestBuildPrompt_PrefixPropertyEmotionalSubsetIntimate is the headline C-1
+// invariant: an `emotional` prompt's static portion is a true byte prefix of
+// an `intimate` prompt's static portion. This is what makes Anthropic API
+// prompt cache reuse work across the emotional→intimate transition.
+func TestBuildPrompt_PrefixPropertyEmotionalSubsetIntimate(t *testing.T) {
+	em := runStaticPrompt(t, true, "emotional")
+	in := runStaticPrompt(t, true, "intimate")
+	if len(em) >= len(in) {
+		t.Fatalf("emotional(%d) should be shorter than intimate(%d)", len(em), len(in))
+	}
+	if !strings.HasPrefix(in, em) {
+		// Find first divergence for diagnostic.
+		minLen := len(em)
+		for i := 0; i < minLen; i++ {
+			if em[i] != in[i] {
+				ctxLo := i - 80
+				if ctxLo < 0 {
+					ctxLo = 0
+				}
+				ctxHi := i + 80
+				if ctxHi > minLen {
+					ctxHi = minLen
+				}
+				t.Fatalf("emotional is NOT byte prefix of intimate; first diff at byte %d:\n  emotional[%d:%d] = %q\n  intimate[%d:%d]  = %q",
+					i, ctxLo, ctxHi, em[ctxLo:ctxHi], ctxLo, ctxHi, in[ctxLo:ctxHi])
+			}
+		}
+		t.Fatal("emotional is not a strict prefix of intimate, but bytes match up to len(em)")
+	}
+}
+
+// TestBuildPrompt_PrefixPropertyChain verifies the full nesting chain inside
+// the same CLI mode (interactive): core ⊂ technical, core ⊂ emotional ⊂
+// intimate, core ⊂ evolve. Each pair: shorter must be a true byte prefix of
+// longer.
+//
+// Note: ops shares the same fragment set as core under the current spec, so
+// they're equal (not strict subset). Tested separately below.
+func TestBuildPrompt_PrefixPropertyChain(t *testing.T) {
+	pairs := []struct {
+		smaller string
+		larger  string
+	}{
+		{"core", "technical"},
+		{"core", "emotional"},
+		{"emotional", "intimate"},
+		{"core", "evolve"},
+	}
+	for _, p := range pairs {
+		t.Run(p.smaller+"_subset_"+p.larger, func(t *testing.T) {
+			small := runStaticPrompt(t, true, p.smaller)
+			large := runStaticPrompt(t, true, p.larger)
+			if len(small) >= len(large) {
+				t.Fatalf("%s(%d) should be shorter than %s(%d)", p.smaller, len(small), p.larger, len(large))
+			}
+			if !strings.HasPrefix(large, small) {
+				t.Fatalf("%s is NOT byte prefix of %s", p.smaller, p.larger)
+			}
+		})
+	}
+}
+
+// TestBuildPrompt_CoreEqualsOps confirms ops and core load identical fragment
+// sets (per the Phase B mode/fragment spec). Static portions should match
+// byte-for-byte.
+func TestBuildPrompt_CoreEqualsOps(t *testing.T) {
+	core := runStaticPrompt(t, true, "core")
+	ops := runStaticPrompt(t, true, "ops")
+	if core != ops {
+		t.Errorf("core and ops should produce identical static prompts (lengths: core=%d ops=%d)", len(core), len(ops))
+	}
+}
+
+// TestBuildPrompt_IntimateEqualsEvolve confirms intimate and evolve load
+// identical fragment sets in Phase B/C (evolve == all fragments == intimate).
+func TestBuildPrompt_IntimateEqualsEvolve(t *testing.T) {
+	intimate := runStaticPrompt(t, true, "intimate")
+	evolve := runStaticPrompt(t, true, "evolve")
+	if intimate != evolve {
+		t.Errorf("intimate and evolve should produce identical static prompts (lengths: intimate=%d evolve=%d)", len(intimate), len(evolve))
+	}
+}
+
+// TestBuildPrompt_BootCoreCommonPrefix verifies the cache-anchor invariant:
+// every soul-mode shares the same BOOT+CORE prefix at the head of the prompt.
+// This is the minimum guaranteed cache hit even when modes diverge.
+func TestBuildPrompt_BootCoreCommonPrefix(t *testing.T) {
+	modes := []string{"core", "ops", "technical", "emotional", "intimate", "evolve"}
+	outputs := make([]string, len(modes))
+	for i, m := range modes {
+		outputs[i] = runStaticPrompt(t, true, m)
+	}
+	// CORE.md section header is the natural common-prefix anchor.
+	const anchor = "# === CORE.md (read-only, do not modify) ==="
+	for i, out := range outputs {
+		idx := strings.Index(out, anchor)
+		if idx < 0 {
+			t.Fatalf("mode %s missing CORE.md section", modes[i])
+		}
+		if i > 0 && outputs[i][:idx] != outputs[0][:idx] {
+			t.Errorf("BOOT prefix differs between mode %s and %s", modes[0], modes[i])
+		}
+	}
+	// All modes must agree byte-for-byte through the end of CORE.md section.
+	// Find end of CORE.md across all modes (the next "\n# === " after CORE).
+	core0 := strings.Index(outputs[0], anchor)
+	rest := outputs[0][core0+len(anchor):]
+	nextSec := strings.Index(rest, "\n# === ")
+	if nextSec < 0 {
+		t.Fatal("can't find post-CORE section header")
+	}
+	commonEnd := core0 + len(anchor) + nextSec
+	for i := 1; i < len(modes); i++ {
+		if outputs[i][:commonEnd] != outputs[0][:commonEnd] {
+			t.Errorf("BOOT+CORE prefix (%d bytes) differs between %s and %s", commonEnd, modes[0], modes[i])
+		}
+	}
+}
