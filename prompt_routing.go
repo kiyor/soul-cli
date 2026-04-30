@@ -126,8 +126,8 @@ type RoutingSignals struct {
 // Schema example (workspace/routing.yaml):
 //
 //	intimate_triggers:
-//	  - '^/selfie\b'
-//	  - '^某个主人会用的中文短语'
+//	  - '^/<your-trigger-command>\b'
+//	  - '^<your-trigger-phrase>'
 //	technical_cwd_prefixes:
 //	  - '~/some-work-tree'
 //	  - '~/another-work-tree'
