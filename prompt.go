@@ -145,24 +145,67 @@ func buildPrompt() buildPromptResult {
 	}
 
 	// Core identity files (with per-file truncation, filtered by mode profile)
+	// Phase B: when enableFragmentLoading=true, SOUL.md is replaced by mode-specific
+	// fragments assembled from soul/**.md. All other files (IDENTITY.md etc.) still
+	// load from profile.SoulFiles. When flag=false, output is byte-identical to Phase A.
 	totalChars := 0
-	for _, name := range profile.SoulFiles {
-		content, ok := loadFileWithBudget(filepath.Join(workspace, name), maxBootstrapFileChars)
-		if !ok {
-			continue
+	if enableFragmentLoading {
+		// Fragment path: detect soul mode, load and assemble matching fragments.
+		// SOUL.md in profile.SoulFiles is skipped here; other files load normally.
+		soulMode := detectSoulMode(gatherRoutingSignals())
+		fragPaths, fragErr := loadFragmentsByMode(getSoulFragmentsDir(), soulMode)
+		if fragErr == nil && len(fragPaths) > 0 {
+			if assembled, aErr := assembleFragments(fragPaths); aErr == nil {
+				if totalChars+len(assembled) <= maxBootstrapTotalChars {
+					totalChars += len(assembled)
+					secStart := b.Len()
+					fmt.Fprintf(&b, "\n# === SOUL.md ===\n\n%s\n", assembled)
+					sections = append(sections, promptSection{name: "SOUL.md", tokens: estimateTokens(b.String()[secStart:])})
+				}
+			}
 		}
-		// Resolve secret references (vault://, env://) — primarily for TOOLS.md
-		if strings.Contains(content, "://") {
-			content = resolveSecretRefs(content)
+		// Load remaining non-SOUL.md soul files normally.
+		for _, name := range profile.SoulFiles {
+			if name == "SOUL.md" {
+				continue // replaced by fragments above
+			}
+			content, ok := loadFileWithBudget(filepath.Join(workspace, name), maxBootstrapFileChars)
+			if !ok {
+				continue
+			}
+			if strings.Contains(content, "://") {
+				content = resolveSecretRefs(content)
+			}
+			if totalChars+len(content) > maxBootstrapTotalChars {
+				fmt.Fprintf(&b, "\n# === %s ===\n\n⚠️ [skipped: bootstrap total exceeded %d char limit]\n", name, maxBootstrapTotalChars)
+				break
+			}
+			secStart := b.Len()
+			totalChars += len(content)
+			fmt.Fprintf(&b, "\n# === %s ===\n\n%s\n", name, content)
+			sections = append(sections, promptSection{name: name, tokens: estimateTokens(b.String()[secStart:])})
 		}
-		if totalChars+len(content) > maxBootstrapTotalChars {
-			fmt.Fprintf(&b, "\n# === %s ===\n\n⚠️ [skipped: bootstrap total exceeded %d char limit]\n", name, maxBootstrapTotalChars)
-			break
+	} else {
+		// Legacy path (Phase A default): load monolithic SOUL.md and other soul files.
+		// Behavior is byte-identical to pre-Phase-B when flag=false.
+		for _, name := range profile.SoulFiles {
+			content, ok := loadFileWithBudget(filepath.Join(workspace, name), maxBootstrapFileChars)
+			if !ok {
+				continue
+			}
+			// Resolve secret references (vault://, env://) — primarily for TOOLS.md
+			if strings.Contains(content, "://") {
+				content = resolveSecretRefs(content)
+			}
+			if totalChars+len(content) > maxBootstrapTotalChars {
+				fmt.Fprintf(&b, "\n# === %s ===\n\n⚠️ [skipped: bootstrap total exceeded %d char limit]\n", name, maxBootstrapTotalChars)
+				break
+			}
+			secStart := b.Len()
+			totalChars += len(content)
+			fmt.Fprintf(&b, "\n# === %s ===\n\n%s\n", name, content)
+			sections = append(sections, promptSection{name: name, tokens: estimateTokens(b.String()[secStart:])})
 		}
-		secStart := b.Len()
-		totalChars += len(content)
-		fmt.Fprintf(&b, "\n# === %s ===\n\n%s\n", name, content)
-		sections = append(sections, promptSection{name: name, tokens: estimateTokens(b.String()[secStart:])})
 	}
 
 	// Framework rules (embedded at compile time, applies to all instances)
