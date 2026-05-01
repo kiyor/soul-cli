@@ -267,13 +267,13 @@ func handleCodexUnifiedEvent(cb *codexBackend, sess *serverSession, ev UnifiedEv
 func emitCodexSyntheticInit(cb *codexBackend, sess *serverSession, source string, fullSync bool) {
 	info := cb.info()
 	msg := map[string]any{
-		"type":      "system",
-		"subtype":   "init",
-		"cwd":       cb.cwd,
-		"session_id": info.SessionID,
-		"model":     info.Model,
-		"tools":     []string{},
-		"mcp_servers": []map[string]any{},
+		"type":           "system",
+		"subtype":        "init",
+		"cwd":            cb.cwd,
+		"session_id":     info.SessionID,
+		"model":          info.Model,
+		"tools":          []string{},
+		"mcp_servers":    []map[string]any{},
 		"permissionMode": "bypassPermissions",
 		"backend": map[string]any{
 			"kind":  string(info.Kind),
@@ -751,4 +751,3 @@ func broadcastCodexItemCompletedAsCC(cb *codexBackend, sess *serverSession, ev U
 		return
 	}
 }
-

@@ -120,9 +120,9 @@ const codexDefaultApprovalWaitTimeout = 30 * time.Second
 // the typed CodexCommandExecApprovalResponse / FileChangeApprovalResponse
 // / PermissionsApprovalResponse and returns it to the JSON-RPC client.
 type pendingCodexApproval struct {
-	method string                  // ServerReq* method this approval belongs to
-	params json.RawMessage         // raw params for diagnostics if anything errors out
-	reply  chan map[string]any     // 1-buffered; handler reads, decision-sender writes
+	method string              // ServerReq* method this approval belongs to
+	params json.RawMessage     // raw params for diagnostics if anything errors out
+	reply  chan map[string]any // 1-buffered; handler reads, decision-sender writes
 }
 
 // ── Backend struct ──
@@ -218,8 +218,8 @@ type codexBackend struct {
 	// itemKindByID retains the kind reported in item/started so the
 	// matching item/completed (which only carries the item type, not the
 	// kind we mapped) can re-derive its UnifiedItemKind.
-	itemKindMu     sync.Mutex
-	itemKindByID   map[string]UnifiedItemKind
+	itemKindMu   sync.Mutex
+	itemKindByID map[string]UnifiedItemKind
 
 	// pendingApprovals tracks in-flight server-initiated approval requests
 	// (Round 4 async pattern). Keyed by the synthetic approvalID we mint
@@ -804,8 +804,8 @@ func (cb *codexBackend) sendMessage(content string) error {
 		turnID := resp.Turn.ID
 		cb.activeTurnID.Store(&turnID)
 		cb.emit(UnifiedEvent{
-			Kind:   UEvtTurnStarted,
-			TurnID: turnID,
+			Kind:    UEvtTurnStarted,
+			TurnID:  turnID,
 			Payload: mustMarshalRaw(UnifiedTurnPayload{Status: "running"}),
 		})
 	}
@@ -1330,8 +1330,8 @@ func (cb *codexBackend) handleErrorNotif(params json.RawMessage) {
 		return
 	}
 	cb.emit(UnifiedEvent{
-		Kind:    UEvtBackendError,
-		TurnID:  n.TurnID,
+		Kind:   UEvtBackendError,
+		TurnID: n.TurnID,
 		Payload: mustMarshalRaw(map[string]any{
 			"reason":     n.Error.Message,
 			"will_retry": n.WillRetry,
@@ -1349,10 +1349,10 @@ func (cb *codexBackend) handleErrorNotif(params json.RawMessage) {
 //  2. Emit UEvtApproval so the bridge layer (server_process_codex.go) can
 //     run the tool-hook chain and call sendPermissionDecision.
 //  3. Block waiting for either:
-//       - a decision delivered onto pending.reply, OR
-//       - codexApprovalWaitTimeout firing (default-decline), OR
-//       - the backend ctx / done channel signaling shutdown (decline +
-//         cleanup so we don't leak).
+//     - a decision delivered onto pending.reply, OR
+//     - codexApprovalWaitTimeout firing (default-decline), OR
+//     - the backend ctx / done channel signaling shutdown (decline +
+//     cleanup so we don't leak).
 //  4. Translate the generic decision map into the typed Codex response
 //     and return it. The JSON-RPC client serializes our return value back
 //     to the codex process as the response payload for the open request.
@@ -1678,4 +1678,3 @@ func mustMarshalRaw(v any) json.RawMessage {
 	}
 	return raw
 }
-

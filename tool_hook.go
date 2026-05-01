@@ -23,7 +23,9 @@ import (
 // on hook_event_name and run the matching rules from YAML.
 //
 //   PreToolUse         → tool_name + file path glob (ToolHookRule.Tools / .Match)
+//   PostToolUse        → tool_name + response/input regex
 //   UserPromptSubmit   → prompt regex (ToolHookRule.MatchPrompt)
+//   Stop / SubagentStop → events list only — fire whenever rule lists event
 //   (future events)    → added case by case
 //
 // Any stdout the hook produces is injected as system-reminder context.
@@ -35,7 +37,8 @@ import (
 // Supported hook event names — mirrors Claude Code's settings.json-level
 // allowlist in src/utils/settings/settings.ts (as of upstream 2026-04).
 // All are audited; only the ones with bespoke matchers (PreToolUse,
-// UserPromptSubmit) run rule matching. Everything else is audit-only.
+// PostToolUse, UserPromptSubmit, Stop, SubagentStop) run rule matching.
+// Everything else is audit-only.
 const (
 	HookEventPreToolUse       = "PreToolUse"
 	HookEventPostToolUse      = "PostToolUse"
@@ -575,9 +578,11 @@ func runToolHook() {
 		runUserPromptSubmitHook(in, cfg, db)
 	case HookEventPostToolUse:
 		runPostToolUseHook(in, cfg, db)
+	case HookEventStop, HookEventSubagentStop:
+		runStopHook(event, in, cfg, db)
 	default:
-		// All other events (Stop, SessionStart, Notification, PreCompact, ...)
-		// are audit-only for now: one row per invocation, no injection.
+		// All other events (SessionStart, Notification, PreCompact, ...) are
+		// audit-only for now: one row per invocation, no injection.
 		// Future bespoke matchers can be added by name.
 		runAuditOnlyHook(event, in, db)
 	}
@@ -917,7 +922,7 @@ func runUserPromptSubmitHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) 
 
 		// For UserPromptSubmit we dedupe per_session (and per_file is treated
 		// as per_session too since there is no file path).
-		if db != nil && isDedupedPrompt(db, rule, sessionID) {
+		if db != nil && isDedupedSessionScoped(db, rule, sessionID, HookEventUserPromptSubmit) {
 			writeToolHookAudit(db, toolHookAuditRow{
 				Timestamp:  time.Now().Format(time.RFC3339),
 				SessionID:  sessionID,
@@ -981,6 +986,118 @@ func runUserPromptSubmitHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) 
 	}
 
 	emitInjections(HookEventUserPromptSubmit, injections)
+}
+
+// runStopHook handles Stop and SubagentStop events. Neither carries a tool
+// name, file path, or prompt to match against, so a rule fires whenever it
+// lists the event in `events:` and passes dedupe/budget checks. Use this for
+// end-of-turn behavioral reminders that should reach the next turn's context
+// (Claude Code surfaces additionalContext from Stop hooks at the start of
+// the next user turn).
+//
+// Dedupe semantics: per_session = one inject per session (use for one-shot
+// orientation that doesn't need re-stating); never = inject every stop (use
+// for behavior anchors that should re-prime each turn). per_file is treated
+// as per_session since Stop events have no path surrogate.
+func runStopHook(event string, in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
+	start := time.Now()
+	sessionID := in.SessionID
+	digest := "" // Stop events have no meaningful path
+
+	audited := false
+	budgetRemaining := cfg.Budget
+	var injections []string
+	budgetUsedTotal := 0
+
+	for _, rule := range cfg.Rules {
+		if rule.Disabled || rule.ID == "" {
+			continue
+		}
+		if isTempDisabled(&rule) {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  event,
+				Path:       digest,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: tempDisableReason(&rule),
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+			continue
+		}
+		if !rule.eventMatches(event) {
+			continue
+		}
+		audited = true
+
+		// Dedupe: session-scoped, scoped to this event so Stop and SubagentStop
+		// rules don't share state.
+		if db != nil && isDedupedSessionScoped(db, rule, sessionID, event) {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  event,
+				Path:       digest,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: "dedupe",
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+			continue
+		}
+
+		body := strings.TrimSpace(rule.Inject)
+		if len(body) > rule.Budget {
+			body = body[:rule.Budget]
+		}
+		if len(body) > budgetRemaining {
+			writeToolHookAudit(db, toolHookAuditRow{
+				Timestamp:  time.Now().Format(time.RFC3339),
+				SessionID:  sessionID,
+				CWD:        in.CWD,
+				EventName:  event,
+				Path:       digest,
+				RuleID:     rule.ID,
+				Injected:   false,
+				SkipReason: "budget",
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+			continue
+		}
+
+		injections = append(injections, fmt.Sprintf("[rule:%s] %s", rule.ID, body))
+		budgetUsedTotal += len(body)
+		budgetRemaining -= len(body)
+
+		writeToolHookAudit(db, toolHookAuditRow{
+			Timestamp:     time.Now().Format(time.RFC3339),
+			SessionID:     sessionID,
+			CWD:           in.CWD,
+			EventName:     event,
+			Path:          digest,
+			RuleID:        rule.ID,
+			Injected:      true,
+			InjectionSize: len(body),
+			BudgetUsed:    budgetUsedTotal,
+			LatencyMS:     time.Since(start).Milliseconds(),
+		})
+	}
+
+	if !audited && db != nil {
+		writeToolHookAudit(db, toolHookAuditRow{
+			Timestamp: time.Now().Format(time.RFC3339),
+			SessionID: sessionID,
+			CWD:       in.CWD,
+			EventName: event,
+			Path:      digest,
+			LatencyMS: time.Since(start).Milliseconds(),
+		})
+	}
+
+	emitInjections(event, injections)
 }
 
 // runPostToolUseHook handles tool + response-regex matching. Fires after a
@@ -1145,16 +1262,20 @@ func runPostToolUseHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
 	emitInjections(HookEventPostToolUse, injections)
 }
 
-// isDedupedPrompt is the UserPromptSubmit dedupe check (session-scoped only).
-// "never" → always allow; anything else → 1 per (rule, session).
-func isDedupedPrompt(db *sql.DB, rule ToolHookRule, sessionID string) bool {
+// isDedupedSessionScoped is the session-scoped dedupe check (no path surrogate).
+// Used by UserPromptSubmit, Stop, SubagentStop — events that have a session
+// but no per-call path. Caller passes the event name so dedupe scopes the
+// (rule, session, event) tuple correctly: a Stop and a UserPromptSubmit rule
+// with the same ID would otherwise step on each other's dedupe state.
+// "never" → always allow; anything else → 1 per (rule, session, event).
+func isDedupedSessionScoped(db *sql.DB, rule ToolHookRule, sessionID, event string) bool {
 	if rule.Dedupe == "never" {
 		return false
 	}
 	var n int
 	db.QueryRow(`SELECT 1 FROM tool_hook_audit
 		WHERE rule_id=? AND session_id=? AND event_name=? AND injected=1 LIMIT 1`,
-		rule.ID, sessionID, HookEventUserPromptSubmit).Scan(&n)
+		rule.ID, sessionID, event).Scan(&n)
 	return n == 1
 }
 
@@ -1598,8 +1719,12 @@ func handleToolHookEvents() {
 		switch e {
 		case HookEventPreToolUse:
 			matcher = "rule-driven (tools + match glob)"
+		case HookEventPostToolUse:
+			matcher = "rule-driven (tools + match_response/match_input regex)"
 		case HookEventUserPromptSubmit:
 			matcher = "rule-driven (match_prompt regex)"
+		case HookEventStop, HookEventSubagentStop:
+			matcher = "rule-driven (events list, no other match needed)"
 		}
 		fmt.Printf("  %-20s %s\n", e, matcher)
 	}
