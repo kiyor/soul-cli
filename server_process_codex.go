@@ -108,6 +108,24 @@ func attachCodexBridge(cb *codexBackend, sess *serverSession, source string, ful
 	go watchCodexExit(cb, sess)
 }
 
+// codexBridgeState carries per-session bridge state across handler calls.
+// Lives only inside runCodexEventLoop / drainCodexEvents — not shared
+// across sessions.
+type codexBridgeState struct {
+	// initEmitted gates the one-shot synthetic init emission.
+	initEmitted bool
+	// itemDeltaSeen tracks which item ids already produced at least one
+	// CC-shaped streaming event (currently agent_message text deltas). Used
+	// on UEvtItemCompleted to decide whether to re-emit the final text — if
+	// deltas covered it, we skip to avoid the typewriter showing the message
+	// twice. Bounded by the number of items in a turn (small).
+	itemDeltaSeen map[string]bool
+}
+
+func newCodexBridgeState() *codexBridgeState {
+	return &codexBridgeState{itemDeltaSeen: map[string]bool{}}
+}
+
 // runCodexEventLoop is the synchronous body of the bridge goroutine. Reads
 // events off cb.events() until the channel is closed (on shutdown) or the
 // backend dies (cb.done fires).
@@ -115,19 +133,19 @@ func runCodexEventLoop(cb *codexBackend, sess *serverSession, source string, ful
 	// Synthetic init: emit as soon as the backend reports its thread id so
 	// downstream consumers know the session is live. Matches CC's init
 	// emission timing — driven off the backend's first useful event.
-	initEmitted := false
+	state := newCodexBridgeState()
 
 	for {
 		select {
 		case ev := <-cb.events():
 			// eventsCh is never closed by the producer; backend exit is
 			// signaled exclusively via cb.done. No `!ok` check needed.
-			handleCodexUnifiedEvent(cb, sess, ev, &initEmitted, source, fullSync)
+			handleCodexUnifiedEvent(cb, sess, ev, state, source, fullSync)
 		case <-cb.done:
 			// Drain any events the producer wrote before close so the front-end
 			// sees the final turn_completed / error before close arrives. Done
 			// non-blockingly: if no events queued we exit immediately.
-			drainCodexEvents(cb, sess, &initEmitted, source, fullSync)
+			drainCodexEvents(cb, sess, state, source, fullSync)
 			return
 		}
 	}
@@ -135,13 +153,13 @@ func runCodexEventLoop(cb *codexBackend, sess *serverSession, source string, ful
 
 // drainCodexEvents flushes whatever is left in cb.events() after backend
 // exit. Bounded by the channel capacity (256 events) so it terminates.
-func drainCodexEvents(cb *codexBackend, sess *serverSession, initEmitted *bool, source string, fullSync bool) {
+func drainCodexEvents(cb *codexBackend, sess *serverSession, state *codexBridgeState, source string, fullSync bool) {
 	for {
 		select {
 		case ev := <-cb.events():
 			// eventsCh is never closed; we drain whatever is buffered then
 			// exit on the default branch when empty.
-			handleCodexUnifiedEvent(cb, sess, ev, initEmitted, source, fullSync)
+			handleCodexUnifiedEvent(cb, sess, ev, state, source, fullSync)
 		default:
 			return
 		}
@@ -150,13 +168,13 @@ func drainCodexEvents(cb *codexBackend, sess *serverSession, initEmitted *bool, 
 
 // handleCodexUnifiedEvent converts one UnifiedEvent into the matching SSE
 // emissions and (for approvals) drives the tool-hook chain.
-func handleCodexUnifiedEvent(cb *codexBackend, sess *serverSession, ev UnifiedEvent, initEmitted *bool, source string, fullSync bool) {
+func handleCodexUnifiedEvent(cb *codexBackend, sess *serverSession, ev UnifiedEvent, state *codexBridgeState, source string, fullSync bool) {
 	// First useful event triggers our synthetic init. Codex doesn't have a
 	// dedicated "I'm ready, here are my tools" message after thread/start,
 	// so we synthesize one when the first turn or first item lands. This
 	// gives the Web UI's "session ready" hint a stable signal.
-	if !*initEmitted && (ev.Kind == UEvtTurnStarted || ev.Kind == UEvtItemStarted) {
-		*initEmitted = true
+	if !state.initEmitted && (ev.Kind == UEvtTurnStarted || ev.Kind == UEvtItemStarted) {
+		state.initEmitted = true
 		emitCodexSyntheticInit(cb, sess, source, fullSync)
 	}
 
@@ -166,28 +184,60 @@ func handleCodexUnifiedEvent(cb *codexBackend, sess *serverSession, ev UnifiedEv
 		sess.touch()
 
 	case UEvtTurnCompleted:
-		// Emit both the typed codex event AND a CC-shaped "result" so any
-		// downstream consumer that keys off result for is_error / status
-		// keeps working. This is also what flips the session to "idle".
-		sess.broadcaster.broadcast(sseEvent{Event: "codex_turn_completed", Data: codexEventEnvelope(ev)})
-		sess.broadcaster.broadcast(sseEvent{Event: "result", Data: codexResultEnvelope(ev)})
-		// Mirror CC: turn_completed transitions session back to idle.
-		newStatus := "idle"
+		// Mirror CC: turn_completed bumps NumTurns / cost and transitions
+		// the session back to idle. Without this the Web UI's per-session
+		// turn counter and the auto-rename trigger never advance — that's
+		// the user-visible "session won't start" symptom.
 		var payload UnifiedTurnPayload
 		_ = json.Unmarshal(ev.Payload, &payload)
+		newStatus := "idle"
 		if payload.Status == "error" {
 			newStatus = "error"
 		}
+		sess.mu.Lock()
+		sess.NumTurns++
+		if payload.CostUSD > 0 {
+			sess.TotalCost += payload.CostUSD
+		}
+		sess.mu.Unlock()
+		// Status flip before the SSE result line so any consumer that
+		// reads status when it sees "result" observes the new value.
 		sess.setStatus(newStatus)
+		// DB persistence is best-effort and runs off the bridge goroutine
+		// to keep the event loop snappy and tests deterministic.
+		go func(id string) { _, _ = incrementUserTurns(id) }(sess.ID)
+		// Emit both the typed codex event AND a CC-shaped "result" so any
+		// downstream consumer that keys off result for is_error / status
+		// keeps working.
+		sess.broadcaster.broadcast(sseEvent{Event: "codex_turn_completed", Data: codexEventEnvelope(ev)})
+		sess.broadcaster.broadcast(sseEvent{Event: "result", Data: codexResultEnvelope(ev)})
+		// Turn boundary: forget per-item delta state. Any straggler items
+		// from this turn that arrive after turn_completed (shouldn't, but
+		// defense in depth) get treated as if no delta was seen.
+		state.itemDeltaSeen = map[string]bool{}
 
 	case UEvtItemStarted:
 		sess.broadcaster.broadcast(sseEvent{Event: "codex_item_started", Data: codexEventEnvelope(ev)})
 
 	case UEvtItemDelta:
 		sess.broadcaster.broadcast(sseEvent{Event: "codex_item_delta", Data: codexEventEnvelope(ev)})
+		// Round 5: also emit a CC-shaped streaming event so the existing
+		// Web UI typewriter (handleAssistant) renders codex text live —
+		// without this, agent_message text only shows up after a refresh
+		// because /api/history reads the JSONL persisted on item_completed.
+		broadcastCodexDeltaAsCC(cb, sess, ev, state)
 
 	case UEvtItemCompleted:
 		sess.broadcaster.broadcast(sseEvent{Event: "codex_item_completed", Data: codexEventEnvelope(ev)})
+		// Persist the item to the session JSONL so /api/history/{id}/messages,
+		// FTS, and the rename worker all see it. Schema mirrors CC's
+		// transcript so we reuse parseSessionMessages unchanged.
+		persistCodexItemCompleted(cb, sess, ev)
+		// Round 5: re-broadcast as CC-shaped tool_use/tool_result/assistant
+		// so the Web UI's existing handlers render the tool chain live.
+		// Previous behavior only surfaced these on page refresh because the
+		// UI's switch had no case for codex_item_*.
+		broadcastCodexItemCompletedAsCC(cb, sess, ev, state)
 
 	case UEvtBackendError:
 		sess.broadcaster.broadcast(sseEvent{Event: "codex_backend_error", Data: codexEventEnvelope(ev)})
@@ -235,6 +285,10 @@ func emitCodexSyntheticInit(cb *codexBackend, sess *serverSession, source string
 			hub.notifySessions()
 		}
 	}
+	// Seed the session JSONL with a CC-shaped system/init line so
+	// readClaudeSessionName / parseSessionMessages can recognize the file
+	// the same way they recognize a Claude Code transcript.
+	writeCodexSystemInit(info.SessionID, info.Model, cb.cwd)
 }
 
 // codexEventEnvelope serializes one UnifiedEvent for SSE transport. We
@@ -407,5 +461,281 @@ func watchCodexExit(cb *codexBackend, sess *serverSession) {
 		return
 	}
 	sess.setStatus("stopped")
+}
+
+// persistCodexItemCompleted mirrors a finished codex item into the session
+// JSONL so the existing Web UI / FTS / rename code paths reuse the same
+// transcript layer they use for CC. Item kind controls the content shape:
+//
+//   - agent_message → assistant message with one text block
+//   - reasoning     → assistant message with one thinking block
+//   - tool_call / command_exec / file_change → assistant tool_use block
+//     followed by a synthesized user tool_result so parseSessionMessages
+//     can pair them up like a CC transcript.
+//
+// Anything we don't recognize is dropped silently — the SSE bridge still
+// surfaced it via codex_item_completed for live consumers.
+func persistCodexItemCompleted(cb *codexBackend, sess *serverSession, ev UnifiedEvent) {
+	// Snapshot ClaudeSID under sess.mu — the bridge goroutine runs in
+	// parallel with emitCodexSyntheticInit (which writes ClaudeSID under
+	// the same lock) and other writers in server_session.go. Reading the
+	// field unlocked is a data race the test -race detector flags.
+	sess.mu.Lock()
+	threadID := sess.ClaudeSID
+	sess.mu.Unlock()
+	if threadID == "" {
+		// Fall back to the live backend info — happens only during the
+		// brief window between handshake and setClaudeSessionID.
+		threadID = cb.info().SessionID
+	}
+	if threadID == "" {
+		return
+	}
+	model := cb.info().Model
+
+	var payload UnifiedItemPayload
+	_ = json.Unmarshal(ev.Payload, &payload)
+	resultText := extractCodexResultText(payload.Result)
+
+	switch ev.ItemKind {
+	case UItemAgentMessage:
+		if resultText != "" {
+			writeCodexAssistantMessage(threadID, model, resultText)
+		}
+
+	case UItemReasoning:
+		if resultText != "" {
+			writeCodexAssistantBlock(threadID, model, map[string]any{
+				"type":      "thinking",
+				"thinking":  resultText,
+				"signature": "",
+			})
+		}
+
+	case UItemToolCall, UItemCommandExec, UItemFileChange:
+		toolName := payload.Name
+		if toolName == "" {
+			toolName = string(ev.ItemKind)
+		}
+		var input any
+		if len(payload.Input) > 0 {
+			_ = json.Unmarshal(payload.Input, &input)
+		}
+		writeCodexAssistantBlock(threadID, model, map[string]any{
+			"type":  "tool_use",
+			"id":    ev.ItemID,
+			"name":  toolName,
+			"input": input,
+		})
+		// Pair with a tool_result so the existing CC parser doesn't see a
+		// dangling tool_use. resultText is already the human-readable
+		// aggregated stdout for command_exec / final patch text for
+		// file_change / generic result for tool_call.
+		writeCodexToolResult(threadID, ev.ItemID, resultText, payload.IsError)
+	}
+}
+
+// extractCodexResultText pulls the human-readable text out of a codex item
+// result blob. The codex bridge wraps text-bearing items in
+// {"text": "..."}, but file_change and tool_call may carry a raw object
+// (e.g. a list of changes). We try the common shapes and fall back to the
+// raw JSON string so the transcript at least preserves *something*.
+func extractCodexResultText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var wrapped struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &wrapped) == nil && wrapped.Text != "" {
+		return wrapped.Text
+	}
+	// Some kinds (file_change / dynamic_tool_call) hand back the verbatim
+	// codex payload. Stringify it so it lands in FTS as one searchable
+	// blob instead of disappearing.
+	return string(raw)
+}
+
+// ── CC-shaped re-broadcast (Round 5) ─────────────────────────────────────
+//
+// The Web UI's handleSessionEvent switch only has cases for the CC
+// stream-json schema (assistant / tool_use / tool_result / result). Codex
+// events arrive as codex_item_started / codex_item_delta /
+// codex_item_completed which the UI silently drops — that's the user-
+// visible "tool chain doesn't render until I refresh" symptom. The fix is
+// purely additive: alongside the typed codex_* events we emit the same
+// content in CC schema, so the existing handleAssistant / handleToolUse /
+// handleToolResult render codex output live, and any downstream consumer
+// (Telegram relay, IPC peer) that already keys off CC schema also wakes up.
+//
+// Translation rules
+// -----------------
+//
+//   UEvtItemDelta  ItemKind=agent_message  DeltaType=text
+//       → SSE "assistant" with content=[{type:"text", text:<delta>}]
+//         The UI's typewriter (typeBuf+=text) accumulates these correctly.
+//         Mark itemDeltaSeen[ItemID]=true so completion doesn't re-emit.
+//
+//   UEvtItemDelta  other (reasoning text, plan, output, summary)
+//       → no CC re-broadcast. The Web UI doesn't have a streaming handler
+//         for thinking/plan/output blocks; refresh + JSONL still captures
+//         them. Adding a renderer is future work.
+//
+//   UEvtItemCompleted  ItemKind=agent_message
+//       → if itemDeltaSeen[ItemID] already true, skip (deltas covered it;
+//         re-emitting would duplicate text in the typewriter).
+//         Otherwise emit "assistant" with the final text in one shot —
+//         this covers backends/turns where codex didn't stream deltas.
+//
+//   UEvtItemCompleted  ItemKind=reasoning
+//       → no CC re-broadcast. handleAssistant ignores thinking blocks
+//         (only renders type=="text"). JSONL persistence still captures it.
+//
+//   UEvtItemCompleted  ItemKind=tool_call|command_exec|file_change
+//       → emit "tool_use" (assistant message wrapping a tool_use block)
+//         followed by "tool_result" (user message wrapping a tool_result
+//         block). Same shape persistCodexItemCompleted writes to JSONL —
+//         we just publish it on the wire too.
+
+// broadcastCodexDeltaAsCC emits a CC-shaped streaming event for codex
+// item deltas the Web UI knows how to render. Called *after* the typed
+// codex_item_delta event, so any consumer that prefers the typed shape
+// still sees it first; consumers that prefer CC schema see both.
+func broadcastCodexDeltaAsCC(cb *codexBackend, sess *serverSession, ev UnifiedEvent, state *codexBridgeState) {
+	// Only agent_message text deltas translate cleanly to the UI's
+	// typewriter today. Everything else (reasoning text, plan, output,
+	// summary) needs a richer renderer the UI doesn't have yet — leave
+	// those to JSONL/refresh until a Web UI follow-up adds handlers.
+	if ev.ItemKind != UItemAgentMessage || ev.DeltaType != "text" {
+		return
+	}
+	var payload UnifiedDeltaPayload
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil || payload.Text == "" {
+		return
+	}
+	model := cb.info().Model
+	msg := map[string]any{
+		"type":      "assistant",
+		"timestamp": nowRFC3339(),
+		"message": map[string]any{
+			"role":  "assistant",
+			"model": model,
+			"content": []map[string]any{
+				{"type": "text", "text": payload.Text},
+			},
+		},
+	}
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	sess.broadcaster.broadcast(sseEvent{Event: "assistant", Data: raw})
+	if ev.ItemID != "" {
+		state.itemDeltaSeen[ev.ItemID] = true
+	}
+}
+
+// broadcastCodexItemCompletedAsCC emits CC-shaped events for an item that
+// just finished. Mirror of the persist function but pushes through the SSE
+// broadcaster instead of the JSONL file. See the rules block above for how
+// each ItemKind maps to wire events.
+func broadcastCodexItemCompletedAsCC(cb *codexBackend, sess *serverSession, ev UnifiedEvent, state *codexBridgeState) {
+	var payload UnifiedItemPayload
+	_ = json.Unmarshal(ev.Payload, &payload)
+	resultText := extractCodexResultText(payload.Result)
+	model := cb.info().Model
+	timestamp := nowRFC3339()
+
+	switch ev.ItemKind {
+	case UItemAgentMessage:
+		// Streaming deltas already painted the message — don't double-paint.
+		if ev.ItemID != "" && state.itemDeltaSeen[ev.ItemID] {
+			delete(state.itemDeltaSeen, ev.ItemID)
+			return
+		}
+		if resultText == "" {
+			return
+		}
+		msg := map[string]any{
+			"type":      "assistant",
+			"timestamp": timestamp,
+			"message": map[string]any{
+				"role":  "assistant",
+				"model": model,
+				"content": []map[string]any{
+					{"type": "text", "text": resultText},
+				},
+			},
+		}
+		raw, err := json.Marshal(msg)
+		if err != nil {
+			return
+		}
+		sess.broadcaster.broadcast(sseEvent{Event: "assistant", Data: raw})
+
+	case UItemToolCall, UItemCommandExec, UItemFileChange:
+		toolName := payload.Name
+		if toolName == "" {
+			toolName = string(ev.ItemKind)
+		}
+		var input any
+		if len(payload.Input) > 0 {
+			_ = json.Unmarshal(payload.Input, &input)
+		}
+		toolUseID := ev.ItemID
+		// 1) tool_use — assistant message wrapping the tool_use block.
+		toolUseMsg := map[string]any{
+			"type":      "assistant",
+			"timestamp": timestamp,
+			"message": map[string]any{
+				"role":  "assistant",
+				"model": model,
+				"content": []map[string]any{
+					{
+						"type":  "tool_use",
+						"id":    toolUseID,
+						"name":  toolName,
+						"input": input,
+					},
+				},
+			},
+		}
+		if raw, err := json.Marshal(toolUseMsg); err == nil {
+			sess.broadcaster.broadcast(sseEvent{Event: "tool_use", Data: raw})
+		}
+		// 2) tool_result — paired user message so the UI can pair them
+		// with the same tool_use_id. Skip when there's no tool_use_id —
+		// the UI keys off it for pairing and an empty id would orphan.
+		if toolUseID == "" {
+			return
+		}
+		resultBlock := map[string]any{
+			"type":        "tool_result",
+			"tool_use_id": toolUseID,
+			"content":     resultText,
+		}
+		if payload.IsError {
+			resultBlock["is_error"] = true
+		}
+		toolResultMsg := map[string]any{
+			"type":      "user",
+			"timestamp": timestamp,
+			"message": map[string]any{
+				"role":    "user",
+				"content": []map[string]any{resultBlock},
+			},
+		}
+		if raw, err := json.Marshal(toolResultMsg); err == nil {
+			sess.broadcaster.broadcast(sseEvent{Event: "tool_result", Data: raw})
+		}
+
+	case UItemReasoning:
+		// Web UI's handleAssistant filters to type=="text", so emitting a
+		// thinking block here would be silently dropped. JSONL persistence
+		// already captures it for refresh/history. Skip for now; a future
+		// renderer can read codex_item_completed directly to show a
+		// collapsed "thinking…" panel inline.
+		return
+	}
 }
 
