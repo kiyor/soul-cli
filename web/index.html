@@ -413,6 +413,17 @@
       <label for="m-mode-cc">CC<span class="mode-hint">bare Claude Code</span></label>
     </div>
   </div>
+  <div class="mode-select" id="backend-select-wrap" style="display:none">
+    <span class="mode-label">Backend</span>
+    <div class="mode-seg" role="radiogroup" aria-label="Backend">
+      <input type="radio" name="m-backend" id="m-backend-auto" value="auto" checked>
+      <label for="m-backend-auto">Auto<span class="mode-hint">route by model</span></label>
+      <input type="radio" name="m-backend" id="m-backend-cc" value="cc">
+      <label for="m-backend-cc">CC<span class="mode-hint">Claude Code stream-json</span></label>
+      <input type="radio" name="m-backend" id="m-backend-codex" value="codex">
+      <label for="m-backend-codex">Codex<span class="mode-hint">OpenAI app-server JSON-RPC</span></label>
+    </div>
+  </div>
   <div class="actions">
     <button class="btn btn-cancel" onclick="closeNewSheet()">Cancel</button>
     <button class="btn btn-primary" onclick="createSession()">Create</button>
@@ -472,7 +483,7 @@
 'use strict';
 
 // ── Server-injected config ──
-const SERVER_CONFIG = {defaultReplaceSoul: {{.DefaultReplaceSoul}}, defaultInteractiveModel: "{{.DefaultInteractiveModel}}", disableTmuxDrawer: {{.DisableTmuxDrawer}}};
+const SERVER_CONFIG = {defaultReplaceSoul: {{.DefaultReplaceSoul}}, defaultInteractiveModel: "{{.DefaultInteractiveModel}}", disableTmuxDrawer: {{.DisableTmuxDrawer}}, codexEnabled: {{.CodexEnabled}}};
 
 // ── State ──
 let TOKEN = new URLSearchParams(location.search).get('token')||localStorage.getItem('weiran_token')||'';
@@ -1458,9 +1469,10 @@ function selectSession(id){
       msgs.forEach(msg=>{
         if(msg.role==='user')addUserMsg(msg.content,msg.timestamp);
         else if(msg.role==='assistant')addAIMsg(msg.content,false,msg.timestamp);
-        else if(msg.role==='tool_use')addToolUseMsg(msg.tool_name,msg.tool_input);
+        else if(msg.role==='tool_use')addToolUseMsg(msg.tool_name,msg.tool_input,msg.tool_use_id);
         else if(msg.role==='tool_result'){
           if(msg.content&&msg.content.includes('[Old tool result content cleared]'))return;
+          if(tryAttachToolResult(msg.content,msg.tool_use_id,false))return;
           addToolResultMsg(msg.content);
         }
         else if(msg.role==='compact_boundary')addCompactBoundary(msg.content,msg.timestamp);
@@ -1561,7 +1573,7 @@ function handleToolUse(data){
       // is uninteresting — it just echoes the questions. The actual UI is
       // rendered off the ask_user_question SSE event, not this tool_use.
       if(b.name==='AskUserQuestion') return;
-      addToolUseMsg(b.name,b.input);
+      addToolUseMsg(b.name,b.input,b.id);
       // Track cwd changes from Bash cd commands
       if(b.name==='Bash'&&b.input&&typeof b.input.command==='string'){
         const m=b.input.command.match(/^\s*cd\s+("[^"]+"|'[^']+'|\S+)/);
@@ -1788,15 +1800,20 @@ function renderPlanApproval(requestId, toolUseId, plan, planFilePath, allowedPro
   const el=document.createElement('div');el.className='msg ai';
   const displayPath=planFilePath?planFilePath.replace(/^\/Users\/[^/]+\//,'~/'):''
   const isEmpty=!plan||!plan.trim();
+  const planSrc=isEmpty?'':plan;
   const planHtml=isEmpty
     ?'<em style="color:var(--muted2)">No plan content found.</em>'
-    :renderMd(plan);
+    :renderMd(planSrc);
   const frag=[];
-  frag.push(`<div class="body"><div class="md"><div class="plan-approval" data-request-id="${esc(requestId)}" data-tool-use-id="${esc(toolUseId)}">`);
+  // data-original-plan stores the model's original plan body so we can detect
+  // whether the user edited it before approving (parity with Claude Code TUI).
+  frag.push(`<div class="body"><div class="md"><div class="plan-approval" data-request-id="${esc(requestId)}" data-tool-use-id="${esc(toolUseId)}" data-original-plan="${esc(planSrc)}">`);
   frag.push(`<div class="plan-header"><span class="plan-badge">📋 Plan Approval</span>`);
   if(displayPath)frag.push(`<span class="plan-file">${esc(displayPath)}</span>`);
+  frag.push(`<button class="plan-edit-toggle" onclick="togglePlanEdit(this)" title="Edit plan before approving">✎ Edit</button>`);
   frag.push(`</div>`);
   frag.push(`<div class="plan-content"><div class="md">${planHtml}</div></div>`);
+  frag.push(`<textarea class="plan-edit" style="display:none" placeholder="Edit plan markdown…" oninput="markPlanDirty(this)">${esc(planSrc)}</textarea>`);
   frag.push(`<textarea class="plan-feedback" placeholder="Optional feedback — visible to Claude on approve or reject…" rows="1"></textarea>`);
   frag.push(`<div class="plan-footer">`);
   frag.push(`<button class="plan-approve" onclick="submitPlanApproval(this,'approve')">✓ Approve Plan</button>`);
@@ -1807,30 +1824,84 @@ function renderPlanApproval(requestId, toolUseId, plan, planFilePath, allowedPro
   scrollBottomSmooth();
 }
 
+// Toggle between rendered markdown view and editable textarea. Auto-syncs
+// rendered preview from textarea on switch back so user sees their edits.
+function togglePlanEdit(btn){
+  const container=btn.closest('.plan-approval');
+  if(!container||container.classList.contains('submitted'))return;
+  const view=container.querySelector('.plan-content');
+  const ta=container.querySelector('.plan-edit');
+  const editing=container.classList.toggle('editing');
+  if(editing){
+    view.style.display='none';
+    ta.style.display='block';
+    ta.focus();
+    btn.innerHTML='👁 Preview';
+  }else{
+    // Re-render markdown from edited content
+    const md=ta.value;
+    const inner=view.querySelector('.md');
+    if(inner)inner.innerHTML=md.trim()?renderMd(md):'<em style="color:var(--muted2)">(empty)</em>';
+    view.style.display='block';
+    ta.style.display='none';
+    btn.innerHTML=isPlanDirty(container)?'✎ Edit <span class="plan-dirty-dot" title="modified"></span>':'✎ Edit';
+  }
+}
+
+function isPlanDirty(container){
+  const ta=container.querySelector('.plan-edit');
+  if(!ta)return false;
+  return ta.value!==(container.dataset.originalPlan||'');
+}
+
+function markPlanDirty(ta){
+  const container=ta.closest('.plan-approval');
+  if(!container)return;
+  // Live-update the toggle button label to hint there are unsaved edits.
+  const btn=container.querySelector('.plan-edit-toggle');
+  if(btn&&container.classList.contains('editing')){
+    btn.innerHTML=isPlanDirty(container)?'👁 Preview <span class="plan-dirty-dot" title="modified"></span>':'👁 Preview';
+  }
+}
+
 async function submitPlanApproval(btn, action){
   const container=btn.closest('.plan-approval');
   if(!container||!activeSessionId)return;
   const requestId=container.dataset.requestId;
   const feedbackEl=container.querySelector('.plan-feedback');
   const feedback=(feedbackEl&&feedbackEl.value)||'';
+  // If user edited the plan body, send the edited version. Reject ignores
+  // edits since the plan won't be applied anyway.
+  let editedPlan='';
+  if(action==='approve'){
+    const ta=container.querySelector('.plan-edit');
+    const original=container.dataset.originalPlan||'';
+    if(ta&&ta.value!==original)editedPlan=ta.value;
+  }
   // Lock UI
   container.classList.add('submitted');
-  container.querySelectorAll('button').forEach(b=>{b.disabled=true});
+  container.querySelectorAll('button,textarea').forEach(b=>{b.disabled=true});
   const label=container.querySelector('.plan-approve');
-  if(action==='approve'&&label)label.textContent='✓ Plan Approved';
+  if(action==='approve'&&label){
+    label.textContent=editedPlan?'✓ Plan Approved (edited)':'✓ Plan Approved';
+  }
   if(action==='reject'&&label)label.textContent='✗ Plan Rejected';
   const rejectBtn=container.querySelector('.plan-reject');
   if(rejectBtn)rejectBtn.style.display='none';
+  const editToggle=container.querySelector('.plan-edit-toggle');
+  if(editToggle)editToggle.style.display='none';
   try{
+    const body={
+      request_id:requestId,
+      // Repurpose answers: answer[0].answer = "approve"|"reject", question = feedback
+      answers:[{question:feedback, answer:action}],
+      cancelled:action==='reject',
+    };
+    if(editedPlan)body.plan=editedPlan;
     const resp=await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/answer-question`,{
       method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},
-      body:JSON.stringify({
-        request_id:requestId,
-        // Repurpose answers: answer[0].answer = "approve"|"reject", question = feedback
-        answers:[{question:feedback, answer:action}],
-        cancelled:action==='reject',
-      }),
+      body:JSON.stringify(body),
     });
     if(!resp.ok){
       console.error('plan-approval failed:',resp.status,await resp.text());
@@ -1872,10 +1943,12 @@ function handleToolResult(data){
       // Check for image content (base64 from Read tool)
       const images=extractImages(b.content);
       if(images.length>0){
+        if(tryAttachToolResult(images,b.tool_use_id,true))return;
         addImageResultMsg(images);
         return;
       }
       const t=typeof b.content==='string'?b.content:JSON.stringify(b.content);
+      if(tryAttachToolResult(t,b.tool_use_id,false))return;
       addToolResultMsg(t);
     }
   });
@@ -2080,10 +2153,32 @@ function renderTodoList(todos){
   return html;
 }
 
-function addToolUseMsg(name,input){
+function addToolUseMsg(name,input,toolUseId){
+  const idAttr=toolUseId?` data-tool-use-id="${esc(toolUseId)}"`:'';
+  // Result slot HTML — appended to body of structured tool renders so that
+  // the tool's tool_result can be nested inside the same collapsible block.
+  const RSLOT='<div class="tool-result-area" data-empty="1"></div>';
   let inp;
   if(typeof input==='object'&&input!==null){inp=input}
-  else if(typeof input==='string'){try{const p=JSON.parse(input);inp=(typeof p==='object'&&p!==null)?p:{}}catch(e){inp={}}}
+  else if(typeof input==='string'){
+    try{const p=JSON.parse(input);inp=(typeof p==='object'&&p!==null)?p:{}}
+    catch(e){
+      // JSON was truncated server-side. Best-effort regex extraction so we
+      // still hit the structured renderer instead of the JSON-dump fallback.
+      inp={};
+      const grab=(key)=>{
+        const m=input.match(new RegExp('"'+key+'":\\s*"((?:[^"\\\\]|\\\\.)*)'));
+        if(!m)return undefined;
+        try{return JSON.parse('"'+m[1]+'"')}catch(_){return m[1]}
+      };
+      const cmd=grab('command');if(cmd!==undefined)inp.command=cmd;
+      const desc=grab('description');if(desc!==undefined)inp.description=desc;
+      const fp=grab('file_path');if(fp!==undefined)inp.file_path=fp;
+      const pat=grab('pattern');if(pat!==undefined)inp.pattern=pat;
+      const url=grab('url');if(url!==undefined)inp.url=url;
+      const q=grab('query');if(q!==undefined)inp.query=q;
+    }
+  }
   else{inp={}}
   // TodoWrite — always visible, rendered as list view
   if(name==='TodoWrite'&&Array.isArray(inp.todos)){
@@ -2094,37 +2189,149 @@ function addToolUseMsg(name,input){
     return;
   }
   // Special-case code-edit tools — always visible, rendered as diff
+  // Helpers for inline title (filename + diff stats)
+  const _basename=(p)=>{const s=String(p||'');const i=s.lastIndexOf('/');return i>=0?s.slice(i+1):s};
+  const _lineCount=(s)=>{if(!s)return 0;return String(s).split('\n').length};
+  const _diffStats=(o,n)=>`<span class="diff-stat del">-${_lineCount(o)}</span><span class="diff-stat add">+${_lineCount(n)}</span>`;
   if(name==='Edit'&&inp.old_string!==undefined){
     const el=document.createElement('div');el.className='msg ai tool-msg code-edit';
+    const fname=_basename(inp.file_path);
     const fp=inp.file_path?`<div class="filepath">${esc(inp.file_path)}</div>`:'';
-    el.innerHTML=`<div class="tool-block code-edit"><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge"><span class="icon">&#9998;</span>Edit${inp.replace_all?' · all':''}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${fp}${renderDiffLines(inp.old_string,inp.new_string)}</div></div>`;
+    el.innerHTML=`<div class="tool-block code-edit"><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge"><span class="icon">&#9998;</span>Edit${inp.replace_all?' · all':''}</span><span class="tool-preview filename">${esc(fname)}</span><span class="diff-stats">${_diffStats(inp.old_string,inp.new_string)}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${fp}${renderDiffLines(inp.old_string,inp.new_string)}</div></div>`;
     document.getElementById('messages').appendChild(el);scrollBottomSmooth();return;
   }
   if(name==='MultiEdit'&&Array.isArray(inp.edits)){
     const el=document.createElement('div');el.className='msg ai tool-msg code-edit';
+    const fname=_basename(inp.file_path);
     const fp=inp.file_path?`<div class="filepath">${esc(inp.file_path)}</div>`:'';
+    let totDel=0,totAdd=0;
+    inp.edits.forEach(e=>{totDel+=_lineCount(e.old_string);totAdd+=_lineCount(e.new_string)});
+    const stats=`<span class="diff-stat del">-${totDel}</span><span class="diff-stat add">+${totAdd}</span>`;
     const blocks=inp.edits.map((e,i)=>(i?'<div class="diff-sep"></div>':'')+renderDiffLines(e.old_string,e.new_string)).join('');
-    el.innerHTML=`<div class="tool-block code-edit"><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge"><span class="icon">&#9998;</span>MultiEdit · ${inp.edits.length}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${fp}${blocks}</div></div>`;
+    el.innerHTML=`<div class="tool-block code-edit"><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge"><span class="icon">&#9998;</span>MultiEdit · ${inp.edits.length}</span><span class="tool-preview filename">${esc(fname)}</span><span class="diff-stats">${stats}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${fp}${blocks}</div></div>`;
     document.getElementById('messages').appendChild(el);scrollBottomSmooth();return;
   }
   if(name==='Write'&&inp.content!==undefined){
     const el=document.createElement('div');el.className='msg ai tool-msg code-edit';
+    const fname=_basename(inp.file_path);
     const fp=inp.file_path?`<div class="filepath">${esc(inp.file_path)}</div>`:'';
-    el.innerHTML=`<div class="tool-block code-edit"><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge"><span class="icon">&#10010;</span>Write</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${fp}${renderWriteLines(inp.content)}</div></div>`;
+    const stats=`<span class="diff-stat add">+${_lineCount(inp.content)}</span>`;
+    el.innerHTML=`<div class="tool-block code-edit"><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge"><span class="icon">&#10010;</span>Write</span><span class="tool-preview filename">${esc(fname)}</span><span class="diff-stats">${stats}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${fp}${renderWriteLines(inp.content)}</div></div>`;
     document.getElementById('messages').appendChild(el);scrollBottomSmooth();return;
   }
   if(name==='NotebookEdit'&&inp.new_source!==undefined){
     const el=document.createElement('div');el.className='msg ai tool-msg code-edit';
+    const fname=_basename(inp.notebook_path);
     const fp=inp.notebook_path?`<div class="filepath">${esc(inp.notebook_path)}</div>`:'';
-    el.innerHTML=`<div class="tool-block code-edit"><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge"><span class="icon">&#9998;</span>NotebookEdit</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${fp}${renderDiffLines(inp.old_source||'',inp.new_source)}</div></div>`;
+    const stats=_diffStats(inp.old_source||'',inp.new_source);
+    el.innerHTML=`<div class="tool-block code-edit"><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge"><span class="icon">&#9998;</span>NotebookEdit</span><span class="tool-preview filename">${esc(fname)}</span><span class="diff-stats">${stats}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${fp}${renderDiffLines(inp.old_source||'',inp.new_source)}</div></div>`;
+    document.getElementById('messages').appendChild(el);scrollBottomSmooth();return;
+  }
+  // Bash — show description inline (more readable than long piped commands), command in body
+  if(name==='Bash'&&typeof inp.command==='string'){
+    const cmd=inp.command;
+    const desc=inp.description||'';
+    const bg=inp.run_in_background?' · bg':'';
+    // Preview: prefer description (human summary). Fallback to command if no desc.
+    const previewRaw=desc||cmd;
+    const preview=previewRaw.length>140?previewRaw.slice(0,140)+'…':previewRaw;
+    const previewClass=desc?'tool-preview':'tool-preview mono';
+    const el=document.createElement('div');el.className='msg ai tool-msg';
+    const bodyParts=[];
+    if(desc)bodyParts.push(`<div class="tool-sub"># ${esc(desc)}</div>`);
+    bodyParts.push(`<div class="tool-cmd"><span class="tool-prompt">$</span> ${esc(cmd)}</div>`);
+    if(typeof inp.timeout==='number')bodyParts.push(`<div class="tool-meta">timeout ${inp.timeout}ms</div>`);
+    el.innerHTML=`<div class="tool-block bash collapsed"${idAttr}><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge bash"><span class="icon">&gt;_</span>Bash${bg}</span><span class="${previewClass}">${esc(preview)}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${bodyParts.join('')}${RSLOT}</div></div>`;
+    document.getElementById('messages').appendChild(el);scrollBottomSmooth();return;
+  }
+  // Read — show filename inline, range as suffix
+  if(name==='Read'&&typeof inp.file_path==='string'){
+    const fp=inp.file_path;
+    const base=fp.split('/').pop()||fp;
+    let range='';
+    if(typeof inp.offset==='number'||typeof inp.limit==='number'){
+      const start=inp.offset||0;
+      const end=typeof inp.limit==='number'?(start+inp.limit):'';
+      range=` :${start}${end!==''?'-'+end:''}`;
+    }
+    if(inp.pages)range=` p.${inp.pages}`;
+    const el=document.createElement('div');el.className='msg ai tool-msg';
+    el.innerHTML=`<div class="tool-block read collapsed"${idAttr}><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge read"><span class="icon">&#128462;</span>Read</span><span class="tool-preview mono">${esc(base)}${esc(range)}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body"><div class="tool-path">${esc(fp)}</div>${RSLOT}</div></div>`;
+    document.getElementById('messages').appendChild(el);scrollBottomSmooth();return;
+  }
+  // Glob — pattern in path
+  if(name==='Glob'&&typeof inp.pattern==='string'){
+    const pat=inp.pattern;
+    const path=inp.path||'.';
+    const el=document.createElement('div');el.className='msg ai tool-msg';
+    el.innerHTML=`<div class="tool-block glob collapsed"${idAttr}><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge glob"><span class="icon">&#128269;</span>Glob</span><span class="tool-preview mono">${esc(pat)}<span class="tool-meta-inline"> in ${esc(path)}</span></span><span class="tool-chevron">&#9662;</span></div><div class="tool-body"><div class="tool-cmd">pattern: ${esc(pat)}</div><div class="tool-cmd">path: ${esc(path)}</div>${RSLOT}</div></div>`;
+    document.getElementById('messages').appendChild(el);scrollBottomSmooth();return;
+  }
+  // Grep — pattern with filters
+  if(name==='Grep'&&typeof inp.pattern==='string'){
+    const pat=inp.pattern;
+    const path=inp.path||'.';
+    const filters=[];
+    if(inp.glob)filters.push(`glob=${inp.glob}`);
+    if(inp.type)filters.push(`type=${inp.type}`);
+    if(inp.output_mode&&inp.output_mode!=='files_with_matches')filters.push(inp.output_mode);
+    if(inp['-i'])filters.push('-i');
+    if(inp.multiline)filters.push('multiline');
+    const meta=filters.length?` <span class="tool-meta-inline">${esc(filters.join(' '))}</span>`:'';
+    const el=document.createElement('div');el.className='msg ai tool-msg';
+    const bodyParts=[`<div class="tool-cmd">pattern: <code>${esc(pat)}</code></div>`,`<div class="tool-cmd">path: ${esc(path)}</div>`];
+    if(filters.length)bodyParts.push(`<div class="tool-meta">${esc(filters.join(' · '))}</div>`);
+    el.innerHTML=`<div class="tool-block grep collapsed"${idAttr}><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge grep"><span class="icon">&#128270;</span>Grep</span><span class="tool-preview mono">${esc(pat)}${meta}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${bodyParts.join('')}${RSLOT}</div></div>`;
+    document.getElementById('messages').appendChild(el);scrollBottomSmooth();return;
+  }
+  // WebFetch / WebSearch — URL or query inline
+  if(name==='WebFetch'&&typeof inp.url==='string'){
+    let host=inp.url;try{host=new URL(inp.url).hostname}catch(e){}
+    const el=document.createElement('div');el.className='msg ai tool-msg';
+    el.innerHTML=`<div class="tool-block webfetch collapsed"${idAttr}><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge webfetch"><span class="icon">&#127760;</span>WebFetch</span><span class="tool-preview mono">${esc(host)}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body"><div class="tool-path">${esc(inp.url)}</div>${inp.prompt?`<div class="tool-sub">${esc(inp.prompt)}</div>`:''}${RSLOT}</div></div>`;
+    document.getElementById('messages').appendChild(el);scrollBottomSmooth();return;
+  }
+  if(name==='WebSearch'&&typeof inp.query==='string'){
+    const el=document.createElement('div');el.className='msg ai tool-msg';
+    el.innerHTML=`<div class="tool-block websearch collapsed"${idAttr}><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge websearch"><span class="icon">&#128269;</span>WebSearch</span><span class="tool-preview mono">${esc(inp.query)}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body"><div class="tool-cmd">query: ${esc(inp.query)}</div>${RSLOT}</div></div>`;
     document.getElementById('messages').appendChild(el);scrollBottomSmooth();return;
   }
   // Default: collapsed JSON dump (hidden behind show-tools toggle)
   const s=typeof input==='string'?input:JSON.stringify(input,null,2);
   const el=document.createElement('div');el.className='msg ai tool-msg';
-  el.innerHTML=`<div class="tool-block collapsed"><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge"><span class="icon">&#9889;</span>${esc(name)}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${esc(s)}</div></div>`;
+  el.innerHTML=`<div class="tool-block collapsed"${idAttr}><div class="tool-head" onclick="this.parentElement.classList.toggle('collapsed')"><span class="tool-badge"><span class="icon">&#9889;</span>${esc(name)}</span><span class="tool-chevron">&#9662;</span></div><div class="tool-body">${esc(s)}${RSLOT}</div></div>`;
   document.getElementById('messages').appendChild(el);
   scrollBottomSmooth();
+}
+
+// Try to attach a tool_result inline inside the matching tool_use block.
+// Returns true if attached, false → caller should render as standalone message.
+function tryAttachToolResult(payload, toolUseId, isImage){
+  let block=null;
+  if(toolUseId){
+    try{block=document.querySelector(`.tool-block[data-tool-use-id="${(window.CSS&&CSS.escape)?CSS.escape(toolUseId):toolUseId}"]`)}catch(e){block=null}
+  }
+  // No fallback to "most recent empty slot" — that misattributes results
+  // when tool_uses are interleaved (codex bridge especially: an
+  // agent_message and a command_exec can land out of order, and the
+  // empty-slot fallback would inject the command result into the
+  // assistant message's slot). Caller renders standalone when we miss.
+  if(!block)return false;
+  const slot=block.querySelector(':scope > .tool-body > .tool-result-area[data-empty="1"]')
+            || block.querySelector('.tool-result-area[data-empty="1"]');
+  if(!slot)return false;
+  let html='';
+  if(isImage&&Array.isArray(payload)){
+    const grid=payload.length>1?` cols-${Math.min(payload.length,3)}`:'';
+    html=`<div class="tool-result-head"><span class="dot good"></span>image${payload.length>1?' · '+payload.length:''}</div><div class="media-grid${grid}">${payload.map(s=>`<img src="${s}" onclick="openLightbox(this.src)" loading="lazy" style="max-width:100%;border-radius:6px;cursor:pointer">`).join('')}</div>`;
+  }else{
+    const t=String(payload||'');
+    const display=t.length>4000?t.slice(0,4000)+'…':t;
+    html=`<div class="tool-result-head"><span class="dot good"></span>result${t.length>4000?` · ${t.length.toLocaleString()} chars (truncated)`:''}</div><div class="tool-result-body">${esc(display)}</div>`;
+  }
+  slot.innerHTML=html;
+  slot.dataset.empty='0';
+  return true;
 }
 
 function addToolResultMsg(text){
@@ -2561,6 +2768,10 @@ function openNewSheet(){
   if(isMobile)closeSidebar();
   // Apply server-preferred default mode every open (in case it changed)
   setNewSessionMode(SERVER_CONFIG.defaultReplaceSoul?'benwo':'weiran');
+  // Show backend selector only when agents.codex.enabled in server config.
+  // Hidden by default so users without codex don't see a confusing empty toggle.
+  const beWrap=document.getElementById('backend-select-wrap');
+  if(beWrap)beWrap.style.display=SERVER_CONFIG.codexEnabled?'':'none';
   // Fetch GAL saves only when gal skill is available (easter egg)
   const galWrap=document.getElementById('gal-resume-wrap');
   if(galWrap&&galWrap.style.display!=='none')fetchGalSaves();
@@ -2792,6 +3003,13 @@ function createSession(){
   const mode=getNewSessionMode();
   const flags=modeToFlags(mode);
   const galId=document.getElementById('m-gal').value;
+  // Backend selector lives behind SERVER_CONFIG.codexEnabled — when codex
+  // isn't configured we never read it (selector is hidden).
+  let backend='auto';
+  if(SERVER_CONFIG.codexEnabled){
+    const be=document.querySelector('input[name="m-backend"]:checked');
+    if(be)backend=be.value;
+  }
   closeNewSheet();
   const msg={
     type:'create',
@@ -2804,12 +3022,16 @@ function createSession(){
     replace_soul:flags.replace_soul,
     initial_message:initial||undefined
   };
+  if(backend && backend!=='auto')msg.backend=backend;
   if(galId)msg.gal_id=galId;
   wsSend(msg);
   ['m-name','m-project','m-model','m-initial'].forEach(id=>document.getElementById(id).value='');
   document.getElementById('m-gal').value='';
   // Reset mode to server-preferred default for next open
   setNewSessionMode(SERVER_CONFIG.defaultReplaceSoul?'benwo':'weiran');
+  // Reset backend to auto for next open
+  const beAuto=document.getElementById('m-backend-auto');
+  if(beAuto)beAuto.checked=true;
 }
 
 function promptRename(id,currentName){
@@ -2867,9 +3089,10 @@ function doResume(sid,displayName,model){
       msgs.forEach(msg=>{
         if(msg.role==='user')addUserMsg(msg.content,msg.timestamp);
         else if(msg.role==='assistant')addAIMsg(msg.content,false,msg.timestamp);
-        else if(msg.role==='tool_use')addToolUseMsg(msg.tool_name,msg.tool_input);
+        else if(msg.role==='tool_use')addToolUseMsg(msg.tool_name,msg.tool_input,msg.tool_use_id);
         else if(msg.role==='tool_result'){
           if(msg.content&&msg.content.includes('[Old tool result content cleared]'))return;
+          if(tryAttachToolResult(msg.content,msg.tool_use_id,false))return;
           addToolResultMsg(msg.content);
         }
         else if(msg.role==='compact_boundary')addCompactBoundary(msg.content,msg.timestamp);
