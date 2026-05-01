@@ -1022,6 +1022,11 @@ type sessionCreateOpts struct {
 	ReplaceSoul bool     // 本我模式 — use --system-prompt-file instead of --append-system-prompt-file
 	ResumeID    string   // Claude Code session ID to resume (adds --resume <id>)
 	SpawnedBy   string   // parent session ID that spawned this one
+	// InitialMessage feeds intimate-trigger regex matching at prompt build
+	// time. Stored separately from the broadcast/sendMessage path because
+	// we need it BEFORE the backend spawns, while the broadcast happens
+	// AFTER the session is up.
+	InitialMessage string
 	// Backend selects which Backend implementation drives the session.
 	// Empty defaults through resolveBackendKind: explicit > model auto-route
 	// > BackendCC. BackendCodex routes through spawnCodex (Round 4).
@@ -1133,9 +1138,16 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 	if opts.Soul {
 		initSessionDir()
 
-		// Build prompt with per-session overrides (concurrency-safe)
+		// Build prompt with per-session overrides (concurrency-safe).
+		// Routing fields (LaunchDir/FirstMessage/SessionID) are populated so
+		// detectSoulMode + audit see real per-session inputs instead of the
+		// daemon's launch-time globals. opts.Project has already been
+		// expandHome-d above.
 		ovr := promptOverrides{
-			EnvOverride: opts.EnvOverride,
+			EnvOverride:  opts.EnvOverride,
+			LaunchDir:    opts.Project,
+			FirstMessage: opts.InitialMessage,
+			SessionID:    id,
 		}
 		if opts.Category == CategoryHeartbeat {
 			ovr.Mode = "heartbeat"

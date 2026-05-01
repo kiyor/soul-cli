@@ -816,17 +816,18 @@ func handleServer(args []string) {
 		}
 
 		sess, err := sm.createSessionWithOpts(sessionCreateOpts{
-			Name:        req.Name,
-			Project:     req.Project,
-			Model:       model,
-			Soul:        soulFiles,
-			MCP:         req.MCPConfig,
-			GalID:       req.GalID,
-			Category:    req.Category,
-			Tags:        req.Tags,
-			ReplaceSoul: replaceSoul,
-			SpawnedBy:   req.SpawnedBy,
-			Backend:     backendKind,
+			Name:           req.Name,
+			Project:        req.Project,
+			Model:          model,
+			Soul:           soulFiles,
+			MCP:            req.MCPConfig,
+			GalID:          req.GalID,
+			Category:       req.Category,
+			Tags:           req.Tags,
+			ReplaceSoul:    replaceSoul,
+			SpawnedBy:      req.SpawnedBy,
+			Backend:        backendKind,
+			InitialMessage: req.InitialMessage,
 		})
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})

@@ -314,19 +314,30 @@ func detectSourceFromEnv() string {
 
 // gatherRoutingSignals collects all routing inputs from process state.
 // Best-effort: missing fields are simply empty strings.
+//
+// When promptOverrides are active (server/spawn create paths set them via
+// buildPromptWithOverrides), per-session LaunchDir / FirstMessage take
+// precedence over the binary-wide launchDir / empty default. This is what
+// makes intimate triggers and technical cwd prefixes actually fire in
+// server mode — without it, every session sees the daemon's static cwd
+// and an empty first message.
 func gatherRoutingSignals() RoutingSignals {
-	return RoutingSignals{
-		CLIMode:   currentMode,
-		LaunchDir: launchDir,
-		Source:    detectSourceFromEnv(),
-		// FirstMessage requires intercepting stdin/argv before claude consumes
-		// it, which we don't do in Phase A. Will be populated by spawn /
-		// server / TG bot in Phase C when they have access to the user's
-		// initial turn. For now, leave empty — detectSoulMode will fall
-		// through to cwd / source signals.
+	sig := RoutingSignals{
+		CLIMode:      currentMode,
+		LaunchDir:    launchDir,
+		Source:       detectSourceFromEnv(),
 		FirstMessage: "",
 		Explicit:     os.Getenv("WEIRAN_SOUL_MODE"),
 	}
+	if activeOverrides != nil {
+		if activeOverrides.LaunchDir != "" {
+			sig.LaunchDir = activeOverrides.LaunchDir
+		}
+		if activeOverrides.FirstMessage != "" {
+			sig.FirstMessage = activeOverrides.FirstMessage
+		}
+	}
+	return sig
 }
 
 // PromptRoutingDecision is the audit record emitted after every buildPrompt.

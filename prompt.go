@@ -433,6 +433,10 @@ func buildPrompt() buildPromptResult {
 	// from "loader returned paths but nothing made it into the prompt".
 	signals := gatherRoutingSignals()
 	soulMode := detectSoulMode(signals)
+	var auditSessionID string
+	if activeOverrides != nil {
+		auditSessionID = activeOverrides.SessionID
+	}
 	recordRoutingAudit(PromptRoutingDecision{
 		Timestamp:     time.Now(),
 		CLIMode:       currentMode,
@@ -441,7 +445,7 @@ func buildPrompt() buildPromptResult {
 		FragmentsUsed: loadedFragments,
 		TokensEst:     estimateTokens(content),
 		CharSize:      len(content),
-		// SessionID populated by the server when known; CLI runs leave it empty.
+		SessionID:     auditSessionID,
 	})
 
 	return buildPromptResult{content: content, sections: sections}
@@ -1108,6 +1112,14 @@ type promptOverrides struct {
 	SkipCCSessions bool   // skip "Recent Claude Code session summaries" injection
 	// (resume paths already have full CC history via --resume <ccID>;
 	// only fresh/spawn sessions like relay/review need the summary injection)
+
+	// Routing signal overrides — populated by server/spawn callers so
+	// detectSoulMode + recordRoutingAudit see real per-session inputs
+	// instead of the binary's launch-time globals (which for a long-running
+	// LaunchDaemon are all the same value: the daemon's WorkingDirectory).
+	LaunchDir    string // overrides launchDir for routing (session's Project)
+	FirstMessage string // user's initial turn — feeds intimate trigger regex
+	SessionID    string // recorded in prompt_routing_audit.session_id for join-back
 }
 
 // activeOverrides is set before calling buildPrompt() and cleared after.

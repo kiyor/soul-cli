@@ -990,3 +990,188 @@ func TestBuildPrompt_BootCoreCommonPrefix(t *testing.T) {
 		}
 	}
 }
+
+// ── Override-driven routing (server/spawn create paths) ──
+//
+// These tests cover the bug found in the 2026-04-30 GPT-5.5 review:
+// gatherRoutingSignals() used to read only process globals (launchDir from
+// init(), FirstMessage hardcoded ""), so server-mode sessions couldn't
+// trigger intimate/technical routing even when the API caller supplied
+// project + initial_message. promptOverrides now carries those signals.
+
+// withActiveOverrides installs ovr as the current activeOverrides for the
+// duration of the test, restoring the previous value on cleanup. Mirrors
+// what buildPromptWithOverrides does in production.
+func withActiveOverrides(t *testing.T, ovr promptOverrides) {
+	t.Helper()
+	promptOverrideMu.Lock()
+	prev := activeOverrides
+	activeOverrides = &ovr
+	promptOverrideMu.Unlock()
+	t.Cleanup(func() {
+		promptOverrideMu.Lock()
+		activeOverrides = prev
+		promptOverrideMu.Unlock()
+	})
+}
+
+func TestGatherRoutingSignals_OverridesLaunchDir(t *testing.T) {
+	withActiveOverrides(t, promptOverrides{LaunchDir: "/Users/kiyor/zilliz/foo"})
+	sig := gatherRoutingSignals()
+	if sig.LaunchDir != "/Users/kiyor/zilliz/foo" {
+		t.Errorf("LaunchDir = %q, want override value", sig.LaunchDir)
+	}
+}
+
+func TestGatherRoutingSignals_OverridesFirstMessage(t *testing.T) {
+	withActiveOverrides(t, promptOverrides{FirstMessage: "/selfie cosplay"})
+	sig := gatherRoutingSignals()
+	if sig.FirstMessage != "/selfie cosplay" {
+		t.Errorf("FirstMessage = %q, want override value", sig.FirstMessage)
+	}
+}
+
+func TestGatherRoutingSignals_NoOverridesFallsBackToGlobals(t *testing.T) {
+	// No overrides installed → should match the legacy behavior (launchDir
+	// from process init, empty FirstMessage).
+	promptOverrideMu.Lock()
+	prev := activeOverrides
+	activeOverrides = nil
+	promptOverrideMu.Unlock()
+	t.Cleanup(func() {
+		promptOverrideMu.Lock()
+		activeOverrides = prev
+		promptOverrideMu.Unlock()
+	})
+
+	sig := gatherRoutingSignals()
+	if sig.LaunchDir != launchDir {
+		t.Errorf("LaunchDir = %q, want global launchDir %q", sig.LaunchDir, launchDir)
+	}
+	if sig.FirstMessage != "" {
+		t.Errorf("FirstMessage = %q, want empty (no override)", sig.FirstMessage)
+	}
+}
+
+func TestGatherRoutingSignals_EmptyOverrideKeepsGlobal(t *testing.T) {
+	// Override with empty LaunchDir should NOT clobber the global. This
+	// matters for callsites that don't have a project (e.g. cron/heartbeat
+	// just set Mode/SessionID, leave LaunchDir blank).
+	withActiveOverrides(t, promptOverrides{LaunchDir: "", FirstMessage: ""})
+	sig := gatherRoutingSignals()
+	if sig.LaunchDir != launchDir {
+		t.Errorf("LaunchDir = %q, want fallback to global %q", sig.LaunchDir, launchDir)
+	}
+}
+
+// detectSoulMode + override end-to-end: project under technical prefix +
+// non-empty FirstMessage that doesn't match intimate triggers → technical wins
+// (technical-prefix precedence is higher than source default).
+func TestDetectSoulMode_OverrideRoutesToTechnical(t *testing.T) {
+	withMockRoutingConfig(t, `
+intimate_triggers:
+  - '^/selfie\b'
+technical_cwd_prefixes:
+  - '/Users/kiyor/zilliz'
+source_defaults:
+  spawn: emotional
+fallback: emotional
+`)
+	withActiveOverrides(t, promptOverrides{
+		LaunchDir:    "/Users/kiyor/zilliz/milvus",
+		FirstMessage: "help me debug a panic",
+	})
+	sig := gatherRoutingSignals()
+	sig.Source = "spawn" // simulate spawn-source env (detectSourceFromEnv reads env)
+	if got := detectSoulMode(sig); got != SoulModeTechnical {
+		t.Errorf("detectSoulMode = %s, want technical (project under zilliz prefix)", got)
+	}
+}
+
+func TestDetectSoulMode_OverrideTriggersIntimate(t *testing.T) {
+	withMockRoutingConfig(t, `
+intimate_triggers:
+  - '^/selfie\b'
+technical_cwd_prefixes:
+  - '/Users/kiyor/zilliz'
+source_defaults:
+  spawn: emotional
+fallback: emotional
+`)
+	withActiveOverrides(t, promptOverrides{
+		LaunchDir:    "/Users/kiyor/.openclaw/workspace",
+		FirstMessage: "/selfie 旅行场景",
+	})
+	sig := gatherRoutingSignals()
+	sig.Source = "spawn"
+	if got := detectSoulMode(sig); got != SoulModeIntimate {
+		t.Errorf("detectSoulMode = %s, want intimate (FirstMessage matched /selfie)", got)
+	}
+}
+
+// recordRoutingAudit reads SessionID via activeOverrides in prompt.go's call
+// site. We simulate that by constructing the decision the same way.
+func TestRecordRoutingAudit_SessionIDFromOverrides(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory sqlite: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE prompt_routing_audit (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		timestamp       TEXT NOT NULL,
+		cli_mode        TEXT NOT NULL DEFAULT '',
+		soul_mode       TEXT NOT NULL DEFAULT '',
+		signals_json    TEXT NOT NULL DEFAULT '{}',
+		fragments_json  TEXT NOT NULL DEFAULT '[]',
+		tokens_est      INTEGER NOT NULL DEFAULT 0,
+		char_size       INTEGER NOT NULL DEFAULT 0,
+		session_id      TEXT NOT NULL DEFAULT '',
+		launch_dir      TEXT NOT NULL DEFAULT '',
+		source          TEXT NOT NULL DEFAULT ''
+	)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	withActiveOverrides(t, promptOverrides{
+		LaunchDir:    "/Users/kiyor/zilliz/x",
+		FirstMessage: "ping",
+		SessionID:    "session-uuid-xyz",
+	})
+
+	// Simulate what prompt.go does: gather → detect → audit.
+	signals := gatherRoutingSignals()
+	signals.Source = "spawn"
+	soulMode := detectSoulMode(signals)
+	var sid string
+	if activeOverrides != nil {
+		sid = activeOverrides.SessionID
+	}
+	writeRoutingAudit(db, PromptRoutingDecision{
+		Timestamp: time.Now(),
+		SoulMode:  soulMode,
+		Signals:   signals,
+		SessionID: sid,
+	})
+
+	var gotSID, gotDir string
+	var gotSignalsJSON string
+	row := db.QueryRow(`SELECT session_id, launch_dir, signals_json
+	                     FROM prompt_routing_audit ORDER BY id DESC LIMIT 1`)
+	if err := row.Scan(&gotSID, &gotDir, &gotSignalsJSON); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if gotSID != "session-uuid-xyz" {
+		t.Errorf("session_id = %q, want session-uuid-xyz", gotSID)
+	}
+	if gotDir != "/Users/kiyor/zilliz/x" {
+		t.Errorf("launch_dir = %q, want zilliz path", gotDir)
+	}
+	var sig RoutingSignals
+	if err := json.Unmarshal([]byte(gotSignalsJSON), &sig); err != nil {
+		t.Fatalf("decode signals: %v", err)
+	}
+	if sig.FirstMessage != "ping" {
+		t.Errorf("signals.FirstMessage = %q, want ping", sig.FirstMessage)
+	}
+}
