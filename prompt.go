@@ -38,6 +38,19 @@ type promptSection struct {
 type buildPromptResult struct {
 	content  string
 	sections []promptSection
+
+	// Phase D — Runtime Soul Patch Protocol:
+	// LoadedFragments enumerates the soul fragment file paths that were actually
+	// emitted into the SOUL section of this prompt. The serverSession captures
+	// this so per-message lazy soul-patch injection knows what's already in the
+	// persona and only patches in the *new* fragments (cumulative semantics —
+	// "only add, never remove").
+	//
+	// SoulMode is the routing decision detectSoulMode() made at build time.
+	// Stored alongside LoadedFragments for audit / debugging only — the per
+	// message hook recomputes the mode from each new user message.
+	LoadedFragments []string
+	SoulMode        SoulMode
 }
 
 // handlePrompt prints the full assembled system prompt to stdout with section stats on stderr.
@@ -448,7 +461,12 @@ func buildPrompt() buildPromptResult {
 		SessionID:     auditSessionID,
 	})
 
-	return buildPromptResult{content: content, sections: sections}
+	return buildPromptResult{
+		content:         content,
+		sections:        sections,
+		LoadedFragments: loadedFragments,
+		SoulMode:        soulMode,
+	}
 }
 
 // ── Prompt safety utilities ──

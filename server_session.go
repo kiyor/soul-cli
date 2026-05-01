@@ -151,6 +151,27 @@ type serverSession struct {
 	taskMessage    string   // original task message for retry
 	sessionMgr     *sessionManager // back-reference for fallback retry
 
+	// ── Phase D — Runtime Soul Patch Protocol ──
+	//
+	// LoadedFragments is the cumulative set of soul fragment file paths whose
+	// content has already been absorbed into this session's persona — either
+	// emitted into the initial system prompt at session creation, or appended
+	// via a soul-patch block on a later user turn. Cumulative semantics:
+	// once a fragment is loaded it stays loaded ("only add, never remove").
+	// Used as the diff anchor for per-message lazy injection.
+	LoadedFragments []string `json:"loaded_fragments,omitempty"`
+
+	// PendingPatches is the queue of `<<soul-patch>>...<</soul-patch>>` blocks
+	// (already wrapped, ready to ship) that the server detected a need for but
+	// could not deliver yet because the user hasn't sent a message. Per protocol,
+	// patch blocks must always ride along with a real user turn — so we attach
+	// them to the next inbound message instead of pushing them standalone.
+	PendingPatches []string `json:"pending_patches,omitempty"`
+
+	// CurrentSoulMode mirrors the last detectSoulMode() result for this session.
+	// Audit / debugging only — the lazy injector recomputes from every message.
+	CurrentSoulMode string `json:"current_soul_mode,omitempty"`
+
 	mu          sync.Mutex
 }
 
@@ -1165,6 +1186,20 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 		result := buildPromptWithOverrides(ovr)
 		promptFile = writePromptForSession(id, result)
 		sess.promptFile = promptFile
+
+		// Phase D — capture which soul fragments the initial prompt assembly
+		// emitted so per-message lazy soul-patch injection knows what is
+		// already in the persona and only patches in the *new* fragments.
+		// Mode is recorded for audit / debugging only — the per-message hook
+		// always recomputes from the inbound message.
+		if len(result.LoadedFragments) > 0 {
+			sess.LoadedFragments = append([]string(nil), result.LoadedFragments...)
+		}
+		if result.SoulMode != "" {
+			sess.CurrentSoulMode = string(result.SoulMode)
+		}
+		// Defer the persistence write to *after* ensureServerSessionFull
+		// (further down) inserts the row, otherwise the UPDATE no-ops.
 	}
 
 	// Spawn the chosen Backend. spawnOpts is shared across both paths so
@@ -1229,6 +1264,13 @@ func (sm *sessionManager) createSessionWithOpts(opts sessionCreateOpts) (*server
 	// Default column value is 1; only write when false to keep UPDATE traffic low.
 	if !opts.Soul {
 		setSoulEnabledDB(id, false)
+	}
+	// Phase D — persist the initial soul-patch state (loaded fragments + mode)
+	// so a server restart that bounces this session can restore the same
+	// "already loaded" set instead of re-patching everything on the first
+	// post-restart user turn.
+	if len(sess.LoadedFragments) > 0 || sess.CurrentSoulMode != "" {
+		setSoulPatchState(id, sess.LoadedFragments, sess.PendingPatches, sess.CurrentSoulMode)
 	}
 
 	// Attach stdout/event → SSE bridge, exit watcher, and stderr drain.
@@ -2112,6 +2154,20 @@ func (sm *sessionManager) rehydrateSessions() {
 			setGalID(sess.ID, s.GalID)
 		}
 
+		// Phase D — restore the cumulative soul-patch state. Without this the
+		// rehydrated session forgets which fragments are already in the
+		// model's persona prefix (the resumed claude --resume picks up the
+		// JSONL with the patches from before the restart) and would re-patch
+		// them on the first post-restart user turn, breaking cache prefixes
+		// and causing the model to absorb the same content twice.
+		if len(s.LoadedFragments) > 0 || len(s.PendingPatches) > 0 || s.CurrentSoulMode != "" {
+			sess.mu.Lock()
+			sess.LoadedFragments = append([]string(nil), s.LoadedFragments...)
+			sess.PendingPatches = append([]string(nil), s.PendingPatches...)
+			sess.CurrentSoulMode = s.CurrentSoulMode
+			sess.mu.Unlock()
+		}
+
 		wakeNote := "idle"
 		if s.RehydrateMsg != "" {
 			wakeNote = "wake"
@@ -2235,6 +2291,11 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 				})
 			}
 			text := extractContentText(ev.Message.Content)
+			// Phase D — strip any `<<soul-patch>>...<</soul-patch>>` blocks
+			// before surfacing user history to the UI. Patches are server
+			// side persona augmentation, not human-typed content; the
+			// frontend should never render them in the chat pane.
+			text = stripSoulPatchBlocks(text)
 			if text != "" {
 				all = append(all, historyMessage{
 					Role:      "user",

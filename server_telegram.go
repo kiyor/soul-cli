@@ -330,25 +330,37 @@ func (tb *telegramBridge) processMessage(chat *tgChat, text string) {
 		msgToSend = buildTGContext(chatID) + text
 	}
 
-	// Capture first user message for hint display
+	// Phase D — Runtime Soul Patch Protocol: sanitize literal markers and
+	// compute lazy soul fragments for this turn. The injector treats the
+	// already-prefixed msgToSend as the "real user content" so patches land
+	// before the TG context block too — the model still gets every fragment
+	// before any user-shaped text.
+	injection := sess.prepareSoulPatch(msgToSend)
+
+	// Capture first user message for hint display (use the original raw text
+	// so the hint is the human-typed message, not the prefixed/patched form).
 	sess.mu.Lock()
 	if sess.FirstMsg == "" {
 		sess.FirstMsg = text
 	}
 	sess.mu.Unlock()
 
-	// Broadcast user message to Web UI SSE/WS (show original text, not with context prefix)
+	// Broadcast user message to Web UI SSE/WS — show only the human-typed
+	// text (no context prefix, no patch blocks).
 	userEvent, _ := json.Marshal(map[string]any{
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": text},
 	})
 	sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
 
-	if err := sess.process.sendMessage(msgToSend); err != nil {
+	if err := sess.process.sendMessage(injection.Outbound); err != nil {
 		im.SendMessage(tb.token, chatID, "Send failed: "+err.Error())
 		closeBusy() // unblock queue consumer safely
 		return
 	}
+
+	// Backend accepted → commit. Same failure semantics as the Web UI path.
+	sess.commitLoadedFragments(injection.NewFragments, injection.SoulMode)
 
 	// Wait for Claude to finish this turn before processing next queued message
 	select {

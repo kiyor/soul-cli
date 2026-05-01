@@ -838,29 +838,42 @@ func handleServer(args []string) {
 
 		// Capture first user message for hint display
 		if req.InitialMessage != "" {
+			// Phase D — sanitize on intake so any literal soul-patch markers
+			// in the create-time InitialMessage are disarmed before we cache
+			// them as FirstMsg or feed them to the model.
+			cleanInitial, _ := sanitizeSoulPatchInput(req.InitialMessage)
 			sess.mu.Lock()
 			if sess.FirstMsg == "" {
-				sess.FirstMsg = req.InitialMessage
+				sess.FirstMsg = cleanInitial
 			}
 			sess.mu.Unlock()
-		}
 
-		// Send initial message if provided — wait for Claude Code to emit init
-		// before writing to stdin (500ms hardcoded sleep was unreliable for slow
-		// providers like GPT/MiniMax that need proxy startup time).
-		if req.InitialMessage != "" {
+			// Send initial message if provided — wait for Claude Code to
+			// emit init before writing to stdin (500ms hardcoded sleep was
+			// unreliable for slow providers like GPT/MiniMax that need
+			// proxy startup time).
+			//
+			// We route the initial message through prepareSoulPatch for
+			// consistency with the regular /message path: the create-time
+			// build already loaded fragments for the detected mode, so the
+			// diff here is normally empty (no patch) — but if the user's
+			// first message routes to a *different* mode than the cwd /
+			// source did, the missing fragments get patched in immediately.
 			go func() {
 				if !sess.process.waitInit(30 * time.Second) {
 					fmt.Fprintf(os.Stderr, "[%s] server: init timeout for %s, sending initial message anyway\n", appName, shortID(sess.ID))
 				}
+				injection := sess.prepareSoulPatch(cleanInitial)
 				userEvent, _ := json.Marshal(map[string]any{
 					"type":    "user",
-					"message": map[string]any{"role": "user", "content": req.InitialMessage},
+					"message": map[string]any{"role": "user", "content": injection.DisplayMessage},
 				})
 				sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
-				if err := sess.process.sendMessage(req.InitialMessage); err != nil {
+				if err := sess.process.sendMessage(injection.Outbound); err != nil {
 					fmt.Fprintf(os.Stderr, "[%s] server: failed to send initial message to %s: %v\n", appName, shortID(sess.ID), err)
+					return
 				}
+				sess.commitLoadedFragments(injection.NewFragments, injection.SoulMode)
 			}()
 		}
 
@@ -1006,11 +1019,19 @@ func handleServer(args []string) {
 		// message instead of continuing to block on stdin.
 		sess.dismissAllPendingAUQ("user_message")
 
-		// Capture first user message for hint display
+		// Phase D — Runtime Soul Patch Protocol: sanitize literal markers,
+		// then compute the soul-mode for this turn and produce a possibly
+		// patched outbound message. DisplayMessage is what the UI sees
+		// (sanitized real text only), Outbound is what the model sees
+		// (patches + real text).
+		injection := sess.prepareSoulPatch(req.Message)
+
+		// Capture first user message for hint display (display version, not
+		// the patched outbound — the hint is for humans)
 		sess.mu.Lock()
 		firstMsgCaptured := sess.FirstMsg == ""
 		if firstMsgCaptured {
-			sess.FirstMsg = req.Message
+			sess.FirstMsg = injection.DisplayMessage
 		}
 		sess.mu.Unlock()
 		if firstMsgCaptured && hub != nil {
@@ -1018,17 +1039,25 @@ func handleServer(args []string) {
 		}
 
 		// Broadcast user message to SSE/WS so it persists in history
-		// (without this, switching sessions and back loses user messages)
+		// (without this, switching sessions and back loses user messages).
+		// We broadcast the display version so soul-patch payloads never
+		// surface in the Web UI history pane.
 		userEvent, _ := json.Marshal(map[string]any{
 			"type":    "user",
-			"message": map[string]any{"role": "user", "content": req.Message},
+			"message": map[string]any{"role": "user", "content": injection.DisplayMessage},
 		})
 		sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
 
-		if err := sess.process.sendMessage(req.Message); err != nil {
+		if err := sess.process.sendMessage(injection.Outbound); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+
+		// Backend accepted the message → commit the new fragments onto the
+		// session's persistent loaded set so we don't re-patch them next turn.
+		// On send failure above we deliberately *don't* commit, so the patch
+		// re-fires on the next attempt.
+		sess.commitLoadedFragments(injection.NewFragments, injection.SoulMode)
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 	}))

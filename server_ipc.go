@@ -182,19 +182,28 @@ func handleIPCMessageFrom(sm *sessionManager, hub *wsHub, maxRounds int) http.Ha
 		targetSess.touch()
 		targetSess.setStatus("running")
 
-		// Broadcast user event for UI
+		// Phase D — Runtime Soul Patch Protocol: peer-session IPC messages
+		// route through the same lazy injector as Web UI / TG. The sanitizer
+		// strips any patch markers a misbehaving peer might smuggle, and the
+		// mode router uses the prefixed message body to decide what fragments
+		// the target persona needs for this incoming turn.
+		injection := targetSess.prepareSoulPatch(prefixedMsg)
+
+		// Broadcast user event for UI — display the sanitized prefixed
+		// message, never the patched outbound.
 		userEvent, _ := json.Marshal(map[string]any{
 			"type":    "user",
-			"message": map[string]any{"role": "user", "content": prefixedMsg},
+			"message": map[string]any{"role": "user", "content": injection.DisplayMessage},
 			"ipc":     true,
 			"from":    req.FromSessionID,
 		})
 		targetSess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
 
-		if err := targetSess.process.sendMessage(prefixedMsg); err != nil {
+		if err := targetSess.process.sendMessage(injection.Outbound); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		targetSess.commitLoadedFragments(injection.NewFragments, injection.SoulMode)
 
 		// Broadcast IPC event to WebSocket
 		if hub != nil {

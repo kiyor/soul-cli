@@ -93,6 +93,20 @@ func openServerDB() (*sql.DB, error) {
 			created_at  TEXT NOT NULL
 		)`)
 		serverDB.Exec(`CREATE INDEX IF NOT EXISTS idx_si_pair ON session_interactions(from_id, to_id)`)
+
+		// Phase D — Runtime Soul Patch Protocol persistent state.
+		// loaded_fragments: JSON array of fragment file paths absorbed into the
+		//                   session's persona (cumulative — never shrinks).
+		// pending_patches:  JSON array of `<<soul-patch>>...<</soul-patch>>` blocks
+		//                   queued by server-initiated transitions but not yet
+		//                   delivered (waiting for next user message).
+		// current_soul_mode: last detected mode for audit / debugging.
+		// Default '[]' on the JSON columns and '' on the mode keep null-safe
+		// scans painless. All three are written via setSoulPatchState() and
+		// read back during rehydrateSessions().
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN loaded_fragments TEXT NOT NULL DEFAULT '[]'`)
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN pending_patches TEXT NOT NULL DEFAULT '[]'`)
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN current_soul_mode TEXT NOT NULL DEFAULT ''`)
 	})
 	if serverDBErr != nil {
 		return nil, serverDBErr
@@ -898,6 +912,69 @@ type rehydratableSession struct {
 	RehydrateMsg    string
 	ChromeEnabled   bool
 	GalID           string
+
+	// Phase D — Runtime Soul Patch Protocol state. Restored after restart so
+	// the lazy injector keeps its monotonic-add semantics across the bounce.
+	LoadedFragments []string
+	PendingPatches  []string
+	CurrentSoulMode string
+}
+
+// setSoulPatchState persists the Phase D soul-patch tracking fields onto a
+// session row. Called from createSessionWithOpts (initial fragments) and
+// commitLoadedFragments (after the backend accepted a patched user turn).
+//
+// Best-effort: a DB write failure logs to stderr but never blocks message
+// delivery — the worst case is one or two duplicate fragments in the next
+// turn after a restart, which the model will tolerate (cumulative semantics).
+func setSoulPatchState(sessionID string, loaded []string, pending []string, mode string) {
+	if sessionID == "" {
+		return
+	}
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	if loaded == nil {
+		loaded = []string{}
+	}
+	if pending == nil {
+		pending = []string{}
+	}
+	loadedJSON, _ := json.Marshal(loaded)
+	pendingJSON, _ := json.Marshal(pending)
+	now := time.Now().Format(time.RFC3339)
+	serverDBMu.Lock()
+	defer serverDBMu.Unlock()
+	if _, err := db.Exec(`UPDATE server_sessions
+		SET loaded_fragments=?, pending_patches=?, current_soul_mode=?, updated_at=?
+		WHERE session_id=?`,
+		string(loadedJSON), string(pendingJSON), mode, now, sessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] soul-patch: persist state for %s: %v\n",
+			appName, shortID(sessionID), err)
+	}
+}
+
+// getSoulPatchState reads back persisted Phase D state for a single session.
+// Returns empty values when no row exists or the columns haven't been
+// populated yet (pre-Phase-D sessions).
+func getSoulPatchState(sessionID string) (loaded []string, pending []string, mode string) {
+	if sessionID == "" {
+		return nil, nil, ""
+	}
+	db, err := openServerDB()
+	if err != nil {
+		return nil, nil, ""
+	}
+	var loadedJSON, pendingJSON string
+	err = db.QueryRow(`SELECT COALESCE(loaded_fragments,'[]'), COALESCE(pending_patches,'[]'), COALESCE(current_soul_mode,'')
+		FROM server_sessions WHERE session_id=?`, sessionID).Scan(&loadedJSON, &pendingJSON, &mode)
+	if err != nil {
+		return nil, nil, ""
+	}
+	_ = json.Unmarshal([]byte(loadedJSON), &loaded)
+	_ = json.Unmarshal([]byte(pendingJSON), &pending)
+	return loaded, pending, mode
 }
 
 // getRehydratableSessions returns sessions eligible for rehydration.
@@ -911,7 +988,9 @@ func getRehydratableSessions(maxAge time.Duration) ([]rehydratableSession, error
 	cutoff := time.Now().Add(-maxAge).Format(time.RFC3339)
 	rows, err := db.Query(`
 		SELECT session_id, claude_session_id, name, category, replace_soul,
-		       rehydrate_message, chrome_enabled, gal_id, model, soul_enabled
+		       rehydrate_message, chrome_enabled, gal_id, model, soul_enabled,
+		       COALESCE(loaded_fragments,'[]'), COALESCE(pending_patches,'[]'),
+		       COALESCE(current_soul_mode,'')
 		FROM server_sessions
 		WHERE status IN ('active', 'suspended')
 		  AND claude_session_id != ''
@@ -928,13 +1007,17 @@ func getRehydratableSessions(maxAge time.Duration) ([]rehydratableSession, error
 	for rows.Next() {
 		var s rehydratableSession
 		var replaceSoul, chrome, soulEnabled int
+		var loadedJSON, pendingJSON string
 		if err := rows.Scan(&s.SessionID, &s.ClaudeSID, &s.Name, &s.Category,
-			&replaceSoul, &s.RehydrateMsg, &chrome, &s.GalID, &s.Model, &soulEnabled); err != nil {
+			&replaceSoul, &s.RehydrateMsg, &chrome, &s.GalID, &s.Model, &soulEnabled,
+			&loadedJSON, &pendingJSON, &s.CurrentSoulMode); err != nil {
 			continue
 		}
 		s.ReplaceSoul = replaceSoul == 1
 		s.ChromeEnabled = chrome == 1
 		s.SoulEnabled = soulEnabled == 1
+		_ = json.Unmarshal([]byte(loadedJSON), &s.LoadedFragments)
+		_ = json.Unmarshal([]byte(pendingJSON), &s.PendingPatches)
 		result = append(result, s)
 	}
 	return result, nil
