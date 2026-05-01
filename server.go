@@ -1057,6 +1057,10 @@ func handleServer(args []string) {
 				Answer   string `json:"answer"`
 			} `json:"answers"`
 			Cancelled bool `json:"cancelled,omitempty"`
+			// Plan, when set, overrides tool_input.plan for plan_approval kind.
+			// Lets the Web UI edit the plan content before approving (parity
+			// with Claude Code TUI's edit-then-approve flow).
+			Plan string `json:"plan,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body: " + err.Error()})
@@ -1064,6 +1068,16 @@ func handleServer(args []string) {
 		}
 		if req.RequestID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request_id is required"})
+			return
+		}
+		// ExitPlanMode plan body has no business being multi-megabyte.
+		// Cap defensively before persisting / forwarding to claude. 64KB is
+		// >> any reasonable plan and < the JSONL line size we want to keep
+		// the transcript readable. Anything over this is almost certainly a
+		// bug or abuse.
+		const maxPlanBytes = 64 * 1024
+		if len(req.Plan) > maxPlanBytes {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "plan body too large (max 64KB)"})
 			return
 		}
 		if !sess.process.alive() {
@@ -1105,14 +1119,22 @@ func handleServer(args []string) {
 					"message":  msg,
 				}
 			} else {
-				// Pass original tool_input through unchanged (contains plan
-				// injected by normalizeToolInput). Claude Code's ExitPlanMode
-				// call() will read the plan from input or fall back to disk.
+				// Pass original tool_input through (contains plan injected by
+				// normalizeToolInput). If the Web UI submitted an edited plan
+				// body, override input.plan so Claude Code's ExitPlanMode
+				// call() sees the user's revisions instead of the model's
+				// original draft. Mirrors TUI's edit-then-approve flow.
 				var orig any = map[string]any{}
 				if len(entry.Input) > 0 {
 					if err := json.Unmarshal(entry.Input, &orig); err != nil {
 						writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "corrupt pending input: " + err.Error()})
 						return
+					}
+				}
+				if req.Plan != "" {
+					if m, ok := orig.(map[string]any); ok {
+						m["plan"] = req.Plan
+						orig = m
 					}
 				}
 				decision = map[string]any{
@@ -2281,6 +2303,11 @@ func handleServer(args []string) {
 	}
 	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.TmuxDrawerHideCSS}}", tmuxDrawerHideCSS)
 	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.DisableTmuxDrawer}}", fmt.Sprintf("%t", cfg.DisableTmuxDrawer))
+	// Codex backend availability — drives the New Session sheet's Backend
+	// radio group. False hides the selector entirely; true shows the
+	// auto/cc/codex segmented control. Mirrors codexEnabled package var
+	// (loaded from agents.codex.enabled in config.json).
+	renderedIndex = strings.ReplaceAll(renderedIndex, "{{.CodexEnabled}}", fmt.Sprintf("%t", codexEnabled))
 	renderedIndexBytes := []byte(renderedIndex)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
