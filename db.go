@@ -133,6 +133,31 @@ func openDB() (*sql.DB, error) {
 		`CREATE INDEX IF NOT EXISTS idx_proute_ts ON prompt_routing_audit(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_proute_soul ON prompt_routing_audit(soul_mode)`,
 		`CREATE INDEX IF NOT EXISTS idx_proute_cli ON prompt_routing_audit(cli_mode)`,
+		// webhook_audit: every POST /webhook invocation. Records action routing,
+		// plugin execution result, and any AI fallback session spawned. Used by
+		// `weiran webhook tail` for live debugging and by future analytics to
+		// detect plugin regressions (rising fallback ratio per action).
+		`CREATE TABLE IF NOT EXISTS webhook_audit (
+			id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp           TEXT NOT NULL,
+			request_id          TEXT NOT NULL DEFAULT '',
+			action              TEXT NOT NULL DEFAULT '',
+			host                TEXT NOT NULL DEFAULT '',
+			plugin_path         TEXT NOT NULL DEFAULT '',
+			exit_code           INTEGER NOT NULL DEFAULT 0,
+			duration_ms         INTEGER NOT NULL DEFAULT 0,
+			fallback_session_id TEXT NOT NULL DEFAULT '',
+			body_json           TEXT NOT NULL DEFAULT '',
+			stdout              TEXT NOT NULL DEFAULT '',
+			stderr_tail         TEXT NOT NULL DEFAULT '',
+			timed_out           BOOLEAN NOT NULL DEFAULT 0,
+			status              TEXT NOT NULL DEFAULT '',
+			remote_addr         TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_whook_ts ON webhook_audit(timestamp)`,
+		`CREATE INDEX IF NOT EXISTS idx_whook_action ON webhook_audit(action)`,
+		`CREATE INDEX IF NOT EXISTS idx_whook_status ON webhook_audit(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_whook_req ON webhook_audit(request_id)`,
 	}
 	for _, s := range schemas {
 		if _, err := db.Exec(s); err != nil {

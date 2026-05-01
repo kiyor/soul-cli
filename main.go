@@ -1106,6 +1106,9 @@ func main() {
 	case "session":
 		handleSessionIPC(extra)
 		return
+	case "webhook":
+		runWebhookCmd(extra)
+		return
 	case "server":
 		handleServer(extra)
 		return
@@ -1561,6 +1564,10 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			return
 		case "session":
 			mode = "session"
+			extra = args[i+1:]
+			return
+		case "webhook":
+			mode = "webhook"
 			extra = args[i+1:]
 			return
 		case "server":

@@ -321,6 +321,12 @@ func handleServer(args []string) {
 	serverPort = cfg.Port
 	serverAuthToken = cfg.Token
 
+	// Initialize webhook plugin directory + download root subdirs.
+	// Idempotent and best-effort — failures are logged but never fatal,
+	// because webhook is an optional subsystem and the download root
+	// lives on an external SSD that may not be mounted.
+	initWebhookDirs()
+
 	// Refuse to start without auth token
 	if cfg.Token == "" {
 		fmt.Fprintf(os.Stderr, "[%s] server: refusing to start without auth token\n", appName)
@@ -376,6 +382,18 @@ func handleServer(args []string) {
 	// architecture details (queue depth, session counts, JSON-RPC stats).
 	// See codex_metrics.go for the snapshot shape.
 	mux.HandleFunc("GET /api/codex/metrics", authMiddleware(cfg.Token, handleCodexMetrics))
+
+	// Skill-driven webhook endpoint. Receives JSON bodies (typically from
+	// iPhone Shortcuts share-sheets), routes by `action` field to plugin
+	// files under workspace/webhook/, and falls back to AI-spawned sessions
+	// on plugin miss/failure. See webhook.go for the full protocol.
+	mux.HandleFunc("POST /webhook", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		if !rl.allow() {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+			return
+		}
+		handleWebhook(sm, w, r)
+	}))
 
 	// Config info (authed)
 	mux.HandleFunc("GET /api/config", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
