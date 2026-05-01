@@ -321,10 +321,10 @@ func handleServer(args []string) {
 	serverPort = cfg.Port
 	serverAuthToken = cfg.Token
 
-	// Initialize webhook plugin directory + download root subdirs.
-	// Idempotent and best-effort — failures are logged but never fatal,
-	// because webhook is an optional subsystem and the download root
-	// lives on an external SSD that may not be mounted.
+	// Initialize the webhook framework's compiled-plugin cache dir
+	// (workspace/webhook/_bin/). Idempotent and best-effort — domain
+	// directories (download roots, output trees, etc.) are NOT created
+	// here; that's the plugin's responsibility.
 	initWebhookDirs()
 
 	// Refuse to start without auth token

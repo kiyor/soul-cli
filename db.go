@@ -137,12 +137,15 @@ func openDB() (*sql.DB, error) {
 		// plugin execution result, and any AI fallback session spawned. Used by
 		// `weiran webhook tail` for live debugging and by future analytics to
 		// detect plugin regressions (rising fallback ratio per action).
+		//
+		// Schema is deliberately framework-only: no domain-specific columns
+		// (URL host, output path, MIME type, etc.) — those belong in plugin
+		// internals, not in the framework's audit log.
 		`CREATE TABLE IF NOT EXISTS webhook_audit (
 			id                  INTEGER PRIMARY KEY AUTOINCREMENT,
 			timestamp           TEXT NOT NULL,
 			request_id          TEXT NOT NULL DEFAULT '',
 			action              TEXT NOT NULL DEFAULT '',
-			host                TEXT NOT NULL DEFAULT '',
 			plugin_path         TEXT NOT NULL DEFAULT '',
 			exit_code           INTEGER NOT NULL DEFAULT 0,
 			duration_ms         INTEGER NOT NULL DEFAULT 0,
@@ -173,6 +176,12 @@ func openDB() (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("event_name index creation failed: %w", err)
 	}
+	// Drop the legacy webhook_audit.host column. Earlier framework drafts
+	// stored a host string here, but that's domain-specific data — host
+	// classification belongs in the plugin, not the audit log. SQLite 3.35+
+	// supports DROP COLUMN; the call errors on DBs that no longer have the
+	// column (or never had it), so we ignore the error.
+	_, _ = db.Exec(`ALTER TABLE webhook_audit DROP COLUMN host`)
 	// soul_sessions table (session lifecycle management)
 	if err := ensureSoulSessionTable(db); err != nil {
 		db.Close()

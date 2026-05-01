@@ -1,27 +1,32 @@
 // webhook.go — Skill-driven webhook framework.
 //
-// Concept: a single POST /webhook endpoint receives JSON bodies (typically
-// from iPhone Shortcuts share-sheets). The server routes by `action` field
-// to a plugin file under workspace/webhook/. Plugins are arbitrary
-// executables (.sh / .py / .go / .js / .ts / chmod+x binaries). The plugin
-// receives the raw JSON on stdin, prints a result JSON on stdout, exits 0
-// on success.
+// Concept: a single POST /webhook endpoint receives JSON bodies, routes
+// by `action` field to a plugin file under workspace/webhook/, and
+// falls back to an AI-spawned session on plugin miss/failure. Plugins
+// are arbitrary executables (.sh / .py / .go / .js / .ts / chmod+x
+// binaries) that read the raw JSON on stdin and emit a result JSON on
+// stdout.
 //
-// On failure (exit != 0, exit == 64 explicit fallback signal, timeout, or
-// missing plugin), the framework spawns an AI fallback session that's
-// instructed to (1) complete the task by any means and (2) repair the
-// failing plugin. This makes the webhook framework self-healing — the
-// AI's fix lands in workspace/webhook/, ready to run next time.
+// On failure (exit != 0, exit == 64 explicit fallback signal, timeout,
+// or missing plugin), the framework spawns a session that's instructed
+// to (1) complete the task by any means and (2) repair the plugin.
+// Over time the framework grows new plugins automatically.
 //
-// Plugin discovery: workspace/webhook/<action>.<ext>. The basename equals
-// the action; extension picks the interpreter. Files starting with `_`
-// or `.` are ignored (so `_bin/`, `_router.yaml` etc. are out-of-band).
+// ── Framework vs user data ─────────────────────────────────────────────
 //
-// Security: action names are validated to a strict charset, the plugin
-// directory is fixed (no traversal), PATH is reset before exec, stdout
-// is capped at 10MB. The endpoint reuses the main weiran auth token via
-// authMiddleware; webhook callers (e.g. iPhone Shortcuts) must include
-// `Authorization: Bearer <token>`.
+// This file is part of soul-cli (open-source). It does NOT know what
+// any individual webhook does — no host aliases, no download paths, no
+// output directory conventions. Anything that's specific to one user's
+// setup (where to put downloaded files, how to map URL hosts to plugin
+// names, what an "action" semantically means) lives in user-side
+// plugins under `workspace/webhook/`.
+//
+// The framework only handles:
+//   - dispatch (action → plugin file)
+//   - exec (stdin/stdout JSON, timeouts, env, audit)
+//   - fallback (spawn AI session on failure)
+//
+// Everything else is the plugin's job.
 
 package main
 
@@ -36,7 +41,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,48 +51,19 @@ import (
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const (
-	webhookDirName             = "webhook"        // workspace subdir for plugins
-	webhookBinSubdir           = "_bin"           // compiled .go plugin cache
-	webhookDefaultTimeout      = 30 * time.Second // override via body.timeout
-	webhookMaxTimeout          = 5 * time.Minute  // hard cap
-	webhookMaxStdoutBytes      = 10 * 1024 * 1024 // 10MB
-	webhookMaxBodyBytes        = 1 << 20          // 1MB inbound
-	webhookFallbackExitCode    = 64               // plugin signals "I don't handle this"
-	webhookDefaultDownloadRoot = "/Volumes/weiran/share/downloads"
-	webhookAuditFieldMax       = 8 * 1024 // truncate stdout/stderr for audit row
+	webhookDirName          = "webhook"        // workspace subdir for plugins
+	webhookBinSubdir        = "_bin"           // compiled .go plugin cache
+	webhookDefaultTimeout   = 30 * time.Second // override via body.timeout
+	webhookMaxTimeout       = 5 * time.Minute  // hard cap
+	webhookMaxStdoutBytes   = 10 * 1024 * 1024 // 10MB
+	webhookMaxBodyBytes     = 1 << 20          // 1MB inbound
+	webhookFallbackExitCode = 64               // plugin signals "I don't handle this"
+	webhookAuditFieldMax    = 8 * 1024         // truncate stdout/stderr for audit row
 )
 
 // errPluginNotFound: plugin file does not exist for the requested action.
 // Triggers AI fallback rather than a hard error.
 var errPluginNotFound = errors.New("plugin not found")
-
-// hostAliases collapses URL hosts into canonical short names that map 1:1
-// to plugin filenames and download subdirectories. Anything not listed
-// keeps its bare hostname (with `www.` stripped).
-var hostAliases = map[string]string{
-	"x.com":               "x",
-	"twitter.com":         "x",
-	"mobile.twitter.com":  "x",
-	"fxtwitter.com":       "x",
-	"vxtwitter.com":       "x",
-	"youtube.com":         "youtube",
-	"youtu.be":            "youtube",
-	"m.youtube.com":       "youtube",
-	"music.youtube.com":   "youtube",
-	"reddit.com":          "reddit",
-	"old.reddit.com":      "reddit",
-	"redd.it":             "reddit",
-	"i.redd.it":           "reddit",
-	"v.redd.it":           "reddit",
-	"redgifs.com":         "redgifs",
-	"www.redgifs.com":     "redgifs",
-	"github.com":          "github",
-	"www.github.com":      "github",
-}
-
-// downloadSubdirSeed: subdirs auto-mkdir'd on server start. Adding a new
-// host doesn't require rebooting — plugins can mkdir their own paths.
-var downloadSubdirSeed = []string{"x", "youtube", "reddit", "redgifs", "_misc"}
 
 // ── Path helpers ───────────────────────────────────────────────────────────
 
@@ -100,63 +75,15 @@ func webhookBinDir() string {
 	return filepath.Join(webhookDir(), webhookBinSubdir)
 }
 
-func webhookDownloadRoot() string {
-	if v := strings.TrimSpace(os.Getenv("WEIRAN_DOWNLOAD_ROOT")); v != "" {
-		return v
-	}
-	return webhookDefaultDownloadRoot
-}
-
-// initWebhookDirs is called once at server start. Idempotent: existing
-// dirs are left alone, missing ones get created with safe perms.
-//
-// Returns nil on best-effort success — failures are logged but never
-// fatal because the webhook subsystem is optional. The download root is
-// on an external SSD; if that volume isn't mounted we still want the
-// rest of the server to come up.
+// initWebhookDirs creates the framework's own directories. It only
+// touches `workspace/webhook/_bin/` (compiled .go plugin cache); user
+// directories — download roots, output trees, anything domain-specific
+// — are NOT auto-created here. Plugins are responsible for their own
+// output paths.
 func initWebhookDirs() {
 	if err := os.MkdirAll(webhookBinDir(), 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] webhook: mkdir _bin failed: %v\n", appName, err)
 	}
-	root := webhookDownloadRoot()
-	for _, sub := range downloadSubdirSeed {
-		// 0755 here (not 0700) because download root is shared with you
-		// over SMB/WebDAV — group/other read needed for listing.
-		if err := os.MkdirAll(filepath.Join(root, sub), 0o755); err != nil {
-			// Don't spam the log if the volume isn't mounted; one warning is enough.
-			if _, statErr := os.Stat(root); os.IsNotExist(statErr) {
-				fmt.Fprintf(os.Stderr, "[%s] webhook: download root %s not mounted; plugins must create their own dirs\n", appName, root)
-				return
-			}
-			fmt.Fprintf(os.Stderr, "[%s] webhook: mkdir %s/%s failed: %v\n", appName, root, sub, err)
-		}
-	}
-}
-
-// ── Host normalization ─────────────────────────────────────────────────────
-
-// normalizeHost extracts a canonical short host name from a URL. Returns
-// "" when the input isn't a parseable URL with a host. The result is also
-// used as the implicit action when the request body has no `action` field.
-func normalizeHost(rawURL string) string {
-	rawURL = strings.TrimSpace(rawURL)
-	if rawURL == "" {
-		return ""
-	}
-	// Parse forgivingly: many share-sheet payloads omit scheme.
-	if !strings.Contains(rawURL, "://") {
-		rawURL = "https://" + rawURL
-	}
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Host == "" {
-		return ""
-	}
-	host := strings.ToLower(u.Host)
-	host = strings.TrimPrefix(host, "www.")
-	if alias, ok := hostAliases[host]; ok {
-		return alias
-	}
-	return host
 }
 
 // ── Plugin discovery ───────────────────────────────────────────────────────
@@ -167,9 +94,8 @@ type pluginInfo struct {
 	Ext    string // ".py" / ".go" / ".sh" / ... or "" for no extension
 }
 
-// validAction enforces a strict charset for action names. This is what
-// stops `{"action":"../../../etc/passwd"}` cold — the action *is* the
-// filename basename, so anything outside [a-zA-Z0-9_-] is rejected
+// validAction enforces a strict charset for action names. Action *is*
+// the filename basename, so anything outside [a-zA-Z0-9_-] is rejected
 // before we ever touch the filesystem.
 func validAction(s string) bool {
 	if s == "" || len(s) > 64 {
@@ -284,7 +210,8 @@ func pluginCommand(p *pluginInfo) (*exec.Cmd, error) {
 	case ".js":
 		return exec.Command("node", p.Path), nil
 	case ".ts":
-		// bun run handles TS natively; falls back to node+ts-node only if user prefers.
+		// bun run handles TS natively; plugins that prefer node+ts-node can
+		// just shebang-line their own interpreter.
 		return exec.Command("bun", "run", p.Path), nil
 	case "":
 		// Bare binary — must be chmod+x.
@@ -448,8 +375,9 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 
 // buildPluginEnv constructs the env slice for the plugin process. We
 // reset PATH to a known-safe minimum (homebrew + system) so plugins
-// don't inherit weird local state, and surface only the env vars the
-// protocol documents.
+// don't inherit weird local state. Only framework-level env vars are
+// guaranteed; anything domain-specific is the plugin's responsibility
+// to derive from the JSON body it receives on stdin.
 func buildPluginEnv(extras map[string]string) []string {
 	base := []string{
 		"PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
@@ -469,7 +397,6 @@ type webhookAuditRow struct {
 	Timestamp         string
 	RequestID         string
 	Action            string
-	Host              string
 	PluginPath        string
 	ExitCode          int
 	DurationMs        int64
@@ -491,11 +418,11 @@ func recordWebhookAudit(audit webhookAuditRow) {
 	defer db.Close()
 
 	_, err = db.Exec(`INSERT INTO webhook_audit (
-		timestamp, request_id, action, host, plugin_path, exit_code,
+		timestamp, request_id, action, plugin_path, exit_code,
 		duration_ms, fallback_session_id, body_json, stdout, stderr_tail,
 		timed_out, status, remote_addr
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		audit.Timestamp, audit.RequestID, audit.Action, audit.Host, audit.PluginPath,
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		audit.Timestamp, audit.RequestID, audit.Action, audit.PluginPath,
 		audit.ExitCode, audit.DurationMs, audit.FallbackSessionID, audit.BodyJSON,
 		audit.Stdout, audit.StderrTail, audit.TimedOut, audit.Status, audit.RemoteAddr,
 	)
@@ -509,7 +436,8 @@ func recordWebhookAudit(audit webhookAuditRow) {
 // handleWebhook is the body of POST /webhook. It does:
 //
 //  1. parse + validate the JSON body
-//  2. extract action (or infer from URL host)
+//  2. read action string (required — framework does NOT infer it from
+//     URL host or other body fields; that's a plugin-side concern)
 //  3. resolve the plugin file
 //  4. run it with stdin/stdout JSON protocol
 //  5. on success: 200 + plugin's parsed result
@@ -536,16 +464,6 @@ func handleWebhook(sm *sessionManager, w http.ResponseWriter, r *http.Request) {
 	}
 
 	action, _ := top["action"].(string)
-	rawURL, _ := top["url"].(string)
-	host := normalizeHost(rawURL)
-
-	// If body has no explicit action, fall back to host name. This is
-	// what makes the iPhone share-sheet experience seamless: a Shortcut
-	// can POST `{"url":"https://x.com/..."}` with no `action` field and
-	// still hit the `x` plugin.
-	if action == "" && host != "" {
-		action = host
-	}
 
 	requestID := newRequestID()
 	timestamp := time.Now().UTC().Format(time.RFC3339)
@@ -554,12 +472,11 @@ func handleWebhook(sm *sessionManager, w http.ResponseWriter, r *http.Request) {
 		Timestamp:  timestamp,
 		RequestID:  requestID,
 		Action:     action,
-		Host:       host,
 		BodyJSON:   truncateString(string(body), webhookAuditFieldMax),
 		RemoteAddr: r.RemoteAddr,
 	}
 
-	fmt.Fprintf(os.Stderr, "[%s] webhook: %s action=%q host=%q\n", appName, requestID, action, host)
+	fmt.Fprintf(os.Stderr, "[%s] webhook: %s action=%q\n", appName, requestID, action)
 
 	// ── Resolve plugin ──
 	var p *pluginInfo
@@ -567,7 +484,18 @@ func handleWebhook(sm *sessionManager, w http.ResponseWriter, r *http.Request) {
 	if action != "" {
 		p, lookupErr = resolvePlugin(action)
 	} else {
-		lookupErr = errPluginNotFound
+		// No action means the body was missing the only field we route on.
+		// We don't try to be clever here (no host inference, no defaults) —
+		// the caller should fix the body, or wire a plugin to handle the
+		// "default" / "unknown" action explicitly.
+		audit.Status = "error"
+		audit.StderrTail = "missing action field"
+		recordWebhookAudit(audit)
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"request_id": requestID,
+			"error":      "request body must include an `action` field (string)",
+		})
+		return
 	}
 
 	if lookupErr != nil && !errors.Is(lookupErr, errPluginNotFound) {
@@ -586,15 +514,10 @@ func handleWebhook(sm *sessionManager, w http.ResponseWriter, r *http.Request) {
 	if errors.Is(lookupErr, errPluginNotFound) {
 		// Plugin missing → spawn AI fallback session.
 		sessionID := triggerFallback(sm, fallbackContext{
-			RequestID:  requestID,
-			Action:     action,
-			Host:       host,
-			Body:       body,
-			Reason:     "plugin not found",
-			ExitCode:   0,
-			Stderr:     "",
-			TimedOut:   false,
-			PluginPath: filepath.Join(webhookDir(), action+".(none)"),
+			RequestID: requestID,
+			Action:    action,
+			Body:      body,
+			Reason:    "plugin not found",
 		})
 		audit.Status = "fallback"
 		audit.FallbackSessionID = sessionID
@@ -620,7 +543,7 @@ func handleWebhook(sm *sessionManager, w http.ResponseWriter, r *http.Request) {
 		timeout = req
 	}
 
-	env := pluginEnvFor(requestID, action, host)
+	env := pluginEnvFor(requestID, action)
 	res, runErr := runPlugin(r.Context(), p, body, env, timeout)
 	if runErr != nil {
 		audit.Status = "error"
@@ -645,7 +568,6 @@ func handleWebhook(sm *sessionManager, w http.ResponseWriter, r *http.Request) {
 		sessionID := triggerFallback(sm, fallbackContext{
 			RequestID:  requestID,
 			Action:     action,
-			Host:       host,
 			Body:       body,
 			Reason:     fmt.Sprintf("plugin timed out after %s", timeout),
 			ExitCode:   res.ExitCode,
@@ -667,7 +589,6 @@ func handleWebhook(sm *sessionManager, w http.ResponseWriter, r *http.Request) {
 		sessionID := triggerFallback(sm, fallbackContext{
 			RequestID:  requestID,
 			Action:     action,
-			Host:       host,
 			Body:       body,
 			Reason:     "plugin signaled fallback (exit 64)",
 			ExitCode:   res.ExitCode,
@@ -688,7 +609,6 @@ func handleWebhook(sm *sessionManager, w http.ResponseWriter, r *http.Request) {
 		sessionID := triggerFallback(sm, fallbackContext{
 			RequestID:  requestID,
 			Action:     action,
-			Host:       host,
 			Body:       body,
 			Reason:     fmt.Sprintf("plugin exited %d", res.ExitCode),
 			ExitCode:   res.ExitCode,
@@ -723,23 +643,19 @@ func handleWebhook(sm *sessionManager, w http.ResponseWriter, r *http.Request) {
 }
 
 // pluginEnvFor builds the env-var map injected into plugin processes.
-// Documented contract — adding a new key here is non-breaking, removing
-// or renaming would be.
-func pluginEnvFor(requestID, action, host string) map[string]string {
-	hostKey := host
-	if hostKey == "" {
-		hostKey = "_misc"
-	}
-	root := webhookDownloadRoot()
+// Only framework-scoped variables go here. Anything domain-specific
+// (download roots, host aliases, output paths, …) must be derived by
+// the plugin from the JSON body or its own internal config.
+//
+// Documented contract — adding a new key here is non-breaking; removing
+// or renaming is a breaking change.
+func pluginEnvFor(requestID, action string) map[string]string {
 	serverURL := fmt.Sprintf("http://127.0.0.1:%d", serverPort)
 	return map[string]string{
-		"WEIRAN_REQUEST_ID":    requestID,
-		"WEIRAN_HOOK_ACTION":   action,
-		"WEIRAN_HOST":          host,
-		"WEIRAN_DOWNLOAD_ROOT": root,
-		"WEIRAN_OUTPUT_DIR":    filepath.Join(root, hostKey),
-		"WEIRAN_SERVER_URL":    serverURL,
-		"WEIRAN_AUTH_TOKEN":    serverAuthToken,
+		"WEIRAN_REQUEST_ID":  requestID,
+		"WEIRAN_HOOK_ACTION": action,
+		"WEIRAN_SERVER_URL":  serverURL,
+		"WEIRAN_AUTH_TOKEN":  serverAuthToken,
 	}
 }
 
@@ -748,20 +664,23 @@ func pluginEnvFor(requestID, action, host string) map[string]string {
 type fallbackContext struct {
 	RequestID  string
 	Action     string
-	Host       string
 	Body       []byte
 	Reason     string
 	ExitCode   int
 	Stderr     string
 	TimedOut   bool
-	PluginPath string
+	PluginPath string // empty when plugin couldn't be located at all
 }
 
 // triggerFallback spawns an AI fallback session and returns its ID
 // (empty on spawn failure, in which case the caller should still
-// audit-log the attempt). The session is given a directive in
-// InitialMessage that tells it to (a) complete the task by any means
-// and (b) repair the plugin in-place, then self-destruct.
+// audit-log the attempt). The session is given a generic directive in
+// InitialMessage that tells it to (a) complete the request by any
+// means, (b) repair or create the plugin in-place, then self-destruct.
+//
+// The directive is intentionally domain-agnostic — the fallback session
+// works out what the action *means* by reading the JSON body and any
+// existing plugin source.
 func triggerFallback(sm *sessionManager, fc fallbackContext) string {
 	sessionName := fmt.Sprintf("webhook-fallback-%s-%s",
 		ifEmpty(fc.Action, "unknown"),
@@ -770,9 +689,6 @@ func triggerFallback(sm *sessionManager, fc fallbackContext) string {
 	tags := []string{"webhook", "fallback"}
 	if fc.Action != "" {
 		tags = append(tags, "action:"+fc.Action)
-	}
-	if fc.Host != "" {
-		tags = append(tags, "host:"+fc.Host)
 	}
 
 	initialMsg := buildFallbackMessage(fc)
@@ -799,9 +715,7 @@ func triggerFallback(sm *sessionManager, fc fallbackContext) string {
 	}
 	sess.mu.Unlock()
 
-	// Send initial message after Claude finishes init handshake. This
-	// mirrors the pattern in POST /api/sessions (server.go:869) — the
-	// 30s timeout absorbs slow proxy spinups.
+	// Send initial message after Claude finishes init handshake.
 	go func() {
 		if !sess.process.waitInit(30 * time.Second) {
 			fmt.Fprintf(os.Stderr, "[%s] webhook: fallback %s init timeout, sending anyway\n",
@@ -825,9 +739,10 @@ func triggerFallback(sm *sessionManager, fc fallbackContext) string {
 }
 
 // buildFallbackMessage assembles the directive that becomes the fallback
-// session's first user message. Everything in here is interpreted by
-// you (未然) the AI in that fresh session — it never round-trips through
-// templating outside of fmt.Sprintf.
+// session's first user message. The wording is intentionally generic —
+// the session is told what failed and where the plugin lives, and is
+// expected to figure out the rest from the JSON body + plugin source +
+// any user-side conventions (which it can read from workspace).
 func buildFallbackMessage(fc fallbackContext) string {
 	timedOutStr := "no"
 	if fc.TimedOut {
@@ -844,32 +759,25 @@ func buildFallbackMessage(fc fallbackContext) string {
 
 	pluginPath := fc.PluginPath
 	if pluginPath == "" {
-		pluginPath = "(unknown)"
-	}
-
-	hostKey := fc.Host
-	if hostKey == "" {
-		hostKey = "_misc"
+		// Synthesize the expected-but-missing path so the session knows
+		// where to create a new plugin if it grows one.
+		pluginPath = filepath.Join(webhookDir(), fc.Action+".(none — create with .sh/.py/.go/.js/.ts)")
 	}
 
 	return fmt.Sprintf(`你以 webhook fallback 模式被唤醒。
 
-## 失败的 action
+## 失败的 webhook 调用
 
 - action: `+"`"+`%s`+"`"+`
-- host: `+"`"+`%s`+"`"+`
 - plugin: `+"`"+`%s`+"`"+`
-
-## 请求体
-
-`+"```json\n%s\n```"+`
-
-## 失败信息
-
 - request_id: %s
 - exit_code: %d
 - timed_out: %s
 - reason: %s
+
+## 请求体
+
+`+"```json\n%s\n```"+`
 
 stderr 尾部:
 
@@ -877,30 +785,30 @@ stderr 尾部:
 
 ## 你要做两件事
 
-**1. 完成本次任务**（用任何方法把 download / 归档 / 处理 干完）
+**1. 完成本次请求**（plugin 没干成的事，你想办法干完）
 
-- 输出根: `+"`"+`$WEIRAN_DOWNLOAD_ROOT/%s/`+"`"+`（也就是 `+"`"+`/Volumes/weiran/share/downloads/%s/`+"`"+`）
+- 业务含义在请求体里，框架不知道这个 action 是什么意思
+- 输出路径、host 解析、目录布局等用户偏好都在 `+"`"+`workspace/webhook/`+"`"+` 同目录或 README 里查
 - 完成后用 `+"`"+`weiran notify`+"`"+` 通知主人结果（一句话即可）
 
-**2. 修复 plugin** `+"`"+`%s`+"`"+`
+**2. 修复或新建 plugin**
 
-- 读源码 → 定位 bug → 改 → 本地 dry-run 一次（`+"`"+`echo '<json>' | python3 plugin.py`+"`"+` 之类）
-- 修不动就在文件顶部加 `+"`"+`# FIXME: <症状>`+"`"+` 标记，不要让脚本悄悄留 bug
-- plugin 不存在就新建一个，参考 `+"`"+`workspace/webhook/`+"`"+` 下其他文件，遵循 stdin/stdout JSON 协议
+- 路径: `+"`"+`%s`+"`"+`
+- 协议: stdin = 完整 JSON body / stdout = `+"`"+`{"status":"ok|error","message":"..."}`+"`"+` / exit 0 = 成功
+- 业务逻辑全部由 plugin 自己处理，framework 只 dispatch 不解释 action 含义
+- 修不动就在文件顶部加 `+"`"+`# FIXME: <症状>`+"`"+` 标记
+- 看 `+"`"+`workspace/webhook/README.md`+"`"+` 找协议详情和现有 plugin 的写法
 
 完成后用 `+"`"+`weiran session close $WEIRAN_SESSION_ID`+"`"+` 自我销毁。
 不写报告，不等确认，只做事 + notify。`,
 		fc.Action,
-		fc.Host,
 		pluginPath,
-		prettyJSON(fc.Body),
 		fc.RequestID,
 		fc.ExitCode,
 		timedOutStr,
 		fc.Reason,
+		prettyJSON(fc.Body),
 		stderrTail,
-		hostKey,
-		hostKey,
 		pluginPath,
 	)
 }
@@ -935,7 +843,7 @@ func runWebhookTail(args []string) {
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`SELECT timestamp, request_id, action, host, plugin_path,
+	rows, err := db.Query(`SELECT timestamp, request_id, action, plugin_path,
 		exit_code, duration_ms, fallback_session_id, status, timed_out, stderr_tail
 		FROM webhook_audit ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
@@ -945,16 +853,16 @@ func runWebhookTail(args []string) {
 	defer rows.Close()
 
 	type row struct {
-		ts, rid, action, host, plugin, status, stderrTail, fallbackID string
-		exitCode                                                      int
-		durMs                                                         int64
-		timedOut                                                      bool
+		ts, rid, action, plugin, status, stderrTail, fallbackID string
+		exitCode                                                int
+		durMs                                                   int64
+		timedOut                                                bool
 	}
 	var collected []row
 	for rows.Next() {
 		var r row
 		var to int
-		if err := rows.Scan(&r.ts, &r.rid, &r.action, &r.host, &r.plugin,
+		if err := rows.Scan(&r.ts, &r.rid, &r.action, &r.plugin,
 			&r.exitCode, &r.durMs, &r.fallbackID, &r.status, &to, &r.stderrTail); err != nil {
 			continue
 		}
@@ -973,8 +881,8 @@ func runWebhookTail(args []string) {
 		if r.timedOut {
 			statusTag += "/TIMEOUT"
 		}
-		fmt.Printf("%s  %s  action=%s  host=%s  exit=%d  %dms  status=%s",
-			r.ts, r.rid, ifEmpty(r.action, "-"), ifEmpty(r.host, "-"),
+		fmt.Printf("%s  %s  action=%s  exit=%d  %dms  status=%s",
+			r.ts, r.rid, ifEmpty(r.action, "-"),
 			r.exitCode, r.durMs, statusTag)
 		if r.fallbackID != "" {
 			fmt.Printf("  fallback=%s", shortID(r.fallbackID))
@@ -989,8 +897,7 @@ func runWebhookTail(args []string) {
 	}
 }
 
-// runWebhookCmd dispatches `weiran webhook <sub>`. Currently only `tail`
-// is implemented; `list-plugins` and `test` are TODO for v2.
+// runWebhookCmd dispatches `weiran webhook <sub>`.
 func runWebhookCmd(args []string) {
 	if len(args) == 0 {
 		fmt.Println("usage: weiran webhook <tail|list>")
