@@ -230,6 +230,38 @@ type codexBackend struct {
 	// the handler converts it to the typed codex response, and returns.
 	approvalsMu      sync.Mutex
 	pendingApprovals map[string]*pendingCodexApproval
+
+	// soulPrompt is the assembled soul prompt content (SOUL.md + memory
+	// + skills + …). Sourced from SessionOpts.SystemPromptFile. We route
+	// it to one of two codex thread/start fields based on replaceSoul:
+	//
+	//   replaceSoul=false → developerInstructions (supplement mode)
+	//                       Soul sits ON TOP of codex's built-in
+	//                       baseInstructions. apply_patch grammar +
+	//                       AGENTS.md spec + sandbox protocol all stay,
+	//                       soul layer steers persona/tone. Default; matches
+	//                       CC's --append-system-prompt-file behavior.
+	//
+	//   replaceSoul=true  → baseInstructions (replace mode)
+	//                       Soul REPLACES codex's built-in 275-line prompt
+	//                       wholesale. Loses apply_patch freeform grammar
+	//                       guidance, preamble rules, etc. — caller is
+	//                       responsible for re-supplying anything codex
+	//                       needs. Matches CC's --system-prompt-file.
+	//
+	// Empty when no SystemPromptFile was passed (bare mode / tests); both
+	// fields are then omitted from thread/start so codex uses its own
+	// defaults.
+	soulPrompt  string
+	replaceSoul bool
+
+	// resumeThreadID, when non-empty, makes runHandshake call
+	// thread/resume with this thread id instead of thread/start.
+	// Set from SessionOpts.ResumeID at construction time. Empty means a
+	// fresh thread (current default behavior). Used by the rehydrate path
+	// after server restart so codex sessions don't lose conversation
+	// history. Codex 0.125.0+ persists threads in $CODEX_HOME by id.
+	resumeThreadID string
 }
 
 // newCodexBackend constructs a codexBackend with default fields populated.
@@ -262,6 +294,43 @@ func newCodexBackend(opts SessionOpts) *codexBackend {
 		approvalPolicy = codexDefaultApprovalPolicy
 	}
 
+	// Read the soul prompt off disk if the caller staged one. Errors are
+	// non-fatal: an unreadable file just means codex starts without the
+	// soul layer, which is annoying but not session-breaking. We log via
+	// stderr so the operator can spot the silent degradation in
+	// `weiran log` / launchd.
+	//
+	// NOTE: cb.soulPrompt holds the SYNTHESIZED prompt — caller's body
+	// from SystemPromptFile plus the "Runtime Environment" suffix appended
+	// below. Don't expect byte-equality with the file contents on disk;
+	// callers that round-trip through this field will see the suffix.
+	var soulPrompt string
+	if opts.SystemPromptFile != "" {
+		if data, err := os.ReadFile(opts.SystemPromptFile); err == nil {
+			soulPrompt = string(data)
+		} else {
+			fmt.Fprintf(os.Stderr, "[%s] codex: failed to read SystemPromptFile %q: %v (continuing without soul)\n",
+				appName, opts.SystemPromptFile, err)
+		}
+	}
+
+	// Runtime note: tell the agent which backend / model it's running on.
+	// Without this, replace-mode (baseInstructions) sessions wipe codex's
+	// built-in "I am Codex CLI" identity and the agent has no signal about
+	// the harness underneath — leading to wrong self-reports like
+	// "I'm GPT, not Codex" when asked. Append-mode (developerInstructions)
+	// also benefits because codex's baseInstructions never names the JSON-RPC
+	// harness explicitly. Append-only — keeps SOUL.md off the framework.
+	if soulPrompt != "" {
+		soulPrompt += fmt.Sprintf(
+			"\n\n---\n\n# Runtime Environment\n\n"+
+				"You are running on the **codex** backend (model: `%s`).\n"+
+				"Your heart is OpenAI's codex app-server JSON-RPC harness, not Claude Code's stream-json subprocess.\n"+
+				"When asked which core/backend/harness you're on, the answer is: codex (model %s).\n",
+			model, model,
+		)
+	}
+
 	return &codexBackend{
 		ctx:                 ctx,
 		cancel:              cancel,
@@ -275,6 +344,9 @@ func newCodexBackend(opts SessionOpts) *codexBackend {
 		done:                make(chan struct{}),
 		itemKindByID:        make(map[string]UnifiedItemKind),
 		pendingApprovals:    make(map[string]*pendingCodexApproval),
+		soulPrompt:          soulPrompt,
+		replaceSoul:         opts.ReplaceSoul,
+		resumeThreadID:      opts.ResumeID,
 	}
 }
 
@@ -472,72 +544,165 @@ func (cb *codexBackend) runHandshake() {
 		return
 	}
 
-	// Build thread/start params via map[string]any so we can selectively
-	// include permissionProfile only when it's a typed object — codex
-	// rejects bare strings like "workspaceWrite" with
-	//   "expected internally tagged enum PermissionProfile".
-	// The legacy default value (codexDefaultPermissionProfile = "workspaceWrite")
-	// is silently dropped here so the codex server-side default kicks in;
-	// users who want a custom profile can set agents.codex.permission_profile
-	// to a JSON literal like '{"type":"disabled"}' (Round 6+).
-	startParams := map[string]any{
+	// Build thread/start (or thread/resume) params via map[string]any so we
+	// can selectively include permissionProfile only when it's a typed
+	// object — codex 0.125.0+ rejects bare strings like "workspaceWrite"
+	// with "expected internally tagged enum PermissionProfile".
+	// codexPermissionProfilePayload() translates the legacy aliases
+	// ("workspaceWrite" / "readOnly" / "dangerFullAccess") into the
+	// v2 enum JSON. The default (codexDefaultPermissionProfile =
+	// "workspaceWrite") now emits a managed+unrestricted profile so the
+	// hook layer is the only gatekeeper. Users who want something custom
+	// can set agents.codex.permission_profile to a JSON literal like
+	// '{"type":"disabled"}'.
+	params := map[string]any{
 		"model":          cb.model,
 		"cwd":            cb.cwd,
 		"approvalPolicy": cb.approvalPolicy,
+	}
+	// Soul prompt routing — replaceSoul flag picks which codex slot.
+	// Same in both start and resume paths: ThreadResumeParams accepts
+	// baseInstructions / developerInstructions and applies them as the
+	// system prompt for the resumed thread (existing turns keep their
+	// original prompt; subsequent turns use the new one). This is
+	// important for rehydrate after server restart when SOUL.md may have
+	// been edited between runs.
+	//
+	//   replaceSoul=false → developerInstructions (supplement on top of
+	//                       codex's 275-line baseInstructions). Tool-use
+	//                       grammar / AGENTS.md spec / sandbox protocol
+	//                       all stay; soul layers persona over them.
+	//
+	//   replaceSoul=true  → baseInstructions (full replacement of codex's
+	//                       built-in prompt). Caller is on the hook for
+	//                       any tool-use grammar codex would have supplied.
+	//                       Mirrors CC's --system-prompt-file (本我 mode).
+	//
+	// Empty soulPrompt is omitted from both — codex's own defaults take
+	// over (tests / bare mode rely on that).
+	if cb.soulPrompt != "" {
+		if cb.replaceSoul {
+			params["baseInstructions"] = cb.soulPrompt
+		} else {
+			params["developerInstructions"] = cb.soulPrompt
+		}
+	}
+	method := MethodThreadStart
+	if cb.resumeThreadID != "" {
+		method = MethodThreadResume
+		params["threadId"] = cb.resumeThreadID
+		// excludeTurns: keep the response light — we don't need the full
+		// turn history surfaced back through the JSON-RPC reply, since the
+		// session bridge replays its own JSONL log to the UI on rehydrate.
+		params["excludeTurns"] = true
 	}
 	if pp := codexPermissionProfilePayload(cb.permissionProfile); pp != nil {
 		// Validate JSON syntax up front so an operator typo (e.g. missing
 		// quote) surfaces with our own error message linking back to the
 		// runbook, rather than as a confusing "invalid type" from codex.
 		if !json.Valid(pp) {
-			cb.failInit("thread/start", fmt.Sprintf(
+			cb.failInit(method, fmt.Sprintf(
 				"agents.codex.permission_profile is not valid JSON: %q (see docs/codex-backend-runbook.md)",
 				cb.permissionProfile))
 			return
 		}
-		startParams["permissionProfile"] = pp
+		params["permissionProfile"] = pp
 	}
-	raw, err := cb.client.Call(ctx, MethodThreadStart, startParams)
+	raw, err := cb.client.Call(ctx, method, params)
 	if err != nil {
-		cb.failInit("thread/start", err.Error())
-		return
+		// thread/resume can fail when the persisted thread on disk is gone
+		// (older codex versions, $CODEX_HOME wiped, thread expired). Fall
+		// back to thread/start so the session at least comes up — the bridge
+		// will record the new thread id and the UI surfaces fresh history.
+		// We log loudly so an operator notices the loss-of-context.
+		if method == MethodThreadResume {
+			if cb.logger != nil {
+				cb.logger("thread/resume failed for %s: %v — falling back to thread/start (conversation history will be lost)",
+					cb.resumeThreadID, err)
+			}
+			fmt.Fprintf(os.Stderr, "[%s] codex: thread/resume %s failed (%v); falling back to thread/start\n",
+				appName, shortID(cb.resumeThreadID), err)
+			// Strip every resume-only field before retrying as start.
+			// Today that's just threadId + excludeTurns; if a future
+			// codex version adds another resume-only param (e.g.
+			// resumeFromTurn), it MUST be deleted here too — leaving it
+			// in `params` will leak into thread/start where codex will
+			// reject it.
+			// TODO: factor into buildStartParams / buildResumeParams
+			// helpers when a third resume-only field shows up so we
+			// don't keep updating this delete list by hand.
+			delete(params, "threadId")
+			delete(params, "excludeTurns")
+			method = MethodThreadStart
+			raw, err = cb.client.Call(ctx, method, params)
+		}
+		if err != nil {
+			cb.failInit(method, err.Error())
+			return
+		}
 	}
+	// ThreadStartResponse and ThreadResumeResponse share the same shape for
+	// the fields we care about (thread.id, model). Decode through the start
+	// type — extra fields in resume's response are silently ignored.
 	var resp CodexThreadStartResponse
 	if jerr := json.Unmarshal(raw, &resp); jerr != nil {
-		cb.failInit("thread/start decode", jerr.Error())
+		cb.failInit(method+" decode", jerr.Error())
 		return
 	}
 	threadID := resp.Thread.ID
 	if threadID == "" {
-		cb.failInit("thread/start", "empty thread id in response")
+		cb.failInit(method, "empty thread id in response")
 		return
 	}
 	cb.threadID.Store(&threadID)
 	cb.signalInit()
 	recordCodexHandshake(true)
 	if cb.logger != nil {
-		cb.logger("handshake complete: thread=%s model=%s", threadID, resp.Model)
+		verb := "started"
+		if method == MethodThreadResume {
+			verb = "resumed"
+		}
+		cb.logger("handshake complete: thread %s thread=%s model=%s", verb, threadID, resp.Model)
 	}
 }
 
 // codexPermissionProfilePayload converts a string value (from
 // agents.codex.permission_profile) into the typed object codex's
-// thread/start expects. Recognized:
+// thread/start expects (PermissionProfile enum, codex 0.125.0+).
 //
-//   - ""               → nil (omit, codex uses server default)
-//   - "default" / "workspaceWrite" → nil (legacy magic; treated as omit)
-//   - "disabled"       → {"type":"disabled"}
-//   - "{...}"          → raw JSON, used as-is
+// Recognized legacy strings (v2 schema mappings):
+//
+//   - ""                              → nil (omit; codex uses its own default,
+//     which is a restricted read-only sandbox — session will appear "stuck"
+//     when trying to write files. Set explicitly to avoid surprise.)
+//   - "default" / "workspaceWrite" / "workspace-write" → managed + unrestricted FS + network off
+//     (matches the runbook recommendation: weiran's hook layer is the
+//     gatekeeper, so codex's outer sandbox is redundant for write access)
+//   - "readOnly" / "read-only"        → managed + restricted root:read + network off
+//   - "dangerFullAccess" / "danger-full-access" → disabled (no outer sandbox)
+//   - "disabled"                      → disabled
+//   - "{...}"                         → raw JSON, used as-is
 //
 // Anything else is silently dropped to nil; the runbook calls this out.
 // Returns json.RawMessage so it round-trips through the map[string]any
 // without re-encoding.
 func codexPermissionProfilePayload(name string) json.RawMessage {
 	s := strings.TrimSpace(name)
-	if s == "" || s == "default" || s == "workspaceWrite" {
+	switch s {
+	case "":
+		// Empty = let codex pick its own default. This is the conservative
+		// (and historically broken) path; callers who want write access
+		// should set "workspaceWrite" or a JSON literal.
 		return nil
-	}
-	if s == "disabled" {
+	case "default", "workspaceWrite", "workspace-write":
+		// Codex 0.125.0 dropped the legacy bare-string form; emit the typed
+		// equivalent so the field actually takes effect (otherwise codex
+		// falls back to its own default which is read-only sandbox and the
+		// session gets stuck on the first write).
+		return json.RawMessage(`{"type":"managed","fileSystem":{"type":"unrestricted"},"network":{"enabled":false}}`)
+	case "readOnly", "read-only":
+		return json.RawMessage(`{"type":"managed","fileSystem":{"type":"restricted","entries":[{"path":{"type":"special","value":{"kind":"root"}},"access":"read"}]},"network":{"enabled":false}}`)
+	case "dangerFullAccess", "danger-full-access", "disabled":
 		return json.RawMessage(`{"type":"disabled"}`)
 	}
 	if strings.HasPrefix(s, "{") {
@@ -614,6 +779,12 @@ func (cb *codexBackend) sendMessage(content string) error {
 	if len(inputs) == 0 {
 		return nil
 	}
+
+	// Persist the user's turn before we hand off to codex so the transcript
+	// reflects what was actually sent even if turn/start later errors.
+	// Round 5+: write to a CC-shaped JSONL so /api/history/{id}/messages,
+	// FTS, and rename all reuse the existing parsers.
+	writeCodexUserMessage(*threadIDPtr, content)
 
 	ctx, cancel := context.WithTimeout(cb.ctx, 30*time.Second)
 	defer cancel()

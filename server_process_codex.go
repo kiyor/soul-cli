@@ -152,9 +152,14 @@ func runCodexEventLoop(cb *codexBackend, sess *serverSession, source string, ful
 }
 
 // drainCodexEvents flushes whatever is left in cb.events() after backend
-// exit. Bounded by the channel capacity (256 events) so it terminates.
+// exit. Bounded by the channel capacity (codexEventsChanCapacity, currently
+// 256 events) so it terminates naturally. The hard maxDrainIters cap is
+// defensive paranoia for a future where someone changes the channel from
+// buffered to a producer that keeps shoveling — turning this into the
+// shutdown hot path is much worse than dropping a few stragglers.
 func drainCodexEvents(cb *codexBackend, sess *serverSession, state *codexBridgeState, source string, fullSync bool) {
-	for {
+	const maxDrainIters = 10000
+	for i := 0; i < maxDrainIters; i++ {
 		select {
 		case ev := <-cb.events():
 			// eventsCh is never closed; we drain whatever is buffered then
@@ -164,6 +169,8 @@ func drainCodexEvents(cb *codexBackend, sess *serverSession, state *codexBridgeS
 			return
 		}
 	}
+	fmt.Fprintf(os.Stderr, "[%s] codex: drainCodexEvents hit max iter cap (%d) — possible producer leak\n",
+		appName, maxDrainIters)
 }
 
 // handleCodexUnifiedEvent converts one UnifiedEvent into the matching SSE
@@ -195,6 +202,11 @@ func handleCodexUnifiedEvent(cb *codexBackend, sess *serverSession, ev UnifiedEv
 			newStatus = "error"
 		}
 		sess.mu.Lock()
+		// NumTurns counts user-visible turns: codex emits one
+		// turn_completed per user input regardless of how many internal
+		// model calls the turn made, so a single ++ is the right unit.
+		// (CC's path adds result.NumTurns because CC reports cumulative
+		// turns inside one stream-json result; codex doesn't.)
 		sess.NumTurns++
 		if payload.CostUSD > 0 {
 			sess.TotalCost += payload.CostUSD
@@ -204,8 +216,9 @@ func handleCodexUnifiedEvent(cb *codexBackend, sess *serverSession, ev UnifiedEv
 		// reads status when it sees "result" observes the new value.
 		sess.setStatus(newStatus)
 		// DB persistence is best-effort and runs off the bridge goroutine
-		// to keep the event loop snappy and tests deterministic.
-		go func(id string) { _, _ = incrementUserTurns(id) }(sess.ID)
+		// to keep the event loop snappy and tests deterministic. sess.ID
+		// is immutable so we can close over it directly without copying.
+		go func() { _, _ = incrementUserTurns(sess.ID) }()
 		// Emit both the typed codex event AND a CC-shaped "result" so any
 		// downstream consumer that keys off result for is_error / status
 		// keeps working.
