@@ -35,6 +35,7 @@ type codexFakeServer struct {
 
 	// Behavior overrides.
 	skipHandshakeReply bool // if true, the server doesn't reply to initialize → tests waitInit timeout
+	failResumeOnce     bool // if true, the first thread/resume returns a JSON-RPC error (for fallback testing)
 }
 
 // handle services one client→server frame and returns any responses the
@@ -105,6 +106,50 @@ func (s *codexFakeServer) handle(env JSONRPCEnvelope) []JSONRPCEnvelope {
 				"approvalsReviewer": "local",
 			}),
 		}}
+	case MethodThreadResume:
+		if s.failResumeOnce {
+			s.failResumeOnce = false
+			return []JSONRPCEnvelope{{
+				ID: env.ID,
+				Error: &JSONRPCErrorObj{
+					Code:    -32603,
+					Message: "thread not found",
+				},
+			}}
+		}
+		// Reuse the threadId the client requested (mirrors real codex
+		// behaviour of resuming an existing persisted thread by id).
+		var p struct {
+			ThreadID string `json:"threadId"`
+		}
+		_ = json.Unmarshal(env.Params, &p)
+		if p.ThreadID != "" {
+			s.threadID = p.ThreadID
+		} else if s.threadID == "" {
+			s.threadID = "thr_resume_test_" + nonceShort()
+		}
+		modelName := s.model
+		if modelName == "" {
+			modelName = "gpt-test"
+		}
+		return []JSONRPCEnvelope{{
+			ID: env.ID,
+			Result: mustRaw(map[string]any{
+				"thread": map[string]any{
+					"id":            s.threadID,
+					"modelProvider": "openai",
+					"createdAt":     1,
+					"updatedAt":     2,
+					"status":        map[string]any{"type": "idle"},
+					"cwd":           "/tmp",
+				},
+				"model":             modelName,
+				"modelProvider":     "openai",
+				"cwd":               "/tmp",
+				"approvalPolicy":    "never",
+				"approvalsReviewer": "local",
+			}),
+		}}
 	case MethodTurnStart:
 		s.turnID = "turn_test_" + nonceShort()
 		return []JSONRPCEnvelope{{
@@ -133,10 +178,18 @@ func (s *codexFakeServer) handle(env JSONRPCEnvelope) []JSONRPCEnvelope {
 // in test cleanup.
 func startCodexBackend(t *testing.T, fs *codexFakeServer) (*codexBackend, io.Writer, func()) {
 	t.Helper()
+	return startCodexBackendWithOpts(t, fs, SessionOpts{Model: "gpt-test", WorkDir: "/tmp"})
+}
+
+// startCodexBackendWithOpts is the configurable version of startCodexBackend.
+// Tests use it when they need to set ResumeID (rehydrate path) or ReplaceSoul
+// (本我 mode) on the backend at construction time.
+func startCodexBackendWithOpts(t *testing.T, fs *codexFakeServer, opts SessionOpts) (*codexBackend, io.Writer, func()) {
+	t.Helper()
 
 	cr, cw, sr, sw, closeAll := pipePair()
 
-	cb := newCodexBackend(SessionOpts{Model: "gpt-test", WorkDir: "/tmp"})
+	cb := newCodexBackend(opts)
 	// Buffer logs so test output stays clean — surface only on failure.
 	var (
 		logsMu sync.Mutex
@@ -203,6 +256,56 @@ func mustRaw(v any) json.RawMessage {
 
 // TestCodexBackendStartHappyPath verifies the full handshake completes and
 // info() reflects the server-assigned thread id.
+func TestCodexPermissionProfilePayload(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, in string
+		// want is empty for nil-payload cases; otherwise the expected JSON.
+		want string
+	}{
+		{"empty omits", "", ""},
+		{"workspaceWrite legacy alias → managed+unrestricted",
+			"workspaceWrite",
+			`{"type":"managed","fileSystem":{"type":"unrestricted"},"network":{"enabled":false}}`},
+		{"workspace-write kebab alias",
+			"workspace-write",
+			`{"type":"managed","fileSystem":{"type":"unrestricted"},"network":{"enabled":false}}`},
+		{"default alias matches workspaceWrite",
+			"default",
+			`{"type":"managed","fileSystem":{"type":"unrestricted"},"network":{"enabled":false}}`},
+		{"disabled → typed disabled", "disabled", `{"type":"disabled"}`},
+		{"dangerFullAccess legacy → disabled", "dangerFullAccess", `{"type":"disabled"}`},
+		{"readOnly legacy → managed+restricted-root-read",
+			"readOnly",
+			`{"type":"managed","fileSystem":{"type":"restricted","entries":[{"path":{"type":"special","value":{"kind":"root"}},"access":"read"}]},"network":{"enabled":false}}`},
+		{"raw JSON passthrough",
+			`{"type":"external","network":{"enabled":true}}`,
+			`{"type":"external","network":{"enabled":true}}`},
+		{"unknown bare string → omit", "what", ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := codexPermissionProfilePayload(tc.in)
+			if tc.want == "" {
+				if got != nil {
+					t.Fatalf("expected nil, got %s", string(got))
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("expected payload, got nil")
+			}
+			if !json.Valid(got) {
+				t.Fatalf("emitted invalid JSON: %s", string(got))
+			}
+			if string(got) != tc.want {
+				t.Fatalf("payload mismatch:\n want=%s\n got =%s", tc.want, string(got))
+			}
+		})
+	}
+}
+
 func TestCodexBackendStartHappyPath(t *testing.T) {
 	fs := &codexFakeServer{model: "gpt-codex-test"}
 	cb, _, closer := startCodexBackend(t, fs)
@@ -223,6 +326,88 @@ func TestCodexBackendStartHappyPath(t *testing.T) {
 	}
 	if !cb.alive() {
 		t.Error("alive should be true after init")
+	}
+}
+
+// TestCodexBackendResumePath verifies that when SessionOpts.ResumeID is set
+// the backend calls thread/resume with the existing threadId (not
+// thread/start) so conversation history persists across server restart.
+func TestCodexBackendResumePath(t *testing.T) {
+	fs := &codexFakeServer{model: "gpt-codex-test"}
+	const wantThreadID = "thr_existing_persisted_42"
+	cb, _, closer := startCodexBackendWithOpts(t, fs, SessionOpts{
+		Model:    "gpt-test",
+		WorkDir:  "/tmp",
+		ResumeID: wantThreadID,
+	})
+	defer closer()
+
+	if !cb.waitInit(2 * time.Second) {
+		t.Fatalf("waitInit failed; initErr=%v", cb.initErr.Load())
+	}
+
+	// Drain captured frames and confirm we saw thread/resume (not start).
+	close(fs.calls)
+	sawResume := false
+	sawStart := false
+	for env := range fs.calls {
+		switch env.Method {
+		case MethodThreadResume:
+			sawResume = true
+			var p struct {
+				ThreadID     string `json:"threadId"`
+				ExcludeTurns bool   `json:"excludeTurns"`
+			}
+			if err := json.Unmarshal(env.Params, &p); err != nil {
+				t.Fatalf("decode resume params: %v", err)
+			}
+			if p.ThreadID != wantThreadID {
+				t.Errorf("resume threadId mismatch: got %q want %q", p.ThreadID, wantThreadID)
+			}
+			if !p.ExcludeTurns {
+				t.Error("expected excludeTurns=true to keep response light")
+			}
+		case MethodThreadStart:
+			sawStart = true
+		}
+	}
+	if !sawResume {
+		t.Error("expected thread/resume to be called")
+	}
+	if sawStart {
+		t.Error("thread/start should NOT be called when ResumeID is set")
+	}
+
+	// Backend should report the resumed thread id, not a fresh one.
+	if got := cb.info().SessionID; got != wantThreadID {
+		t.Errorf("info.SessionID = %q, want %q", got, wantThreadID)
+	}
+}
+
+// TestCodexBackendResumeFallbackToStart verifies that if thread/resume errors
+// (e.g. persisted thread missing on disk after $CODEX_HOME wipe), the backend
+// falls back to thread/start so the session at least comes up — losing
+// conversation history is a survivable degradation, init-failure is not.
+func TestCodexBackendResumeFallbackToStart(t *testing.T) {
+	fs := &codexFakeServer{model: "gpt-codex-test", failResumeOnce: true}
+	cb, _, closer := startCodexBackendWithOpts(t, fs, SessionOpts{
+		Model:    "gpt-test",
+		WorkDir:  "/tmp",
+		ResumeID: "thr_does_not_exist",
+	})
+	defer closer()
+
+	if !cb.waitInit(2 * time.Second) {
+		t.Fatalf("waitInit failed; initErr=%v", cb.initErr.Load())
+	}
+	// Fallback created a fresh thread with a different id (the fake's
+	// thread/start handler mints "thr_test_*").
+	got := cb.info().SessionID
+	if got == "thr_does_not_exist" {
+		t.Errorf("fallback should have minted a new thread id, got resume id %q", got)
+	}
+	if !strings.HasPrefix(got, "thr_test_") {
+		t.Errorf("fallback should mint a fresh test thread id, got %q", got)
 	}
 }
 

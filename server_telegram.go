@@ -235,6 +235,13 @@ func (tb *telegramBridge) handleMessage(chatID string, msg *im.Message) {
 		return
 	}
 
+	// If user replied to a previous message, prepend the quoted text so the
+	// session can see the context being referred to. Telegram only sends
+	// reply_to_message metadata; without this the bot only sees the bare reply.
+	if quoted := extractReplyContext(msg.ReplyToMessage); quoted != "" {
+		text = "[Replying to earlier message:\n" + quoted + "\n]\n" + text
+	}
+
 	// Enqueue message for serial processing
 	chat := tb.getOrCreateChat(chatID)
 	select {
@@ -243,6 +250,27 @@ func (tb *telegramBridge) handleMessage(chatID string, msg *im.Message) {
 	default:
 		im.SendMessage(tb.token, chatID, "Too many queued messages. Please wait.")
 	}
+}
+
+// extractReplyContext pulls a textual quote from a Telegram reply_to_message,
+// falling back to the caption for media messages and truncating at 800 chars
+// so a long quoted message can't blow up the prompt.
+func extractReplyContext(reply *im.Message) string {
+	if reply == nil {
+		return ""
+	}
+	q := strings.TrimSpace(reply.Text)
+	if q == "" {
+		q = strings.TrimSpace(reply.Caption)
+	}
+	if q == "" {
+		return ""
+	}
+	const maxQuoteLen = 800
+	if len(q) > maxQuoteLen {
+		q = q[:maxQuoteLen] + "...(truncated)"
+	}
+	return q
 }
 
 // processMessage handles one message from the queue — ensures Claude is idle first.

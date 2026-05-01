@@ -291,7 +291,21 @@ func buildPrompt() buildPromptResult {
 	//
 	// On the legacy (flag-off) path, SOUL.md was already emitted earlier inline
 	// with the other soul files, so this block is a no-op.
-	if enableFragmentLoading {
+	// Track fragments actually written into the prompt so audit can record them.
+	// nil = legacy path (flag off) or no fragments matched.
+	var loadedFragments []string
+	// Fragment loading is the SOUL.md replacement under flag=true, so it must
+	// only run for modes whose profile actually wants SOUL.md. Heartbeat in
+	// particular declares SoulFiles without SOUL.md and the test suite asserts
+	// "# === SOUL.md ===" never appears in its prompt.
+	profileWantsSOUL := false
+	for _, name := range profile.SoulFiles {
+		if name == "SOUL.md" {
+			profileWantsSOUL = true
+			break
+		}
+	}
+	if enableFragmentLoading && profileWantsSOUL {
 		soulMode := detectSoulMode(gatherRoutingSignals())
 		fragPaths, fragErr := loadFragmentsByMode(getSoulFragmentsDir(), soulMode)
 		if fragErr == nil && len(fragPaths) > 0 {
@@ -301,6 +315,9 @@ func buildPrompt() buildPromptResult {
 					secStart := b.Len()
 					fmt.Fprintf(&b, "\n# === SOUL.md ===\n\n%s\n", assembled)
 					sections = append(sections, promptSection{name: "SOUL.md", tokens: estimateTokens(b.String()[secStart:])})
+					// Only record on successful write so audit reflects what's
+					// actually in the prompt (not what the loader returned).
+					loadedFragments = fragPaths
 				}
 			}
 		}
@@ -408,10 +425,12 @@ func buildPrompt() buildPromptResult {
 
 	content := b.String()
 
-	// Phase A: persona router audit. detectSoulMode runs but its result is not
-	// yet applied to fragment loading — output stays byte-equivalent with the
-	// pre-router prompt. We only record what *would* have been chosen so we
-	// can validate routing logic before flipping the switch in Phase C.
+	// Phase C audit: record the soul mode + fragments actually loaded so we can
+	// validate routing decisions and observe fragment composition over time.
+	// `loadedFragments` is populated above when fragment loading succeeded;
+	// it stays nil on the legacy path (flag off) or when the mode resolves to
+	// an empty fragment set, which correctly distinguishes "no fragments used"
+	// from "loader returned paths but nothing made it into the prompt".
 	signals := gatherRoutingSignals()
 	soulMode := detectSoulMode(signals)
 	recordRoutingAudit(PromptRoutingDecision{
@@ -419,7 +438,7 @@ func buildPrompt() buildPromptResult {
 		CLIMode:       currentMode,
 		SoulMode:      soulMode,
 		Signals:       signals,
-		FragmentsUsed: nil, // Phase B
+		FragmentsUsed: loadedFragments,
 		TokensEst:     estimateTokens(content),
 		CharSize:      len(content),
 		// SessionID populated by the server when known; CLI runs leave it empty.

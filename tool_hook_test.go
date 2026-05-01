@@ -1147,6 +1147,181 @@ func TestRunUserPromptSubmitHook_NoMatch(t *testing.T) {
 	}
 }
 
+func TestRunStopHook_Match(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "stop.db")
+	defer func() { dbPath = origDB }()
+
+	origWS := workspace
+	workspace = dir
+	defer func() { workspace = origWS }()
+
+	os.WriteFile(filepath.Join(dir, "tool-hooks.yaml"), []byte(`rules:
+  - id: end_of_turn_reminder
+    events: [Stop]
+    inject: "leave a hook in your reply, ask about next step"
+    dedupe: never
+`), 0644)
+
+	input := ToolHookInput{
+		SessionID:     "stop-sess",
+		HookEventName: "Stop",
+	}
+	payload, _ := json.Marshal(input)
+
+	r, w, _ := os.Pipe()
+	w.Write(payload)
+	w.Close()
+	origStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = origStdin }()
+
+	pr, pw, _ := os.Pipe()
+	origStdout := os.Stdout
+	os.Stdout = pw
+	runToolHook()
+	pw.Close()
+	os.Stdout = origStdout
+
+	buf := make([]byte, 2048)
+	n, _ := pr.Read(buf)
+	out := string(buf[:n])
+
+	if !strings.Contains(out, "leave a hook") {
+		t.Errorf("expected injection, got %q", out)
+	}
+	if !strings.Contains(out, `"hookEventName":"Stop"`) {
+		t.Errorf("expected Stop event name in output, got %q", out)
+	}
+
+	db, _ := openDB()
+	defer db.Close()
+	var n1 int
+	db.QueryRow(`SELECT COUNT(*) FROM tool_hook_audit WHERE rule_id='end_of_turn_reminder' AND injected=1 AND event_name='Stop'`).Scan(&n1)
+	if n1 != 1 {
+		t.Errorf("expected 1 Stop audit row, got %d", n1)
+	}
+}
+
+func TestRunStopHook_PerSessionDedupe(t *testing.T) {
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "stop-dedupe.db")
+	defer func() { dbPath = origDB }()
+
+	origWS := workspace
+	workspace = dir
+	defer func() { workspace = origWS }()
+
+	os.WriteFile(filepath.Join(dir, "tool-hooks.yaml"), []byte(`rules:
+  - id: once_per_session
+    events: [Stop]
+    inject: "first stop only"
+    dedupe: per_session
+`), 0644)
+
+	runOne := func() string {
+		input := ToolHookInput{
+			SessionID:     "stop-dedupe-sess",
+			HookEventName: "Stop",
+		}
+		payload, _ := json.Marshal(input)
+		r, w, _ := os.Pipe()
+		w.Write(payload)
+		w.Close()
+		origStdin := os.Stdin
+		os.Stdin = r
+		defer func() { os.Stdin = origStdin }()
+
+		pr, pw, _ := os.Pipe()
+		origStdout := os.Stdout
+		os.Stdout = pw
+		runToolHook()
+		pw.Close()
+		os.Stdout = origStdout
+		buf := make([]byte, 2048)
+		n, _ := pr.Read(buf)
+		return string(buf[:n])
+	}
+
+	out1 := runOne()
+	if !strings.Contains(out1, "first stop only") {
+		t.Errorf("first stop should inject, got %q", out1)
+	}
+	out2 := runOne()
+	if strings.Contains(out2, "first stop only") {
+		t.Errorf("second stop should be deduped, got %q", out2)
+	}
+
+	db, _ := openDB()
+	defer db.Close()
+	var injCount, dedupeCount int
+	db.QueryRow(`SELECT COUNT(*) FROM tool_hook_audit WHERE rule_id='once_per_session' AND injected=1`).Scan(&injCount)
+	db.QueryRow(`SELECT COUNT(*) FROM tool_hook_audit WHERE rule_id='once_per_session' AND skip_reason='dedupe'`).Scan(&dedupeCount)
+	if injCount != 1 {
+		t.Errorf("expected 1 injection, got %d", injCount)
+	}
+	if dedupeCount != 1 {
+		t.Errorf("expected 1 dedupe skip, got %d", dedupeCount)
+	}
+}
+
+func TestRunStopHook_SubagentStop(t *testing.T) {
+	// SubagentStop shares dispatcher with Stop — verify event name is preserved.
+	dir := t.TempDir()
+	origDB := dbPath
+	dbPath = filepath.Join(dir, "subagent.db")
+	defer func() { dbPath = origDB }()
+
+	origWS := workspace
+	workspace = dir
+	defer func() { workspace = origWS }()
+
+	os.WriteFile(filepath.Join(dir, "tool-hooks.yaml"), []byte(`rules:
+  - id: subagent_only
+    events: [SubagentStop]
+    inject: "subagent done"
+    dedupe: never
+  - id: stop_only
+    events: [Stop]
+    inject: "main stop"
+    dedupe: never
+`), 0644)
+
+	input := ToolHookInput{
+		SessionID:     "sub-sess",
+		HookEventName: "SubagentStop",
+	}
+	payload, _ := json.Marshal(input)
+	r, w, _ := os.Pipe()
+	w.Write(payload)
+	w.Close()
+	origStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = origStdin }()
+
+	pr, pw, _ := os.Pipe()
+	origStdout := os.Stdout
+	os.Stdout = pw
+	runToolHook()
+	pw.Close()
+	os.Stdout = origStdout
+	buf := make([]byte, 2048)
+	n, _ := pr.Read(buf)
+	out := string(buf[:n])
+
+	if !strings.Contains(out, "subagent done") {
+		t.Errorf("expected SubagentStop rule to fire, got %q", out)
+	}
+	if strings.Contains(out, "main stop") {
+		t.Errorf("Stop-only rule should not fire on SubagentStop, got %q", out)
+	}
+	if !strings.Contains(out, `"hookEventName":"SubagentStop"`) {
+		t.Errorf("expected SubagentStop in output, got %q", out)
+	}
+}
+
 func TestEventDispatch_BackwardCompat_NoEventName(t *testing.T) {
 	// Payloads without hook_event_name must still work as PreToolUse.
 	dir := t.TempDir()

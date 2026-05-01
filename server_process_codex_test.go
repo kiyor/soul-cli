@@ -21,6 +21,9 @@ import (
 // we drive its eventsCh directly.
 func newCodexBridgeTestSession(t *testing.T) (*serverSession, *codexBackend, *subscriber) {
 	t.Helper()
+	// Sandbox HOME so emitCodexSyntheticInit's JSONL write doesn't escape
+	// into the developer's real ~/.openclaw/agents/main/sessions/.
+	t.Setenv("HOME", t.TempDir())
 	bc := newBroadcaster()
 	sess := &serverSession{
 		ID:          "test-session",
@@ -105,14 +108,20 @@ func TestAttachCodexBridge_TurnFlowEmitsSSE(t *testing.T) {
 	//   codex_turn_started
 	//   codex_item_started
 	//   codex_item_delta
+	//   assistant   (Round 5: CC-shaped re-broadcast of the text delta)
 	//   codex_item_completed
 	//   codex_turn_completed
 	//   result   (CC-shaped fallback alongside turn_completed)
+	//
+	// Note: codex_item_completed for an agent_message whose deltas already
+	// rendered does NOT re-emit a CC "assistant" event (avoids typewriter
+	// double-paint). See broadcastCodexItemCompletedAsCC.
 	want := []string{
 		"init",
 		"codex_turn_started",
 		"codex_item_started",
 		"codex_item_delta",
+		"assistant",
 		"codex_item_completed",
 		"codex_turn_completed",
 		"result",
@@ -125,6 +134,26 @@ func TestAttachCodexBridge_TurnFlowEmitsSSE(t *testing.T) {
 		if got[i].Event != w {
 			t.Errorf("event[%d] = %q, want %q (full sequence: %v)", i, got[i].Event, w, eventNames(got))
 		}
+	}
+
+	// The CC-shaped assistant event should carry exactly the streamed
+	// delta text — the UI's typewriter relies on appending each delta as
+	// it arrives. Re-emitting the full message would double-paint.
+	var asstPayload map[string]any
+	if err := json.Unmarshal(got[4].Data, &asstPayload); err != nil {
+		t.Fatalf("decode assistant payload: %v", err)
+	}
+	if asstPayload["type"] != "assistant" {
+		t.Errorf("assistant payload type = %v, want assistant", asstPayload["type"])
+	}
+	msg, _ := asstPayload["message"].(map[string]any)
+	contents, _ := msg["content"].([]any)
+	if len(contents) != 1 {
+		t.Fatalf("assistant content len = %d, want 1: %v", len(contents), contents)
+	}
+	first, _ := contents[0].(map[string]any)
+	if first["type"] != "text" || first["text"] != "Hi" {
+		t.Errorf("assistant content[0] = %v, want {type:text, text:Hi}", first)
 	}
 
 	// Verify the synthetic init carries backend=codex and session_id=thread id.
@@ -141,8 +170,10 @@ func TestAttachCodexBridge_TurnFlowEmitsSSE(t *testing.T) {
 	}
 
 	// Verify the result envelope carries subtype=success on a clean turn.
+	// Index shifted by 1 from Round 4 because Round 5 inserts a CC-shaped
+	// "assistant" event between codex_item_delta and codex_item_completed.
 	var resultPayload map[string]any
-	if err := json.Unmarshal(got[6].Data, &resultPayload); err != nil {
+	if err := json.Unmarshal(got[7].Data, &resultPayload); err != nil {
 		t.Fatalf("decode result payload: %v", err)
 	}
 	if resultPayload["subtype"] != "success" {
@@ -319,6 +350,256 @@ func TestAttachCodexBridge_ApprovalDefaultAllowsWhenNoRule(t *testing.T) {
 		}
 	}
 	t.Fatal("approval bridge never resolved")
+}
+
+// TestAttachCodexBridge_ToolCallEmitsCCToolUseAndResult validates the
+// Round 5 CC-shape re-broadcast for tool kinds: a UEvtItemCompleted
+// item_kind=tool_call should produce one tool_use event AND one tool_result
+// event in CC stream-json schema, alongside the typed codex_item_completed.
+// Without these, the Web UI's tool chain only renders after a refresh.
+func TestAttachCodexBridge_ToolCallEmitsCCToolUseAndResult(t *testing.T) {
+	sess, cb, sub := newCodexBridgeTestSession(t)
+	attachCodexBridge(cb, sess, "server-create", false)
+
+	// Push a turn with a single tool_call item (no deltas — most tools
+	// surface only on completion).
+	cb.emit(UnifiedEvent{
+		Kind:    UEvtTurnStarted,
+		TurnID:  "t1",
+		Payload: mustMarshalRaw(UnifiedTurnPayload{Status: "running"}),
+	})
+	cb.emit(UnifiedEvent{
+		Kind:     UEvtItemStarted,
+		TurnID:   "t1",
+		ItemID:   "tool-1",
+		ItemKind: UItemToolCall,
+		Payload: mustMarshalRaw(UnifiedItemPayload{
+			Name:  "Bash",
+			Input: json.RawMessage(`{"command":"ls"}`),
+		}),
+	})
+	cb.emit(UnifiedEvent{
+		Kind:     UEvtItemCompleted,
+		TurnID:   "t1",
+		ItemID:   "tool-1",
+		ItemKind: UItemToolCall,
+		Payload: mustMarshalRaw(UnifiedItemPayload{
+			Name:    "Bash",
+			Input:   json.RawMessage(`{"command":"ls"}`),
+			Result:  json.RawMessage(`{"text":"file-a\nfile-b"}`),
+			IsError: false,
+		}),
+	})
+	cb.emit(UnifiedEvent{
+		Kind:    UEvtTurnCompleted,
+		TurnID:  "t1",
+		Payload: mustMarshalRaw(UnifiedTurnPayload{Status: "ok"}),
+	})
+
+	// Expected sequence:
+	//   init, codex_turn_started, codex_item_started,
+	//   codex_item_completed, tool_use, tool_result,
+	//   codex_turn_completed, result
+	want := []string{
+		"init",
+		"codex_turn_started",
+		"codex_item_started",
+		"codex_item_completed",
+		"tool_use",
+		"tool_result",
+		"codex_turn_completed",
+		"result",
+	}
+	got := readSSEEvents(t, sub, len(want), 2*time.Second)
+	if len(got) < len(want) {
+		t.Fatalf("got %d events: %v", len(got), eventNames(got))
+	}
+	for i, w := range want {
+		if got[i].Event != w {
+			t.Errorf("event[%d] = %q, want %q (full: %v)", i, got[i].Event, w, eventNames(got))
+		}
+	}
+
+	// Validate tool_use payload: the UI's handleToolUse iterates
+	// data.message.content for type=="tool_use" blocks with id/name/input.
+	var toolUseRaw map[string]any
+	if err := json.Unmarshal(got[4].Data, &toolUseRaw); err != nil {
+		t.Fatalf("decode tool_use: %v", err)
+	}
+	tuMsg, _ := toolUseRaw["message"].(map[string]any)
+	tuContent, _ := tuMsg["content"].([]any)
+	if len(tuContent) != 1 {
+		t.Fatalf("tool_use content len = %d, want 1", len(tuContent))
+	}
+	tuBlock, _ := tuContent[0].(map[string]any)
+	if tuBlock["type"] != "tool_use" {
+		t.Errorf("tool_use block type = %v, want tool_use", tuBlock["type"])
+	}
+	if tuBlock["name"] != "Bash" {
+		t.Errorf("tool_use name = %v, want Bash", tuBlock["name"])
+	}
+	if tuBlock["id"] != "tool-1" {
+		t.Errorf("tool_use id = %v, want tool-1", tuBlock["id"])
+	}
+	tuInput, _ := tuBlock["input"].(map[string]any)
+	if tuInput["command"] != "ls" {
+		t.Errorf("tool_use input.command = %v, want ls", tuInput["command"])
+	}
+
+	// Validate tool_result payload: handleToolResult expects the user
+	// message content to wrap a tool_result block keyed by tool_use_id.
+	var toolResultRaw map[string]any
+	if err := json.Unmarshal(got[5].Data, &toolResultRaw); err != nil {
+		t.Fatalf("decode tool_result: %v", err)
+	}
+	if toolResultRaw["type"] != "user" {
+		t.Errorf("tool_result wrapper type = %v, want user", toolResultRaw["type"])
+	}
+	trMsg, _ := toolResultRaw["message"].(map[string]any)
+	trContent, _ := trMsg["content"].([]any)
+	if len(trContent) != 1 {
+		t.Fatalf("tool_result content len = %d, want 1", len(trContent))
+	}
+	trBlock, _ := trContent[0].(map[string]any)
+	if trBlock["type"] != "tool_result" {
+		t.Errorf("tool_result block type = %v, want tool_result", trBlock["type"])
+	}
+	if trBlock["tool_use_id"] != "tool-1" {
+		t.Errorf("tool_result tool_use_id = %v, want tool-1", trBlock["tool_use_id"])
+	}
+	if !strings.Contains(trBlock["content"].(string), "file-a") {
+		t.Errorf("tool_result content missing expected text: %v", trBlock["content"])
+	}
+	// IsError=false should be omitted (avoid noisy field on success).
+	if _, ok := trBlock["is_error"]; ok {
+		t.Errorf("tool_result is_error present on success path: %v", trBlock["is_error"])
+	}
+}
+
+// TestAttachCodexBridge_AgentMessageNoDeltaEmitsCCAssistantOnComplete
+// guards the path where codex skips streaming text deltas (some models
+// or short turns) — we must still emit one CC-shaped assistant event on
+// item_completed so the UI shows the message.
+func TestAttachCodexBridge_AgentMessageNoDeltaEmitsCCAssistantOnComplete(t *testing.T) {
+	sess, cb, sub := newCodexBridgeTestSession(t)
+	attachCodexBridge(cb, sess, "server-create", false)
+
+	cb.emit(UnifiedEvent{
+		Kind:    UEvtTurnStarted,
+		TurnID:  "t-nd",
+		Payload: mustMarshalRaw(UnifiedTurnPayload{Status: "running"}),
+	})
+	cb.emit(UnifiedEvent{
+		Kind:     UEvtItemStarted,
+		TurnID:   "t-nd",
+		ItemID:   "msg-1",
+		ItemKind: UItemAgentMessage,
+		Payload:  mustMarshalRaw(UnifiedItemPayload{}),
+	})
+	// No UEvtItemDelta — go straight to completion with the full text.
+	cb.emit(UnifiedEvent{
+		Kind:     UEvtItemCompleted,
+		TurnID:   "t-nd",
+		ItemID:   "msg-1",
+		ItemKind: UItemAgentMessage,
+		Payload: mustMarshalRaw(UnifiedItemPayload{
+			Result: json.RawMessage(`{"text":"final-only message"}`),
+		}),
+	})
+	cb.emit(UnifiedEvent{
+		Kind:    UEvtTurnCompleted,
+		TurnID:  "t-nd",
+		Payload: mustMarshalRaw(UnifiedTurnPayload{Status: "ok"}),
+	})
+
+	want := []string{
+		"init",
+		"codex_turn_started",
+		"codex_item_started",
+		"codex_item_completed",
+		"assistant",
+		"codex_turn_completed",
+		"result",
+	}
+	got := readSSEEvents(t, sub, len(want), 2*time.Second)
+	if len(got) < len(want) {
+		t.Fatalf("got %d events: %v", len(got), eventNames(got))
+	}
+	for i, w := range want {
+		if got[i].Event != w {
+			t.Errorf("event[%d] = %q, want %q (full: %v)", i, got[i].Event, w, eventNames(got))
+		}
+	}
+
+	// The assistant event should carry the final text once (no duplicate
+	// because no delta preceded it).
+	var asstRaw map[string]any
+	_ = json.Unmarshal(got[4].Data, &asstRaw)
+	asstMsg, _ := asstRaw["message"].(map[string]any)
+	asstContent, _ := asstMsg["content"].([]any)
+	if len(asstContent) != 1 {
+		t.Fatalf("assistant content len = %d, want 1", len(asstContent))
+	}
+	block, _ := asstContent[0].(map[string]any)
+	if block["text"] != "final-only message" {
+		t.Errorf("assistant text = %v, want 'final-only message'", block["text"])
+	}
+}
+
+// TestAttachCodexBridge_DeltaThenCompleteSkipsDuplicateAssistant guards
+// against the typewriter double-paint regression: when a delta already
+// emitted a CC-shaped assistant event, the matching item_completed must
+// NOT re-emit (otherwise the UI's typeBuf would receive the message twice).
+func TestAttachCodexBridge_DeltaThenCompleteSkipsDuplicateAssistant(t *testing.T) {
+	sess, cb, sub := newCodexBridgeTestSession(t)
+	attachCodexBridge(cb, sess, "server-create", false)
+
+	cb.emit(UnifiedEvent{
+		Kind:    UEvtTurnStarted,
+		TurnID:  "t-dd",
+		Payload: mustMarshalRaw(UnifiedTurnPayload{Status: "running"}),
+	})
+	cb.emit(UnifiedEvent{
+		Kind:     UEvtItemStarted,
+		TurnID:   "t-dd",
+		ItemID:   "msg-2",
+		ItemKind: UItemAgentMessage,
+		Payload:  mustMarshalRaw(UnifiedItemPayload{}),
+	})
+	cb.emit(UnifiedEvent{
+		Kind:      UEvtItemDelta,
+		TurnID:    "t-dd",
+		ItemID:    "msg-2",
+		ItemKind:  UItemAgentMessage,
+		DeltaType: "text",
+		Payload:   mustMarshalRaw(UnifiedDeltaPayload{Text: "Hello"}),
+	})
+	cb.emit(UnifiedEvent{
+		Kind:     UEvtItemCompleted,
+		TurnID:   "t-dd",
+		ItemID:   "msg-2",
+		ItemKind: UItemAgentMessage,
+		Payload: mustMarshalRaw(UnifiedItemPayload{
+			Result: json.RawMessage(`{"text":"Hello"}`),
+		}),
+	})
+	cb.emit(UnifiedEvent{
+		Kind:    UEvtTurnCompleted,
+		TurnID:  "t-dd",
+		Payload: mustMarshalRaw(UnifiedTurnPayload{Status: "ok"}),
+	})
+
+	got := readSSEEvents(t, sub, 12, 2*time.Second)
+	// Count CC-shaped "assistant" events — must be exactly 1 (from the delta).
+	count := 0
+	for _, ev := range got {
+		if ev.Event == "assistant" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("CC-shaped assistant events = %d, want 1 (sequence: %v)", count, eventNames(got))
+	}
 }
 
 func eventNames(evs []sseEvent) []string {

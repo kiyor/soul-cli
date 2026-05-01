@@ -97,6 +97,12 @@ var (
 	// Used with -p to mark one-shot sessions as non-interactive in server_sessions DB.
 	overrideCategory string
 
+	// Core/Backend override: --core codex|cc
+	// When set, forces the session to use a specific harness backend regardless
+	// of model auto-routing. "codex" forces -p mode to delegate to server with
+	// backend=codex (codex backend only lives in server). Empty = auto-route.
+	overrideCore string
+
 	// Default model for cron/heartbeat (from config.json "defaultModel")
 	defaultModel string
 	// Default model for interactive/print modes (from config.json "server.defaultInteractiveModel")
@@ -790,6 +796,12 @@ Subcommands:
   {{NAME}} new                   reset all Telegram direct sessions (start new conversation)
   {{NAME}} notify [--dry-run] <message>      send Telegram text message to user (supports Markdown)
   {{NAME}} notify-photo [--dry-run] <URL> [caption]  send Telegram photo to user
+  {{NAME}} notify-voice [--dry-run] <ogg-file> [caption]  send Telegram voice (OGG/Opus)
+  {{NAME}} notify-album [--dry-run] [--caption "..."] <URL1> <URL2> [...]  send media group (2-10 photos)
+  {{NAME}} notify-edit [--dry-run] <message_id> <new-text>  edit a previously sent message in place
+  {{NAME}} notify-keyboard [--dry-run] [--buttons "L=cb,L2=https://...,/n,L3=cb"] <text>
+                                            send message with inline keyboard, prints message_id
+  {{NAME}} notify-action <action>            send chat action (typing/upload_photo/record_voice/...)
   {{NAME}} db recall             view sessions pending scan and instructions
   {{NAME}} db pending            JSON output of sessions pending scan
   {{NAME}} db summarized         JSON output of sessions with summaries
@@ -905,6 +917,131 @@ func main() {
 			sendTelegramPhoto(photoParts[0], caption)
 		}
 		return
+	case "notify-voice":
+		dryRun := false
+		var voiceParts []string
+		for _, a := range extra {
+			if a == "--dry-run" {
+				dryRun = true
+			} else {
+				voiceParts = append(voiceParts, a)
+			}
+		}
+		if len(voiceParts) < 1 {
+			fmt.Fprintf(os.Stderr, "usage: %s notify-voice [--dry-run] <ogg-file> [caption]\n", appName)
+			fmt.Fprintf(os.Stderr, "  TG voice messages must be OGG/Opus mono. Convert WAV with:\n")
+			fmt.Fprintf(os.Stderr, "    ffmpeg -i in.wav -c:a libopus -b:a 64k out.ogg\n")
+			os.Exit(1)
+		}
+		caption := ""
+		if len(voiceParts) > 1 {
+			caption = strings.Join(voiceParts[1:], " ")
+		}
+		if dryRun {
+			fmt.Printf("[dry-run] would send TG voice: %s (caption: %s)\n", voiceParts[0], caption)
+		} else {
+			sendTelegramVoice(voiceParts[0], caption)
+		}
+		return
+	case "notify-album":
+		dryRun := false
+		caption := ""
+		var urls []string
+		for i := 0; i < len(extra); i++ {
+			a := extra[i]
+			switch {
+			case a == "--dry-run":
+				dryRun = true
+			case a == "--caption" && i+1 < len(extra):
+				caption = extra[i+1]
+				i++
+			case strings.HasPrefix(a, "--caption="):
+				caption = strings.TrimPrefix(a, "--caption=")
+			default:
+				urls = append(urls, a)
+			}
+		}
+		if len(urls) < 2 {
+			fmt.Fprintf(os.Stderr, "usage: %s notify-album [--dry-run] [--caption \"...\"] <URL1> <URL2> [...] (2-10 photos)\n", appName)
+			os.Exit(1)
+		}
+		if dryRun {
+			fmt.Printf("[dry-run] would send TG album: %d photos (caption: %s)\n", len(urls), caption)
+		} else {
+			sendTelegramAlbum(urls, caption)
+		}
+		return
+	case "notify-edit":
+		dryRun := false
+		var rest []string
+		for _, a := range extra {
+			if a == "--dry-run" {
+				dryRun = true
+			} else {
+				rest = append(rest, a)
+			}
+		}
+		if len(rest) < 2 {
+			fmt.Fprintf(os.Stderr, "usage: %s notify-edit [--dry-run] <message_id> <new-text>\n", appName)
+			os.Exit(1)
+		}
+		var mid int64
+		if _, err := fmt.Sscanf(rest[0], "%d", &mid); err != nil || mid <= 0 {
+			fmt.Fprintf(os.Stderr, "invalid message_id: %s\n", rest[0])
+			os.Exit(1)
+		}
+		newText := strings.Join(rest[1:], " ")
+		if dryRun {
+			fmt.Printf("[dry-run] would edit TG msg %d → %s\n", mid, newText)
+		} else {
+			editTelegramMessage(mid, newText)
+		}
+		return
+	case "notify-keyboard":
+		dryRun := false
+		buttonsSpec := ""
+		var rest []string
+		for i := 0; i < len(extra); i++ {
+			a := extra[i]
+			switch {
+			case a == "--dry-run":
+				dryRun = true
+			case a == "--buttons" && i+1 < len(extra):
+				buttonsSpec = extra[i+1]
+				i++
+			case strings.HasPrefix(a, "--buttons="):
+				buttonsSpec = strings.TrimPrefix(a, "--buttons=")
+			default:
+				rest = append(rest, a)
+			}
+		}
+		if len(rest) == 0 {
+			fmt.Fprintf(os.Stderr, "usage: %s notify-keyboard [--buttons \"L=cb,L2=https://...,/n,L3=cb\"] <text>\n", appName)
+			os.Exit(1)
+		}
+		text := strings.Join(rest, " ")
+		rows := parseButtonsArg(buttonsSpec)
+		if len(rows) == 0 {
+			fmt.Fprintf(os.Stderr, "no buttons parsed from --buttons; need at least one\n")
+			os.Exit(1)
+		}
+		if dryRun {
+			fmt.Printf("[dry-run] would send TG keyboard: %s (rows=%d)\n", text, len(rows))
+		} else {
+			sendTelegramKeyboard(text, rows)
+		}
+		return
+	case "notify-action":
+		if len(extra) < 1 {
+			fmt.Fprintf(os.Stderr, "usage: %s notify-action <action> (typing|upload_photo|record_voice|upload_voice|upload_document|choose_sticker|find_location|upload_video|record_video)\n", appName)
+			os.Exit(1)
+		}
+		if err := trySendTelegramChatAction(extra[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] %v\n", appName, err)
+			os.Exit(1)
+		}
+		fmt.Println("action sent")
+		return
 	case "status":
 		handleStatus()
 		return
@@ -981,6 +1118,9 @@ func main() {
 		return
 	case "netprobe":
 		handleNetProbe(extra)
+		return
+	case "say":
+		handleSay(extra)
 		return
 	}
 
@@ -1063,8 +1203,20 @@ func main() {
 		execClaude(args)
 
 	case "print":
-		// If --category is set and server is running, delegate to server
-		// so the session gets the correct category in server_sessions DB.
+		// Force delegation to server when --core codex (codex backend only
+		// runs inside the server) or --category is set (so the session gets
+		// proper category tagging in server_sessions DB).
+		if overrideCore == "codex" {
+			category := overrideCategory
+			if category == "" {
+				category = CategoryInteractive
+			}
+			if !delegatePrintToServer(printPrompt, category) {
+				fmt.Fprintf(os.Stderr, "[%s] --core codex requires running server (start with `%s server`)\n", appName, appName)
+				os.Exit(1)
+			}
+			return
+		}
 		if overrideCategory != "" && delegatePrintToServer(printPrompt, overrideCategory) {
 			return
 		}
@@ -1276,14 +1428,35 @@ func delegatePrintToServer(prompt, category string) bool {
 	addr := fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
 
 	name := fmt.Sprintf("%s-%s-%s", agentName, category, time.Now().Format("0102-1504"))
+	// Field name discipline:
+	//   "soul_files"   = whether SOUL.md / memory / skills are injected at all
+	//                    (true = enabled; we always want enabled here)
+	//   "replace_soul" = how the soul prompt is layered:
+	//                    true  → 本我 mode (replace built-in system prompt /
+	//                             baseInstructions on codex)
+	//                    false → standard mode (append-only / developer
+	//                             instructions on codex; --standard CLI flag)
+	// Historical note: a prior version sent `soul_files: replaceSoul`,
+	// which conflated the two and made --standard from CLI a silent no-op
+	// (server fell back to cfg.DefaultReplaceSoul instead). Both keys are
+	// now sent explicitly so CLI intent reaches the session struct.
 	payload := map[string]interface{}{
 		"name":            name,
 		"category":        category,
 		"initial_message": prompt,
-		"soul_files":      replaceSoul,
+		"soul_files":      true,
+		"replace_soul":    replaceSoul,
 	}
 	if overrideModel != "" {
 		payload["model"] = overrideModel
+	}
+	// --core flag → backend hint. "codex" / "cc" map directly; "auto" / ""
+	// omit the field so server-side resolveBackendKind can auto-route.
+	switch overrideCore {
+	case "codex":
+		payload["backend"] = "codex"
+	case "cc":
+		payload["backend"] = "cc"
 	}
 	body, _ := json.Marshal(payload)
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -1309,6 +1482,11 @@ func delegatePrintToServer(prompt, category string) bool {
 
 func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 	mode = "interactive"
+	// Defer --model fuzzy resolution until after the full pass so that
+	// --core (which may appear before or after --model) can suppress fuzzy
+	// matching for codex-side model names like "gpt-5.5" that don't exist
+	// in any provider's model list.
+	var rawModel string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "db":
@@ -1319,7 +1497,7 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			mode = "sessions"
 			extra = args[i+1:]
 			return
-		case "notify", "notify-photo":
+		case "notify", "notify-photo", "notify-voice", "notify-album", "notify-edit", "notify-keyboard", "notify-action":
 			mode = args[i]
 			extra = args[i+1:]
 			return
@@ -1401,6 +1579,10 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			mode = "netprobe"
 			extra = args[i+1:]
 			return
+		case "say":
+			mode = "say"
+			extra = args[i+1:]
+			return
 		case "--cron":
 			mode = "cron"
 		case "--heartbeat":
@@ -1415,20 +1597,28 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			replaceSoul = false
 		case "--model":
 			// Custom model: supports fuzzy matching (e.g. "glm", "highspeed", "minimax", "opus")
+			// Fuzzy resolution deferred until end of loop so --core can suppress it.
 			if i+1 < len(args) {
-				resolved, err := resolveFuzzyModel(args[i+1])
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "[%s] %v\n", appName, err)
-					os.Exit(1)
-				}
-				if resolved != "" {
-					overrideModel = resolved
-				}
+				rawModel = args[i+1]
 				i++
 			}
 		case "--category":
 			if i+1 < len(args) {
 				overrideCategory = args[i+1]
+				i++
+			}
+		case "--core":
+			// Backend override: "codex" or "cc". Forces -p mode to delegate
+			// to server with backend hint, since codex backend only runs there.
+			if i+1 < len(args) {
+				v := strings.ToLower(strings.TrimSpace(args[i+1]))
+				switch v {
+				case "codex", "cc", "auto", "":
+					overrideCore = v
+				default:
+					fmt.Fprintf(os.Stderr, "[%s] unknown --core %q (expected codex|cc|auto)\n", appName, args[i+1])
+					os.Exit(1)
+				}
 				i++
 			}
 		case "-p":
@@ -1439,6 +1629,25 @@ func parseArgs(args []string) (mode, printPrompt string, extra []string) {
 			}
 		default:
 			extra = append(extra, args[i])
+		}
+	}
+	// Post-pass: resolve --model now that --core is known.
+	// When --core codex, the model is a codex-side name (e.g. "gpt-5.5",
+	// "gpt-5.1-codex-max") that doesn't live in any provider model list,
+	// so we skip fuzzy resolution and pass it through unchanged. The server
+	// will hand it to codexResolveModel/codex thread/start.
+	if rawModel != "" {
+		if overrideCore == "codex" {
+			overrideModel = rawModel
+		} else {
+			resolved, err := resolveFuzzyModel(rawModel)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] %v\n", appName, err)
+				os.Exit(1)
+			}
+			if resolved != "" {
+				overrideModel = resolved
+			}
 		}
 	}
 	return

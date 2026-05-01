@@ -640,6 +640,28 @@ body{
 .plan-approval .plan-content h1,.plan-approval .plan-content h2,.plan-approval .plan-content h3{margin-top:8px}
 .plan-approval .plan-content::-webkit-scrollbar{width:5px}
 .plan-approval .plan-content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:3px}
+.plan-approval .plan-edit{
+  width:100%;min-height:160px;max-height:480px;padding:10px 12px;
+  border:1px solid rgba(129,140,248,.35);border-radius:var(--radius);
+  background:rgba(0,0,0,.25);color:var(--text);
+  font-size:12px;line-height:1.55;font-family:var(--mono);
+  resize:vertical;margin-bottom:10px;
+}
+.plan-approval .plan-edit:focus{outline:none;border-color:rgba(129,140,248,.6)}
+.plan-approval .plan-edit-toggle{
+  margin-left:auto;padding:3px 9px;border-radius:6px;cursor:pointer;
+  border:1px solid rgba(255,255,255,.12);background:transparent;
+  color:var(--muted2);font-size:11px;font-family:var(--sans);
+  transition:all .15s var(--spring);
+}
+.plan-approval .plan-edit-toggle:hover{color:#c7d2fe;border-color:rgba(129,140,248,.4)}
+.plan-approval.editing .plan-edit-toggle{
+  background:rgba(129,140,248,.18);color:#c7d2fe;border-color:rgba(129,140,248,.4);
+}
+.plan-approval .plan-dirty-dot{
+  display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:#fbbf24;margin-left:6px;vertical-align:middle;
+}
 .plan-approval .plan-feedback{
   width:100%;padding:8px 10px;border:1px solid rgba(255,255,255,.1);
   border-radius:var(--radius);background:rgba(0,0,0,.2);
@@ -745,12 +767,78 @@ body{
 .tool-badge.result{border-color:rgba(var(--diff-add-r),.22);background:rgba(var(--diff-add-r),.08);color:var(--good)}
 .tool-block .tool-body{
   font-family:var(--mono);font-size:11px;line-height:1.5;padding:8px 10px;
-  color:var(--muted);overflow:auto;white-space:pre-wrap;word-break:break-all;
-  max-height:200px;transition:max-height .25s var(--spring),padding .25s var(--spring);
+  color:var(--muted);overflow:auto;white-space:pre-wrap;
+  word-break:normal;overflow-wrap:anywhere;
+  max-height:480px;transition:max-height .25s var(--spring),padding .25s var(--spring);
 }
 .tool-block.collapsed .tool-body{max-height:0;padding:0 10px;overflow:hidden}
 .tool-chevron{margin-left:auto;color:var(--muted2);font-size:12px;transition:transform .25s var(--spring)}
 .tool-block.collapsed .tool-chevron{transform:rotate(-90deg)}
+
+/* Inline preview in tool head — shows command/filename without expanding */
+.tool-preview{
+  flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:11px;color:var(--muted);font-family:var(--mono);
+}
+.tool-preview.mono{font-family:var(--mono)}
+.tool-preview.filename{color:var(--text);font-weight:500}
+.tool-meta-inline{color:var(--muted2);font-size:10px;margin-left:6px}
+
+/* Nested tool result area — appears inside the tool_use block body */
+.tool-result-area{display:none}
+.tool-result-area[data-empty="0"]{display:block;margin-top:8px;border-top:1px dashed var(--border);padding-top:8px}
+.tool-result-head{
+  display:flex;align-items:center;gap:6px;
+  font-family:var(--mono);font-size:10px;color:var(--muted2);
+  margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em;
+}
+.tool-result-head .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--good)}
+.tool-result-body{
+  font-family:var(--mono);font-size:11px;color:var(--text);
+  white-space:pre-wrap;word-break:normal;overflow-wrap:anywhere;
+  line-height:1.5;max-height:280px;overflow:auto;
+  background:var(--bg2);border-radius:6px;padding:6px 8px;
+}
+
+/* Diff stats badge in tool head — red -N green +N */
+.diff-stats{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;font-family:var(--mono);font-size:11px;font-weight:600}
+.diff-stat{padding:1px 5px;border-radius:4px}
+.diff-stat.del{color:rgb(var(--diff-del-r));background:rgba(var(--diff-del-r),.1)}
+.diff-stat.add{color:rgb(var(--diff-add-r));background:rgba(var(--diff-add-r),.1)}
+
+/* Body decorations for structured tool renders */
+.tool-block .tool-body .tool-cmd{
+  font-family:var(--mono);font-size:11px;color:var(--text);
+  white-space:pre-wrap;
+  /* Prefer wrapping at spaces; only break inside words when no other option (long URLs/paths) */
+  word-break:normal;overflow-wrap:anywhere;
+  line-height:1.55;padding:2px 0;
+}
+.tool-block .tool-body .tool-cmd .tool-prompt{
+  color:var(--accent2);user-select:none;margin-right:6px;font-weight:600;
+}
+.tool-block .tool-body .tool-sub{
+  font-family:var(--mono);font-size:11px;color:var(--muted2);
+  font-style:italic;padding:2px 0 4px 0;border-bottom:1px dashed var(--border);
+  margin-bottom:6px;
+}
+.tool-block .tool-body .tool-path{
+  font-family:var(--mono);font-size:11px;color:var(--muted);
+  word-break:break-all;padding:2px 0;
+}
+.tool-block .tool-body .tool-meta{
+  font-family:var(--mono);font-size:10px;color:var(--muted2);padding:2px 0;
+}
+
+/* Per-tool accent colors on the head */
+.tool-block.bash .tool-head{background:rgba(120,180,120,.06)}
+.tool-badge.bash{border-color:rgba(120,180,120,.28);background:rgba(120,180,120,.10);color:#7bbf7b}
+.tool-block.read .tool-head{background:rgba(100,160,220,.06)}
+.tool-badge.read{border-color:rgba(100,160,220,.28);background:rgba(100,160,220,.10);color:#6aa9d8}
+.tool-block.glob .tool-head,.tool-block.grep .tool-head{background:rgba(220,180,100,.05)}
+.tool-badge.glob,.tool-badge.grep{border-color:rgba(220,180,100,.28);background:rgba(220,180,100,.10);color:#d8b06a}
+.tool-block.webfetch .tool-head,.tool-block.websearch .tool-head{background:rgba(180,130,220,.05)}
+.tool-badge.webfetch,.tool-badge.websearch{border-color:rgba(180,130,220,.28);background:rgba(180,130,220,.10);color:#b88adb}
 
 /* Todo list view (TodoWrite tool) */
 .todo-card{
@@ -1196,7 +1284,9 @@ body{
 .msg.tool-msg:has(.todo-card){display:block}
 .tool-block.code-edit{background:var(--bg1);border-color:rgba(var(--accent-r),.16)}
 .tool-block.code-edit .tool-head{background:rgba(var(--accent-r),.05)}
-.tool-block.code-edit .tool-body{padding:0;max-height:none;white-space:normal;word-break:normal;color:inherit}
+.tool-block.code-edit .tool-body{padding:0;max-height:none;white-space:normal;word-break:normal;color:inherit;transition:max-height .25s var(--spring),padding .25s var(--spring)}
+/* Override default collapse rule for code-edit (defeats max-height:none above) */
+.tool-block.code-edit.collapsed .tool-body{max-height:0;padding:0;overflow:hidden}
 .tool-block.code-edit .filepath{font-family:var(--mono);font-size:11px;color:var(--muted);padding:6px 12px;border-bottom:1px solid var(--border);background:var(--bg2)}
 .diff{font-family:var(--mono);font-size:12px;line-height:1.55;overflow-x:auto;padding:6px 0}
 .diff .ln{display:block;padding:1px 12px 1px 28px;white-space:pre;position:relative;border-left:2px solid transparent}
@@ -1679,7 +1769,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   .msg{border-radius:var(--radius2)}
   .body{padding:8px 10px 10px}
   .md{font-size:14px;line-height:1.65}
-  .tool-block .tool-body{max-height:120px}
+  .tool-block .tool-body{max-height:320px}
   .tool-block.collapsed .tool-body{max-height:0}
 
   textarea{font-size:16px;min-height:40px;padding:10px 12px}
@@ -1711,7 +1801,7 @@ textarea::placeholder{color:rgba(126,143,182,.7)}
   .msg{border-radius:10px}
   .body{padding:6px 10px 8px}
   .md{font-size:13px;line-height:1.55}
-  .tool-block .tool-body{max-height:80px}
+  .tool-block .tool-body{max-height:240px}
 
   .composer{padding:6px 8px;padding-bottom:calc(4px + var(--statusbar-h) + var(--safe-b));padding-left:calc(8px + var(--safe-l));padding-right:calc(8px + var(--safe-r))}
   textarea{font-size:14px;min-height:32px;padding:6px 10px}

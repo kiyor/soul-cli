@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	im "github.com/kiyor/soul-cli/pkg/im"
+)
 
 func TestTrimWhisperTailHallucinations(t *testing.T) {
 	cases := []struct {
@@ -31,6 +36,32 @@ func TestTrimWhisperTailHallucinations(t *testing.T) {
 			got := trimWhisperTailHallucinations(tc.in)
 			if got != tc.want {
 				t.Errorf("trimWhisperTailHallucinations(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractReplyContext(t *testing.T) {
+	long := strings.Repeat("a", 1000)
+
+	cases := []struct {
+		name string
+		in   *im.Message
+		want string
+	}{
+		{"nil reply", nil, ""},
+		{"empty text and caption", &im.Message{}, ""},
+		{"text only", &im.Message{Text: "  hello  "}, "hello"},
+		{"caption fallback", &im.Message{Caption: "  photo cap  "}, "photo cap"},
+		{"text wins over caption", &im.Message{Text: "primary", Caption: "ignored"}, "primary"},
+		{"truncates long quote", &im.Message{Text: long}, strings.Repeat("a", 800) + "...(truncated)"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractReplyContext(tc.in)
+			if got != tc.want {
+				t.Errorf("extractReplyContext(%+v) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}

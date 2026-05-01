@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -241,6 +242,11 @@ func (c *wsClient) handleMessage(raw []byte) {
 		GalID       string `json:"gal_id"`
 		ReplaceSoul *bool  `json:"replace_soul"` // 本我模式; nil → default true for create, inherit-from-DB for resume
 		Mode        string `json:"mode"`         // "weiran"/"benwo"/"cc"; overrides SoulFiles+ReplaceSoul when set
+		// Backend selects the harness driving this session: "cc" (Claude Code
+		// stream-json), "codex" (OpenAI codex JSON-RPC), or "" / "auto" to let
+		// resolveBackendKind decide based on model name. Mirrors the REST
+		// /api/sessions field of the same name.
+		Backend string `json:"backend"`
 	}
 	if json.Unmarshal(raw, &msg) != nil {
 		c.sendJSON(map[string]string{"type": "error", "error": "invalid JSON"})
@@ -356,6 +362,26 @@ func (c *wsClient) handleMessage(raw []byte) {
 		if model == "" {
 			model = c.hub.defaultInteractiveModel
 		}
+		// Backend kind: same parsing rules as the REST POST /api/sessions
+		// path (server.go ~L797). Empty / "auto" → resolveBackendKind picks
+		// based on model. Explicit "cc"/"codex" wins. Anything else is a
+		// client bug — surface it instead of silently defaulting.
+		var backendKind BackendKind
+		switch strings.ToLower(strings.TrimSpace(msg.Backend)) {
+		case "", "auto":
+			backendKind = ""
+		case string(BackendCC), "claude", "claude-code":
+			backendKind = BackendCC
+		case string(BackendCodex), "openai-codex":
+			if !codexEnabled {
+				c.sendJSON(map[string]string{"type": "error", "error": "backend=codex requested but agents.codex.enabled=false in config.json"})
+				return
+			}
+			backendKind = BackendCodex
+		default:
+			c.sendJSON(map[string]string{"type": "error", "error": fmt.Sprintf("unknown backend %q (expected cc|codex|auto)", msg.Backend)})
+			return
+		}
 		sess, err := c.hub.sm.createSessionWithOpts(sessionCreateOpts{
 			Name:        name,
 			Project:     project,
@@ -364,6 +390,7 @@ func (c *wsClient) handleMessage(raw []byte) {
 			GalID:       msg.GalID,
 			Category:    CategoryInteractive,
 			ReplaceSoul: replaceSoul,
+			Backend:     backendKind,
 		})
 		if err != nil {
 			c.sendJSON(map[string]string{"type": "error", "error": err.Error()})

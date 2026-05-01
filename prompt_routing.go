@@ -388,7 +388,8 @@ func writeRoutingAudit(db *sql.DB, d PromptRoutingDecision) {
 // enableFragmentLoading is the Phase-B feature flag.
 // Default false = old SOUL.md path, byte-identical to pre-Phase-B output.
 // Set WEIRAN_FRAGMENT_LOADING=1 to activate fragment-based assembly.
-var enableFragmentLoading = os.Getenv("WEIRAN_FRAGMENT_LOADING") == "1"
+// var enableFragmentLoading = os.Getenv("WEIRAN_FRAGMENT_LOADING") == "1"
+var enableFragmentLoading = true
 
 // soulFragmentsDirOverride allows tests to inject a custom soul fragments directory.
 // Empty string = use default (<workspace>/soul/).

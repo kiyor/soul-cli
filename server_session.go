@@ -2162,12 +2162,13 @@ func findSessionJSONL(sessionID string) string {
 
 // historyMessage is a parsed message from a session JSONL for the UI.
 type historyMessage struct {
-	Role      string         `json:"role"`                 // user, assistant, system, tool_use, tool_result, image
-	Content   string         `json:"content"`              // text content
-	ToolName  string         `json:"tool_name,omitempty"`  // for tool_use
-	ToolInput string         `json:"tool_input,omitempty"` // for tool_use
-	Timestamp string         `json:"timestamp,omitempty"`
-	Images    []historyImage `json:"images,omitempty"` // base64 images from tool results
+	Role       string         `json:"role"`                   // user, assistant, system, tool_use, tool_result, image
+	Content    string         `json:"content"`                // text content
+	ToolName   string         `json:"tool_name,omitempty"`    // for tool_use
+	ToolInput  string         `json:"tool_input,omitempty"`   // for tool_use
+	ToolUseID  string         `json:"tool_use_id,omitempty"`  // for tool_use / tool_result (pair them in UI)
+	Timestamp  string         `json:"timestamp,omitempty"`
+	Images     []historyImage `json:"images,omitempty"` // base64 images from tool results
 }
 
 type historyImage struct {
@@ -2269,10 +2270,12 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 
 		case "assistant":
 			var blocks []struct {
-				Type  string          `json:"type"`
-				Text  string          `json:"text"`
-				Name  string          `json:"name"`
-				Input json.RawMessage `json:"input"`
+				Type      string          `json:"type"`
+				Text      string          `json:"text"`
+				Name      string          `json:"name"`
+				ID        string          `json:"id"`           // tool_use id
+				ToolUseID string          `json:"tool_use_id"` // tool_result → tool_use linkage
+				Input     json.RawMessage `json:"input"`
 			}
 			if json.Unmarshal(ev.Message.Content, &blocks) != nil {
 				continue
@@ -2296,10 +2299,13 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 						textParts = nil
 					}
 					inputStr := string(b.Input)
-					// Keep full input for code-edit tools (Edit/Write/NotebookEdit/MultiEdit)
-					// so frontend can render diffs; truncate others
+					// Keep full input for tools the frontend renders structurally
+					// (diffs, command preview, file path, etc.). Truncating these
+					// breaks JSON parsing on the client and falls back to a raw
+					// JSON dump — which is exactly the ugly state we're avoiding.
 					switch b.Name {
-					case "Edit", "Write", "NotebookEdit", "MultiEdit":
+					case "Edit", "Write", "NotebookEdit", "MultiEdit",
+						"Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite":
 						// no truncation
 					default:
 						if len(inputStr) > 500 {
@@ -2310,6 +2316,7 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 						Role:      "tool_use",
 						ToolName:  b.Name,
 						ToolInput: inputStr,
+						ToolUseID: b.ID,
 						Timestamp: ev.Timestamp,
 					})
 				case "tool_result":
@@ -2318,8 +2325,9 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 						resultText = resultText[:500] + "..."
 					}
 					all = append(all, historyMessage{
-						Role:    "tool_result",
-						Content: resultText,
+						Role:      "tool_result",
+						Content:   resultText,
+						ToolUseID: b.ToolUseID,
 					})
 				}
 			}
