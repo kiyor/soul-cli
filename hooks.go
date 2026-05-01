@@ -288,7 +288,13 @@ func safetyCheck(mode string) {
 		"AKIA", "aws_secret", "ghp_", "gho_", "github_pat_",
 		"xoxb-", "xoxp-", "PRIVATE KEY", "password",
 	}
-	gitDiff, err := exec.Command("git", "-C", workspace, "diff", "--cached", "--diff-filter=ACMR").Output()
+	// Only check staged diff (about-to-commit) — unstaged diff in docs (TOOLS.md / topics/feedback_*.md /
+	// CLAUDE.md) frequently mentions Bearer/password/token as concepts and produced 100% false-positive rate.
+	// pathspec excludes markdown docs since real secrets should never live in *.md files anyway.
+	gitDiff, err := exec.Command(
+		"git", "-C", workspace, "diff", "--cached", "--diff-filter=ACMR",
+		"--", ".", ":(exclude)*.md", ":(exclude)**/*.md",
+	).Output()
 	if err == nil && len(gitDiff) > 0 {
 		diffStr := string(gitDiff)
 		for _, pat := range sensitivePatterns {
@@ -297,21 +303,11 @@ func safetyCheck(mode string) {
 			}
 		}
 	}
-	// also check unstaged diff
-	gitDiffUnstaged, err := exec.Command("git", "-C", workspace, "diff", "--diff-filter=ACMR").Output()
-	if err == nil && len(gitDiffUnstaged) > 0 {
-		diffStr := string(gitDiffUnstaged)
-		for _, pat := range sensitivePatterns {
-			if strings.Contains(diffStr, pat) {
-				warnings = append(warnings, fmt.Sprintf("🔐 sensitive pattern detected in unstaged diff: %s", pat))
-			}
-		}
-	}
 
 	// 4. critical config file change detection — check uncommitted changes + show diff summary
+	// nginx was archived 2026-04-24, replaced by mac-host caddy. Caddyfile is the new critical config.
 	criticalFiles := []string{
-		"projects/nginx/nginx.conf",
-		"projects/nginx/portal.html",
+		"projects/caddy/Caddyfile",
 	}
 	gitStatus, err := exec.Command("git", "-C", workspace, "status", "--porcelain").Output()
 	if err == nil {
@@ -370,8 +366,38 @@ func safetyCheck(mode string) {
 		report.WriteString(w + "\n")
 	}
 	report.WriteString(fmt.Sprintf("\n_checked at: %s_", time.Now().Format("2006-01-02 15:04")))
-	if err := trySendTelegram(report.String()); err != nil {
-		fmt.Fprintf(os.Stderr, "["+appName+"] safety check alert send failed: %v\n", err)
+
+	// Always persist full report to disk so we never lose it to TG length limits.
+	reportsDir := filepath.Join(workspace, "memory", "safety-reports")
+	_ = os.MkdirAll(reportsDir, 0755)
+	reportPath := filepath.Join(reportsDir, fmt.Sprintf("%s-%s.md", time.Now().Format("2006-01-02-150405"), mode))
+	_ = os.WriteFile(reportPath, []byte(report.String()), 0644)
+
+	// Telegram has a 4096-char message cap. If we'd exceed ~3500, send a summary + path to full report.
+	const tgSoftLimit = 3500
+	tgMsg := report.String()
+	if len(tgMsg) > tgSoftLimit {
+		// keep the header + first N lines that fit, then append a tail pointing to the full report
+		var summary strings.Builder
+		summary.WriteString(fmt.Sprintf("🛡️ *Safety Check — %s* (%d issues, truncated)\n\n", mode, len(warnings)))
+		shown := 0
+		for _, w := range warnings {
+			line := w + "\n"
+			if summary.Len()+len(line)+200 > tgSoftLimit {
+				break
+			}
+			summary.WriteString(line)
+			shown++
+		}
+		if shown < len(warnings) {
+			summary.WriteString(fmt.Sprintf("\n…and %d more issue(s).\n", len(warnings)-shown))
+		}
+		summary.WriteString(fmt.Sprintf("\nFull report: `%s`\n_checked at: %s_", reportPath, time.Now().Format("2006-01-02 15:04")))
+		tgMsg = summary.String()
+	}
+
+	if err := trySendTelegram(tgMsg); err != nil {
+		fmt.Fprintf(os.Stderr, "["+appName+"] safety check alert send failed: %v (full report at %s)\n", err, reportPath)
 	}
 }
 
@@ -506,9 +532,11 @@ func validateMdFormats() []string {
 	}
 
 	// 2. Memory topic files: must have frontmatter with name, description, type
+	// type is now free-form — we record what kind of topic it is, but don't restrict the vocabulary.
+	// Previously enforced {feedback|user|project|reference} which conflicted with naturally-evolving
+	// genres like analysis / workflow / config-note / production-decision.
 	topicsDir := filepath.Join(workspace, "memory", "topics")
 	if entries, err := os.ReadDir(topicsDir); err == nil {
-		validTypes := map[string]bool{"feedback": true, "user": true, "project": true, "reference": true}
 		for _, e := range entries {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 				continue
@@ -529,10 +557,8 @@ func validateMdFormats() []string {
 			if fm["description"] == "" {
 				warnings = append(warnings, fmt.Sprintf("📝 missing description: %s", label))
 			}
-			if t := fm["type"]; t == "" {
+			if fm["type"] == "" {
 				warnings = append(warnings, fmt.Sprintf("📝 missing type: %s", label))
-			} else if !validTypes[t] {
-				warnings = append(warnings, fmt.Sprintf("📝 invalid type %q: %s (expected feedback|user|project|reference)", t, label))
 			}
 		}
 	}
@@ -568,8 +594,27 @@ func validateMdFormats() []string {
 	}
 
 	// 4. CLAUDE.md files in projects: should have substantive content and structure
+	// Skip third-party upstream repos we don't own/control — their CLAUDE.md format is not our concern.
+	thirdPartyMarkers := []string{
+		"/zilliz/milvus/",      // Milvus upstream
+		"/goodvision/billing/", // GV upstream
+	}
+	// `~/code/*` holds cloned upstream tools (gemini-cli, etc.). Match by
+	// home-anchored prefix instead of a bare "/code/" substring — the latter
+	// also matches paths like "/projects/source-code/" or any directory
+	// segment that happens to contain the letters "code".
+	codeRoot := filepath.Join(home, "code") + string(os.PathSeparator)
 	for _, root := range projectRoots {
+	cl:
 		for _, f := range findCLAUDEMDs(root, 2) {
+			if strings.HasPrefix(f, codeRoot) {
+				continue
+			}
+			for _, m := range thirdPartyMarkers {
+				if strings.Contains(f, m) {
+					continue cl
+				}
+			}
 			info, err := os.Stat(f)
 			if err != nil {
 				continue
@@ -602,21 +647,34 @@ func validateMdFormats() []string {
 		}
 	}
 
-	// 5. Reverse index: topic files that exist but are not indexed in MEMORY.md
+	// 5. Reverse index: topic files that exist but are not indexed in MEMORY.md.
+	// Aggregate into a single warning (with up to 5 example filenames) instead of one per file —
+	// previously this produced ~24 individual lines that drowned the rest of the safety report.
 	memoryMdContent, memErr := os.ReadFile(filepath.Join(workspace, "MEMORY.md"))
 	if memErr == nil {
 		memIdx := string(memoryMdContent)
+		var unindexed []string
 		if entries, err := os.ReadDir(filepath.Join(workspace, "memory", "topics")); err == nil {
 			for _, e := range entries {
 				if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 					continue
 				}
-				// Check if this file is referenced in MEMORY.md
 				relPath := "memory/topics/" + e.Name()
 				if !strings.Contains(memIdx, relPath) {
-					warnings = append(warnings, fmt.Sprintf("📝 topic not indexed: %s (missing from MEMORY.md)", e.Name()))
+					unindexed = append(unindexed, e.Name())
 				}
 			}
+		}
+		if len(unindexed) > 0 {
+			preview := unindexed
+			if len(preview) > 5 {
+				preview = preview[:5]
+			}
+			suffix := ""
+			if len(unindexed) > 5 {
+				suffix = fmt.Sprintf(" (+%d more)", len(unindexed)-5)
+			}
+			warnings = append(warnings, fmt.Sprintf("📝 %d topic(s) not indexed in MEMORY.md: %s%s", len(unindexed), strings.Join(preview, ", "), suffix))
 		}
 	}
 
