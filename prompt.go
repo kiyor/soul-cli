@@ -320,17 +320,49 @@ func buildPrompt() buildPromptResult {
 	}
 	if enableFragmentLoading && profileWantsSOUL {
 		soulMode := detectSoulMode(gatherRoutingSignals())
-		fragPaths, fragErr := loadFragmentsByMode(getSoulFragmentsDir(), soulMode)
-		if fragErr == nil && len(fragPaths) > 0 {
-			if assembled, aErr := assembleFragments(fragPaths); aErr == nil {
-				if totalChars+len(assembled) <= maxBootstrapTotalChars {
-					totalChars += len(assembled)
+
+		// Lazy assembly path: interactive modes (emotional / intimate / technical)
+		// load only the [core] fragment set + an index of all other fragments.
+		// The agent uses the index + Read tool to pull in topic-specific persona
+		// content on demand, mirroring how Skills are lazy-loaded. Cron / evolve /
+		// heartbeat etc. still load the full mode set so non-interactive flows
+		// don't have to issue Read calls.
+		if isLazyAssemblyMode(soulMode) {
+			alwaysContent, alwaysPaths, indexMd, lErr := buildLazyFragmentSection(getSoulFragmentsDir())
+			if lErr == nil {
+				combined := alwaysContent
+				if combined != "" && !strings.HasSuffix(combined, "\n") {
+					combined += "\n"
+				}
+				if indexMd != "" {
+					if combined != "" {
+						combined += "\n"
+					}
+					combined += indexMd
+				}
+				if combined != "" && totalChars+len(combined) <= maxBootstrapTotalChars {
+					totalChars += len(combined)
 					secStart := b.Len()
-					fmt.Fprintf(&b, "\n# === SOUL.md ===\n\n%s\n", assembled)
+					fmt.Fprintf(&b, "\n# === SOUL.md ===\n\n%s\n", combined)
 					sections = append(sections, promptSection{name: "SOUL.md", tokens: estimateTokens(b.String()[secStart:])})
-					// Only record on successful write so audit reflects what's
-					// actually in the prompt (not what the loader returned).
-					loadedFragments = fragPaths
+					// Audit records only the *prefix-loaded* fragments — lazy
+					// fragments don't count until the agent actually Reads them.
+					loadedFragments = alwaysPaths
+				}
+			}
+		} else {
+			// Eager (full mode set) path — kept for cron/evolve/heartbeat where
+			// the agent has no opportunity to issue Read calls between turns.
+			fragPaths, fragErr := loadFragmentsByMode(getSoulFragmentsDir(), soulMode)
+			if fragErr == nil && len(fragPaths) > 0 {
+				if assembled, aErr := assembleFragments(fragPaths); aErr == nil {
+					if totalChars+len(assembled) <= maxBootstrapTotalChars {
+						totalChars += len(assembled)
+						secStart := b.Len()
+						fmt.Fprintf(&b, "\n# === SOUL.md ===\n\n%s\n", assembled)
+						sections = append(sections, promptSection{name: "SOUL.md", tokens: estimateTokens(b.String()[secStart:])})
+						loadedFragments = fragPaths
+					}
 				}
 			}
 		}

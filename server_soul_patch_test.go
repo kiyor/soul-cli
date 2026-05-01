@@ -288,42 +288,53 @@ modes: [emotional, intimate, evolve]`,
 func TestPrepareSoulPatch_AddsMissingFragment(t *testing.T) {
 	dir := t.TempDir()
 	withSoulDir(t, dir)
+	// A is already loaded. B has the trigger tag so a message containing the
+	// tag word triggers the topic-based detector and patches B in.
 	pA := writeFragment(t, dir, "01-a.md",
 		`id: 01-a
 title: A
-modes: [emotional, intimate, evolve]`,
+modes: [emotional, intimate, evolve]
+tags: [needa]`,
 		"A body\n")
 	pB := writeFragment(t, dir, "02-b.md",
 		`id: 02-b
 title: B
-modes: [emotional, intimate, evolve]`,
+modes: [emotional, intimate, evolve]
+tags: [needme, special]`,
 		"B body\n")
 
-	// Session has only A loaded — B should patch in.
+	// Session has only A loaded — B should patch in when the message hits
+	// one of B's tags.
 	sess := newTestSession("s4", "", []string{pA})
 	resetRoutingConfigForTest("/nonexistent.yaml")
 	t.Cleanup(func() { resetRoutingConfigForTest("") })
 
-	inj := sess.prepareSoulPatch("anything")
+	inj := sess.prepareSoulPatch("please needme right now")
 	if len(inj.NewFragments) != 1 || inj.NewFragments[0] != pB {
 		t.Errorf("expected B to be patched, got %v", inj.NewFragments)
 	}
 	if !strings.Contains(inj.Outbound, "B body") {
 		t.Errorf("B body not in outbound: %q", inj.Outbound)
 	}
-	if !strings.HasSuffix(inj.Outbound, "anything") {
+	if !strings.HasSuffix(inj.Outbound, "please needme right now") {
 		t.Errorf("user message must come after patch blocks: %q", inj.Outbound)
 	}
 
-	// commitLoadedFragments should make B "loaded" so a second call
-	// re-patches nothing.
+	// commitLoadedFragments should make B "loaded" so a second call hitting
+	// the same tag re-patches nothing.
 	sess.commitLoadedFragments(inj.NewFragments, inj.SoulMode)
-	inj2 := sess.prepareSoulPatch("again")
+	inj2 := sess.prepareSoulPatch("needme again")
 	if len(inj2.NewFragments) != 0 {
 		t.Errorf("second turn should have no new fragments after commit, got %v", inj2.NewFragments)
 	}
 	if strings.Contains(inj2.Outbound, soulPatchOpen) {
 		t.Errorf("second turn re-patched: %q", inj2.Outbound)
+	}
+
+	// Sanity: a message that hits NO tags should not patch anything.
+	inj3 := sess.prepareSoulPatch("totally unrelated text")
+	if len(inj3.NewFragments) != 0 {
+		t.Errorf("unrelated message should not patch any fragment, got %v", inj3.NewFragments)
 	}
 }
 
@@ -356,23 +367,26 @@ func TestPrepareSoulPatch_FlushesPendingPatches(t *testing.T) {
 func TestPrepareSoulPatch_FailedSendReplaysOnNextTurn(t *testing.T) {
 	dir := t.TempDir()
 	withSoulDir(t, dir)
+	// Fragment with a trigger tag that both turns' messages will hit, so the
+	// topic-based detector picks it on each call until commit lands.
 	p := writeFragment(t, dir, "01-need.md",
 		`id: 01-need
 title: Need
-modes: [emotional, intimate, evolve]`,
+modes: [emotional, intimate, evolve]
+tags: [needword]`,
 		"need body\n")
 
 	sess := newTestSession("s6", "", nil)
 	resetRoutingConfigForTest("/nonexistent.yaml")
 	t.Cleanup(func() { resetRoutingConfigForTest("") })
 
-	inj1 := sess.prepareSoulPatch("first")
+	inj1 := sess.prepareSoulPatch("first needword turn")
 	if len(inj1.NewFragments) != 1 || inj1.NewFragments[0] != p {
 		t.Fatalf("first turn must compute the missing fragment, got %v", inj1.NewFragments)
 	}
 	// Simulate sendMessage failure: do NOT call commitLoadedFragments.
 
-	inj2 := sess.prepareSoulPatch("second")
+	inj2 := sess.prepareSoulPatch("second needword turn")
 	if len(inj2.NewFragments) != 1 || inj2.NewFragments[0] != p {
 		t.Errorf("uncommitted fragment should be re-attempted on next turn, got %v", inj2.NewFragments)
 	}

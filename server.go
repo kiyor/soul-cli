@@ -1062,6 +1062,45 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 	}))
 
+	// Phase D — Soul Fragment Lazy-Load: notification endpoint called from
+	// the tool-hook subprocess after the agent Reads a soul fragment file.
+	// Body: {"path": "/abs/path/to/soul/.../X.md"}
+	//
+	// Effect: appends path to LoadedFragments so server-side prepareSoulPatch
+	// (the topic-based fallback detector) doesn't re-patch a fragment the
+	// agent already has in conversation history. Idempotent — duplicate paths
+	// are deduped inside commitLoadedFragments.
+	//
+	// Tolerant of unknown sessions (idle/exited/never-existed) — returns 200
+	// even on miss so the hook's best-effort caller never raises a noisy
+	// error path. Agent Read still happened; only the server-side dedupe
+	// optimisation is missed.
+	mux.HandleFunc("POST /api/sessions/{id}/loaded-fragment", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		if !rl.allow() {
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		id := r.PathValue("id")
+		var req struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Path == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing path"})
+			return
+		}
+		sess := sm.getSession(id)
+		if sess == nil {
+			// Unknown session — best-effort hook should not see 404 noise.
+			writeJSON(w, http.StatusOK, map[string]string{"status": "session_unknown"})
+			return
+		}
+		// Empty SoulMode passed because this endpoint records a fragment
+		// load without changing the routing decision (which was set by the
+		// last user message).
+		sess.commitLoadedFragments([]string{req.Path}, "")
+		writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
+	}))
+
 	// Answer an in-flight AskUserQuestion permission request from the Web UI.
 	// Body: {"request_id": "req_...", "answers": [{"question": "...", "answer": "A. label"}, ...]}
 	// The server merges the user's answers into the original updatedInput and

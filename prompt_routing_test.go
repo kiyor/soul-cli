@@ -872,65 +872,52 @@ func runStaticPrompt(t *testing.T, flagOn bool, soulMode string) string {
 	return staticPortion(r.content)
 }
 
-// TestBuildPrompt_PrefixPropertyEmotionalSubsetIntimate is the headline C-1
-// invariant: an `emotional` prompt's static portion is a true byte prefix of
-// an `intimate` prompt's static portion. This is what makes Anthropic API
-// prompt cache reuse work across the emotional→intimate transition.
-func TestBuildPrompt_PrefixPropertyEmotionalSubsetIntimate(t *testing.T) {
+// TestBuildPrompt_LazyModesProduceEqualPrompts is the Phase D invariant
+// that replaces the old C-1 "emotional ⊂ intimate" prefix property: under
+// lazy assembly all interactive modes (emotional / intimate / technical)
+// load the SAME prompt body — `[core]` fragment set + identical fragment
+// index — because the actual mode-specific persona content is loaded on
+// demand via the agent's Read tool, not at prompt-build time. This gives
+// us the strongest possible cache prefix: byte equality across the three
+// modes for the entire static portion.
+func TestBuildPrompt_LazyModesProduceEqualPrompts(t *testing.T) {
 	em := runStaticPrompt(t, true, "emotional")
 	in := runStaticPrompt(t, true, "intimate")
-	if len(em) >= len(in) {
-		t.Fatalf("emotional(%d) should be shorter than intimate(%d)", len(em), len(in))
+	tc := runStaticPrompt(t, true, "technical")
+	if em != in {
+		t.Errorf("emotional and intimate should produce identical lazy prompts (lengths em=%d in=%d)", len(em), len(in))
 	}
-	if !strings.HasPrefix(in, em) {
-		// Find first divergence for diagnostic.
-		minLen := len(em)
-		for i := 0; i < minLen; i++ {
-			if em[i] != in[i] {
-				ctxLo := i - 80
-				if ctxLo < 0 {
-					ctxLo = 0
-				}
-				ctxHi := i + 80
-				if ctxHi > minLen {
-					ctxHi = minLen
-				}
-				t.Fatalf("emotional is NOT byte prefix of intimate; first diff at byte %d:\n  emotional[%d:%d] = %q\n  intimate[%d:%d]  = %q",
-					i, ctxLo, ctxHi, em[ctxLo:ctxHi], ctxLo, ctxHi, in[ctxLo:ctxHi])
-			}
-		}
-		t.Fatal("emotional is not a strict prefix of intimate, but bytes match up to len(em)")
+	if em != tc {
+		t.Errorf("emotional and technical should produce identical lazy prompts (lengths em=%d tc=%d)", len(em), len(tc))
 	}
 }
 
-// TestBuildPrompt_PrefixPropertyChain verifies the full nesting chain inside
-// the same CLI mode (interactive): core ⊂ technical, core ⊂ emotional ⊂
-// intimate, core ⊂ evolve. Each pair: shorter must be a true byte prefix of
-// longer.
+// TestBuildPrompt_PhaseDPrefixChain replaces the Phase B/C nesting chain.
+// Under Phase D:
+//   - core / ops load `[core]` mode fragments only — no index.
+//   - lazy modes (emotional / intimate / technical) load `[core]` + lazy index.
+//   - evolve eagerly loads ALL fragments (no Read flow available in evolve mode).
 //
-// Note: ops shares the same fragment set as core under the current spec, so
-// they're equal (not strict subset). Tested separately below.
-func TestBuildPrompt_PrefixPropertyChain(t *testing.T) {
-	pairs := []struct {
-		smaller string
-		larger  string
-	}{
-		{"core", "technical"},
-		{"core", "emotional"},
-		{"emotional", "intimate"},
-		{"core", "evolve"},
+// The remaining strict prefix relationship is core ⊂ evolve (eager bag is a
+// superset of core). Lazy modes are NOT a prefix of eager evolve because the
+// lazy SOUL section ends with the index markdown (which evolve's eager block
+// doesn't emit), so they diverge inside the SOUL section.
+func TestBuildPrompt_PhaseDPrefixChain(t *testing.T) {
+	core := runStaticPrompt(t, true, "core")
+	evolve := runStaticPrompt(t, true, "evolve")
+	if len(core) >= len(evolve) {
+		t.Fatalf("core(%d) should be shorter than evolve(%d)", len(core), len(evolve))
 	}
-	for _, p := range pairs {
-		t.Run(p.smaller+"_subset_"+p.larger, func(t *testing.T) {
-			small := runStaticPrompt(t, true, p.smaller)
-			large := runStaticPrompt(t, true, p.larger)
-			if len(small) >= len(large) {
-				t.Fatalf("%s(%d) should be shorter than %s(%d)", p.smaller, len(small), p.larger, len(large))
-			}
-			if !strings.HasPrefix(large, small) {
-				t.Fatalf("%s is NOT byte prefix of %s", p.smaller, p.larger)
-			}
-		})
+	if !strings.HasPrefix(evolve, core) {
+		t.Fatalf("core is NOT byte prefix of evolve (eager superset invariant broken)")
+	}
+
+	// Lazy modes' SOUL section length must be smaller than evolve's, because
+	// evolve loads every fragment body eagerly while lazy emits only [core]
+	// bodies plus a relatively compact index.
+	lazy := runStaticPrompt(t, true, "intimate")
+	if len(lazy) >= len(evolve) {
+		t.Errorf("lazy intimate(%d) should be shorter than eager evolve(%d)", len(lazy), len(evolve))
 	}
 }
 
@@ -945,13 +932,20 @@ func TestBuildPrompt_CoreEqualsOps(t *testing.T) {
 	}
 }
 
-// TestBuildPrompt_IntimateEqualsEvolve confirms intimate and evolve load
-// identical fragment sets in Phase B/C (evolve == all fragments == intimate).
-func TestBuildPrompt_IntimateEqualsEvolve(t *testing.T) {
+// TestBuildPrompt_LazyShorterThanEagerEvolve verifies the Phase D size
+// hierarchy: a lazy-mode prompt (intimate) is meaningfully shorter than the
+// eager evolve-mode prompt, because intimate now defers most fragments to
+// runtime Read while evolve still loads them all up-front.
+//
+// Replaces TestBuildPrompt_IntimateEqualsEvolve, which asserted intimate ==
+// evolve under Phase B/C eager assembly. That equality no longer holds (and
+// shouldn't — the whole point of lazy is to avoid loading intimate's entire
+// fragment set at prompt-build time).
+func TestBuildPrompt_LazyShorterThanEagerEvolve(t *testing.T) {
 	intimate := runStaticPrompt(t, true, "intimate")
 	evolve := runStaticPrompt(t, true, "evolve")
-	if intimate != evolve {
-		t.Errorf("intimate and evolve should produce identical static prompts (lengths: intimate=%d evolve=%d)", len(intimate), len(evolve))
+	if len(intimate) >= len(evolve) {
+		t.Errorf("lazy intimate(%d) should be shorter than eager evolve(%d) — Phase D lazy invariant", len(intimate), len(evolve))
 	}
 }
 

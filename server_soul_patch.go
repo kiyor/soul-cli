@@ -213,11 +213,42 @@ func (s *serverSession) prepareSoulPatch(message string) soulPatchInjection {
 
 	mode := detectSoulMode(signals)
 
-	// Lookup desired fragment set. On any error (missing soul dir during
-	// tests, malformed frontmatter, etc.) we fail open: don't patch, just
-	// pass the user message through. This preserves "lazy is best-effort,
-	// monolithic SOUL.md was the safety net" rollback behaviour.
-	desiredPaths, fragErr := loadFragmentsByMode(getSoulFragmentsDir(), mode)
+	// Branch by mode:
+	//
+	//  - Lazy (interactive) modes: emotional / intimate / technical. The
+	//    prompt prefix is core-only + fragment index. We only patch fragments
+	//    the agent failed to Read on its own — i.e. tags hit the message but
+	//    LoadedFragments doesn't include the file. This is the server-side
+	//    fallback layer described in the protocol.
+	//
+	//  - Eager modes: cron / heartbeat / evolve. The prompt prefix already
+	//    has the full mode set (no Read flow available), so prepareSoulPatch
+	//    here is a no-op patch-wise — mode-set fragments are loaded at boot
+	//    and don't need per-message diffs.
+	soulDir := getSoulFragmentsDir()
+	var desiredPaths []string
+	var fragErr error
+
+	if isLazyAssemblyMode(mode) {
+		// Snapshot already-loaded set under lock for both the topic detector
+		// and the diff below.
+		s.mu.Lock()
+		already := make(map[string]bool, len(s.LoadedFragments))
+		for _, p := range s.LoadedFragments {
+			already[p] = true
+		}
+		s.mu.Unlock()
+
+		allMetas, mErr := listAllFragmentMetas(soulDir)
+		if mErr != nil {
+			fragErr = mErr
+		} else {
+			desiredPaths = detectTopicFragments(clean, allMetas, already)
+		}
+	} else {
+		desiredPaths, fragErr = loadFragmentsByMode(soulDir, mode)
+	}
+
 	if fragErr != nil || len(desiredPaths) == 0 {
 		s.mu.Lock()
 		pending := s.PendingPatches

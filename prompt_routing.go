@@ -105,7 +105,230 @@ type FragmentFrontmatterSpec struct {
 
 var fragmentFrontmatterSpec = FragmentFrontmatterSpec{
 	RequiredFields: []string{"id", "title", "modes"},
-	OptionalFields: []string{"priority", "tokens_est", "description"},
+	OptionalFields: []string{"priority", "tokens_est", "description", "tags"},
+}
+
+// FragmentMeta is the metadata extracted from a fragment file's frontmatter,
+// used by the lazy-load index to tell the agent what fragments exist and
+// (via tags + description) when each one is relevant.
+type FragmentMeta struct {
+	ID          string
+	Title       string
+	Description string
+	Tags        []string
+	Modes       []string
+	Path        string // absolute path the agent uses to Read it
+}
+
+// readFragmentMeta parses one fragment file's frontmatter into a FragmentMeta.
+// Returns nil if the file lacks frontmatter or required fields.
+func readFragmentMeta(path string) *FragmentMeta {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	fm := parseMdFrontmatter(string(data))
+	if fm == nil {
+		return nil
+	}
+	return &FragmentMeta{
+		ID:          fm["id"],
+		Title:       fm["title"],
+		Description: fm["description"],
+		Tags:        parseModesList(fm["tags"]), // same [a, b, c] shape as modes
+		Modes:       parseModesList(fm["modes"]),
+		Path:        path,
+	}
+}
+
+// listAllFragmentMetas walks soulDir and returns FragmentMeta for every
+// fragment with a parseable frontmatter, sorted by numeric filename prefix
+// (same ordering as loadFragmentsByMode for cache-stability).
+func listAllFragmentMetas(soulDir string) ([]*FragmentMeta, error) {
+	var out []*FragmentMeta
+	err := filepath.Walk(soulDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		meta := readFragmentMeta(path)
+		if meta == nil || meta.ID == "" {
+			return nil
+		}
+		out = append(out, meta)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ki := extractFragmentSortKey(out[i].Path)
+		kj := extractFragmentSortKey(out[j].Path)
+		if ki != kj {
+			return ki < kj
+		}
+		return out[i].Path < out[j].Path
+	})
+	return out, nil
+}
+
+// fragmentHasMode reports whether m is in meta.Modes.
+func (m *FragmentMeta) fragmentHasMode(target SoulMode) bool {
+	for _, name := range m.Modes {
+		if name == string(target) {
+			return true
+		}
+	}
+	return false
+}
+
+// asciiOnlyRegex matches strings made of ASCII letters/digits/underscores only.
+// We use it to decide whether a tag should be matched with \b word boundaries
+// (Latin) or plain substring (CJK / mixed).
+var asciiOnlyRegex = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+// matchTagInMessage reports whether tag appears in msgLower. ASCII-only tags
+// require word-boundary match (so "master" doesn't fire on "masterclass" or
+// "master-essential" — actually we WANT that, but not on every "Master"-cased
+// English word; this is the conservative bound). CJK / mixed tags fall back
+// to plain substring because RE2 \b doesn't work on non-Latin codepoints.
+func matchTagInMessage(tag, msgLower string) bool {
+	if tag == "" {
+		return false
+	}
+	tagL := strings.ToLower(tag)
+	if asciiOnlyRegex.MatchString(tagL) {
+		re, err := regexp.Compile(`\b` + regexp.QuoteMeta(tagL) + `\b`)
+		if err != nil {
+			return strings.Contains(msgLower, tagL)
+		}
+		return re.MatchString(msgLower)
+	}
+	return strings.Contains(msgLower, tagL)
+}
+
+// detectTopicFragments scans a user message against every fragment's tag list
+// and returns the file paths of fragments whose tags hit the message AND that
+// haven't been loaded yet. This is the server-side "fallback" detector — it
+// runs alongside the agent-driven Read flow: if the agent fails to Read a
+// relevant fragment on its own, this function picks it up and the caller
+// patches it in via the soul-patch protocol.
+//
+// Empty message → nil (no triggers possible).
+// Empty allMetas → nil (no fragments to consider).
+//
+// Order is preserved from allMetas (numeric prefix sort) so cache prefixes
+// stay deterministic when the same set of fragments is patched in.
+func detectTopicFragments(message string, allMetas []*FragmentMeta, already map[string]bool) []string {
+	if message == "" || len(allMetas) == 0 {
+		return nil
+	}
+	msgLower := strings.ToLower(message)
+	var hits []string
+	for _, m := range allMetas {
+		// Skip fragments already in the prefix-loaded set (core / always_load)
+		// or already Read by the agent earlier this session.
+		if already[m.Path] {
+			continue
+		}
+		// Always-load fragments (core mode) shouldn't be auto-patched as
+		// topics — they're already in the prompt prefix.
+		if m.fragmentHasMode(SoulModeCore) {
+			continue
+		}
+		for _, tag := range m.Tags {
+			if matchTagInMessage(tag, msgLower) {
+				hits = append(hits, m.Path)
+				break
+			}
+		}
+	}
+	return hits
+}
+
+// isLazyAssemblyMode returns true for soul modes that should use the
+// "core必装 + 其余索引化" layout instead of "load full mode set". These are
+// the interactive modes where the agent picks fragments by topic — non-
+// interactive modes (cron / heartbeat / evolve) load the full set so they
+// have the whole persona available without needing to issue Read calls.
+func isLazyAssemblyMode(mode SoulMode) bool {
+	switch mode {
+	case SoulModeEmotional, SoulModeIntimate, SoulModeTechnical:
+		return true
+	}
+	return false
+}
+
+// buildLazyFragmentSection produces the SOUL section body for lazy modes:
+//
+//   - alwaysContent: concatenated bodies of all fragments tagged into the
+//     `core` mode (always_load equivalent — identity, master-essential,
+//     protocol). These are NOT skippable.
+//   - indexMarkdown: a markdown listing of every NON-core fragment with
+//     id / title / description / tags / absolute path. The agent reads
+//     this index, decides which fragments are relevant to the current
+//     conversation topic, and uses the Read tool to load them. Once Read,
+//     the body lives in conversation history (turn-level cache) so the
+//     fragment is "loaded once" for the rest of the session.
+//
+// alwaysPaths is the slice of file paths actually emitted as alwaysContent —
+// returned so the audit layer can record what was prefix-loaded.
+func buildLazyFragmentSection(soulDir string) (alwaysContent string, alwaysPaths []string, indexMarkdown string, err error) {
+	metas, err := listAllFragmentMetas(soulDir)
+	if err != nil {
+		return "", nil, "", err
+	}
+
+	var alwaysMetas, lazyMetas []*FragmentMeta
+	for _, m := range metas {
+		if m.fragmentHasMode(SoulModeCore) {
+			alwaysMetas = append(alwaysMetas, m)
+		} else {
+			lazyMetas = append(lazyMetas, m)
+		}
+	}
+
+	// Concatenate always-load bodies (strip frontmatter, preserve order).
+	var ab strings.Builder
+	for i, meta := range alwaysMetas {
+		data, rErr := os.ReadFile(meta.Path)
+		if rErr != nil {
+			continue
+		}
+		body := stripFragmentFrontmatter(string(data))
+		if i > 0 && ab.Len() > 0 {
+			ab.WriteString("\n")
+		}
+		ab.WriteString(body)
+		if !strings.HasSuffix(body, "\n") {
+			ab.WriteString("\n")
+		}
+		alwaysPaths = append(alwaysPaths, meta.Path)
+	}
+
+	// Build the lazy fragment index.
+	var ib strings.Builder
+	ib.WriteString("## Soul Fragments (lazy-load — 你的人格分布在这些文件里)\n\n")
+	ib.WriteString("当前 prompt 只装载了 `[core]` 必要集合（身份 + 主人核心信息 + 协议）。其余 fragment 在你需要时用 **Read 工具**加载——用绝对路径 Read，内容会进入对话上下文，本 session 内已 Read 过的不需要重复加载（在历史里能看到）。\n\n")
+	ib.WriteString("**和技能一样**：看 description 和 tags 决定何时该 Read。不是每个 fragment 每次都要装——按当前对话话题选。私聊 / 被宠幸 / 撒娇语境装 body 和 succubus；技术任务装 principles；聊主人装 master-full / story / relationship。\n\n")
+
+	for _, m := range lazyMetas {
+		// Format: `- title (#tag1 #tag2) — description\n  Read: <abs path>`
+		var tagPart string
+		if len(m.Tags) > 0 {
+			tags := make([]string, len(m.Tags))
+			for i, t := range m.Tags {
+				tags[i] = "#" + t
+			}
+			tagPart = " (" + strings.Join(tags, " ") + ")"
+		}
+		desc := m.Description
+		if desc == "" {
+			desc = "(no description)"
+		}
+		fmt.Fprintf(&ib, "- **%s**%s — %s\n  Read: `%s`\n", m.Title, tagPart, desc, m.Path)
+	}
+
+	return ab.String(), alwaysPaths, ib.String(), nil
 }
 
 // RoutingSignals captures inputs to detectSoulMode for transparency and audit.

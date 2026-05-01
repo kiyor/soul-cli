@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -813,9 +815,86 @@ func runRuleAction(action, ruleID string, in ToolHookInput) {
 	switch action {
 	case "mark_restart_initiator":
 		actionMarkRestartInitiator(ruleID, in)
+	case "record_fragment_load":
+		actionRecordFragmentLoad(ruleID, in)
 	default:
 		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: unknown action %q\n", ruleID, action)
 	}
+}
+
+// actionRecordFragmentLoad notifies the running weiran server that the agent
+// has just Read a soul fragment file via the Read tool. The server appends
+// the path to the session's LoadedFragments set so the topic-based fallback
+// detector (server_soul_patch.go: prepareSoulPatch) doesn't double-patch a
+// fragment the agent already has in conversation history.
+//
+// Best-effort: server unreachable, missing env vars, non-2xx responses all
+// log to stderr but never block the underlying Read tool — the user-facing
+// flow must always proceed.
+//
+// Path resolution: extractToolPath returns the file_path argument that Read
+// was invoked with. We require it to live under the soul fragments dir
+// (rule.match already constrains this, but we double-check defense-in-depth)
+// and resolve it to an absolute path matching what listAllFragmentMetas
+// returns, so server-side `LoadedFragments` set membership comparisons hit.
+func actionRecordFragmentLoad(ruleID string, in ToolHookInput) {
+	path := extractToolPath(in.ToolName, in.ToolInput)
+	if path == "" {
+		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: no path in tool_input, skipping\n", ruleID)
+		return
+	}
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+
+	if in.SessionID == "" {
+		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: no session_id, skipping fragment record\n", ruleID)
+		return
+	}
+	weiranSID := getWeiranSessionIDByClaudeSID(in.SessionID)
+	if weiranSID == "" {
+		// Fall back: maybe the env-injected WEIRAN_SESSION_ID matches directly.
+		weiranSID = os.Getenv("WEIRAN_SESSION_ID")
+	}
+	if weiranSID == "" {
+		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: no weiran session for cc=%s, skipping fragment record\n",
+			ruleID, shortID(in.SessionID))
+		return
+	}
+
+	serverURL := os.Getenv("WEIRAN_SERVER_URL")
+	authToken := os.Getenv("WEIRAN_AUTH_TOKEN")
+	if serverURL == "" {
+		// Fallback to local default — the daemon binds 127.0.0.1:6789 by default.
+		serverURL = "http://127.0.0.1:6789"
+	}
+
+	bodyJSON, _ := json.Marshal(map[string]string{"path": path})
+	req, err := http.NewRequest("POST",
+		strings.TrimRight(serverURL, "/")+"/api/sessions/"+weiranSID+"/loaded-fragment",
+		bytes.NewReader(bodyJSON))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: build request: %v\n", ruleID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: post fragment-load failed: %v\n", ruleID, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: server returned %d for fragment-load\n", ruleID, resp.StatusCode)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: recorded fragment load weiran=%s path=%s\n",
+		ruleID, shortID(weiranSID), filepath.Base(path))
 }
 
 // actionMarkRestartInitiator persists a custom rehydrate_message for the
@@ -1206,6 +1285,14 @@ func runPostToolUseHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
 				LatencyMS:  time.Since(start).Milliseconds(),
 			})
 			continue
+		}
+
+		// Side-effect action runs independently of inject — actions like
+		// record_fragment_load must fire regardless of whether the rule
+		// produces a system-reminder, so we dispatch BEFORE the budget /
+		// inject path. Action failures log to stderr but never block.
+		if rule.Action != "" {
+			runRuleAction(rule.Action, rule.ID, in)
 		}
 
 		body := strings.TrimSpace(rule.Inject)
