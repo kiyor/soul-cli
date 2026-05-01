@@ -841,6 +841,13 @@ func handleServer(args []string) {
 			// Phase D — sanitize on intake so any literal soul-patch markers
 			// in the create-time InitialMessage are disarmed before we cache
 			// them as FirstMsg or feed them to the model.
+			//
+			// Note: prepareSoulPatch() below will sanitize again, but that's
+			// a fast path (strings.Contains short-circuit when no marker is
+			// present, which is the overwhelmingly common case). We keep the
+			// explicit sanitize here so FirstMsg — visible synchronously in
+			// the create-response snapshot, before the goroutine runs — is
+			// guaranteed clean.
 			cleanInitial, _ := sanitizeSoulPatchInput(req.InitialMessage)
 			sess.mu.Lock()
 			if sess.FirstMsg == "" {
@@ -873,7 +880,7 @@ func handleServer(args []string) {
 					fmt.Fprintf(os.Stderr, "[%s] server: failed to send initial message to %s: %v\n", appName, shortID(sess.ID), err)
 					return
 				}
-				sess.commitLoadedFragments(injection.NewFragments, injection.SoulMode)
+				sess.commitSoulPatchInjection(injection)
 			}()
 		}
 
@@ -1057,7 +1064,7 @@ func handleServer(args []string) {
 		// session's persistent loaded set so we don't re-patch them next turn.
 		// On send failure above we deliberately *don't* commit, so the patch
 		// re-fires on the next attempt.
-		sess.commitLoadedFragments(injection.NewFragments, injection.SoulMode)
+		sess.commitSoulPatchInjection(injection)
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 	}))

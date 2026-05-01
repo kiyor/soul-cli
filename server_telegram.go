@@ -52,9 +52,9 @@ type telegramBridge struct {
 // tgChat holds per-chat state including the message queue.
 type tgChat struct {
 	chatID    string
-	sessionID string           // current server session ID
-	queue     chan string       // serialized message queue
-	busy      chan struct{}     // closed when Claude finishes a turn (signals queue consumer)
+	sessionID string        // current server session ID
+	queue     chan string   // serialized message queue
+	busy      chan struct{} // closed when Claude finishes a turn (signals queue consumer)
 	stopOnce  sync.Once
 	stop      chan struct{}
 }
@@ -360,7 +360,7 @@ func (tb *telegramBridge) processMessage(chat *tgChat, text string) {
 	}
 
 	// Backend accepted → commit. Same failure semantics as the Web UI path.
-	sess.commitLoadedFragments(injection.NewFragments, injection.SoulMode)
+	sess.commitSoulPatchInjection(injection)
 
 	// Wait for Claude to finish this turn before processing next queued message
 	select {
@@ -549,9 +549,9 @@ func transcribeAudio(audioPath string, durationSec int) string {
 	modelDir := filepath.Join(os.Getenv("HOME"), ".local", "share", "whisper-cpp")
 	modelCandidates := []string{
 		"ggml-large-v3-turbo-q5_0.bin", // ~1.6GB, 809M params, best accuracy for zh/en mix
-		"ggml-large-v3-turbo.bin",       // unquantized fallback if user has it
-		"ggml-small.bin",                // ~466MB, 244M params
-		"ggml-base.bin",                 // ~142MB, last resort
+		"ggml-large-v3-turbo.bin",      // unquantized fallback if user has it
+		"ggml-small.bin",               // ~466MB, 244M params
+		"ggml-base.bin",                // ~142MB, last resort
 	}
 	var modelPath string
 	for _, name := range modelCandidates {

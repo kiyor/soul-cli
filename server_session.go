@@ -45,9 +45,10 @@ func isEphemeralCategory(cat string) bool {
 }
 
 // Session "mode" is a UI-level enum over two orthogonal persistence flags:
-//   weiran (default) — soul=true,  replace=false → CC harness + SOUL appended
-//   benwo (本我)      — soul=true,  replace=true  → SOUL replaces CC harness
-//   cc    (bare)     — soul=false, replace=ignored → pure Claude Code, no SOUL
+//
+//	weiran (default) — soul=true,  replace=false → CC harness + SOUL appended
+//	benwo (本我)      — soul=true,  replace=true  → SOUL replaces CC harness
+//	cc    (bare)     — soul=false, replace=ignored → pure Claude Code, no SOUL
 //
 // The dead combo soul=false+replace=true is normalized to cc.
 const (
@@ -83,26 +84,26 @@ func flagsToMode(soul, replace bool) string {
 
 // serverSession represents one active Claude Code session.
 type serverSession struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	Project       string    `json:"project"`
-	Model         string    `json:"model,omitempty"`
-	Status        string    `json:"status"` // starting, running, idle, stopped, error
-	Category      string    `json:"category"`            // interactive, heartbeat, cron, evolve
-	Tags          []string  `json:"tags,omitempty"`       // freeform labels for filtering
-	CreatedAt     time.Time `json:"created_at"`
-	LastActive    time.Time `json:"last_active"`
-	TotalCost     float64   `json:"total_cost_usd"`
-	NumTurns      int       `json:"num_turns"`
-	ClaudeSID     string    `json:"claude_session_id,omitempty"` // Claude Code's own session ID
-	ResumedFrom   string    `json:"resumed_from,omitempty"`      // Original session ID being resumed
-	StreamURL     string    `json:"stream_url"`
-	SoulEnabled   bool      `json:"soul_enabled"`
-	ChromeEnabled bool      `json:"chrome_enabled"`
-	ReplaceSoul   bool      `json:"replace_soul"`     // 本我模式 — use --system-prompt-file (replace) instead of --append-system-prompt-file
-	FirstMsg      string          `json:"first_msg,omitempty"` // First user message (for hint display)
-	GalID         string          `json:"gal_id,omitempty"`    // GAL save id this session was resumed from
-	Todos         json.RawMessage `json:"todos,omitempty"`     // latest TodoWrite state (broadcast to all clients)
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Project       string          `json:"project"`
+	Model         string          `json:"model,omitempty"`
+	Status        string          `json:"status"`         // starting, running, idle, stopped, error
+	Category      string          `json:"category"`       // interactive, heartbeat, cron, evolve
+	Tags          []string        `json:"tags,omitempty"` // freeform labels for filtering
+	CreatedAt     time.Time       `json:"created_at"`
+	LastActive    time.Time       `json:"last_active"`
+	TotalCost     float64         `json:"total_cost_usd"`
+	NumTurns      int             `json:"num_turns"`
+	ClaudeSID     string          `json:"claude_session_id,omitempty"` // Claude Code's own session ID
+	ResumedFrom   string          `json:"resumed_from,omitempty"`      // Original session ID being resumed
+	StreamURL     string          `json:"stream_url"`
+	SoulEnabled   bool            `json:"soul_enabled"`
+	ChromeEnabled bool            `json:"chrome_enabled"`
+	ReplaceSoul   bool            `json:"replace_soul"`         // 本我模式 — use --system-prompt-file (replace) instead of --append-system-prompt-file
+	FirstMsg      string          `json:"first_msg,omitempty"`  // First user message (for hint display)
+	GalID         string          `json:"gal_id,omitempty"`     // GAL save id this session was resumed from
+	Todos         json.RawMessage `json:"todos,omitempty"`      // latest TodoWrite state (broadcast to all clients)
 	SpawnedBy     string          `json:"spawned_by,omitempty"` // parent session ID that spawned this one
 
 	// PeakContextTokens tracks the high-water mark of input tokens consumed by
@@ -131,7 +132,7 @@ type serverSession struct {
 	promptFile  string        // temp file for soul prompt
 	mcpConfig   string        // remembered for reload
 	hub         *wsHub        // for WS notifications on status change
-	waiters     []chan string  // notified when status becomes idle/stopped/error
+	waiters     []chan string // notified when status becomes idle/stopped/error
 
 	// pendingAUQ tracks in-flight AskUserQuestion permission requests that the
 	// Web UI is rendering. Keyed by the control_request.request_id. The claude
@@ -147,8 +148,8 @@ type serverSession struct {
 
 	// Model fallback for non-interactive modes (heartbeat/cron/evolve):
 	// when process exits with rate_limit, retry with next fallback model.
-	fallbackModels []string // remaining models to try
-	taskMessage    string   // original task message for retry
+	fallbackModels []string        // remaining models to try
+	taskMessage    string          // original task message for retry
 	sessionMgr     *sessionManager // back-reference for fallback retry
 
 	// ── Phase D — Runtime Soul Patch Protocol ──
@@ -172,7 +173,7 @@ type serverSession struct {
 	// Audit / debugging only — the lazy injector recomputes from every message.
 	CurrentSoulMode string `json:"current_soul_mode,omitempty"`
 
-	mu          sync.Mutex
+	mu sync.Mutex
 }
 
 // pendingAUQEntry remembers enough about an in-flight can_use_tool
@@ -398,29 +399,29 @@ func (s *serverSession) snapshot() map[string]any {
 		backendKind = BackendCC
 	}
 	snap := map[string]any{
-		"id":                   id,
-		"name":                 s.Name,
-		"project":              s.Project,
-		"model":                s.Model,
-		"backend":              string(backendKind),
-		"status":               s.Status,
-		"category":             s.Category,
-		"tags":                 tags,
-		"created_at":           s.CreatedAt.Format(time.RFC3339),
-		"last_active":          s.LastActive.Format(time.RFC3339),
-		"total_cost_usd":       s.TotalCost,
-		"num_turns":            s.NumTurns,
-		"claude_session_id":    s.ClaudeSID,
-		"resumed_from":         s.ResumedFrom,
-		"stream_url":           s.StreamURL,
-		"agent":                "main",
-		"soul_enabled":         s.SoulEnabled,
-		"chrome_enabled":       s.ChromeEnabled,
-		"replace_soul":         s.ReplaceSoul,
-		"mode":                 flagsToMode(s.SoulEnabled, s.ReplaceSoul),
-		"first_msg":            s.FirstMsg,
-		"spawned_by":           spawnedBy,
-		"peak_context_tokens":  peakCtx,
+		"id":                  id,
+		"name":                s.Name,
+		"project":             s.Project,
+		"model":               s.Model,
+		"backend":             string(backendKind),
+		"status":              s.Status,
+		"category":            s.Category,
+		"tags":                tags,
+		"created_at":          s.CreatedAt.Format(time.RFC3339),
+		"last_active":         s.LastActive.Format(time.RFC3339),
+		"total_cost_usd":      s.TotalCost,
+		"num_turns":           s.NumTurns,
+		"claude_session_id":   s.ClaudeSID,
+		"resumed_from":        s.ResumedFrom,
+		"stream_url":          s.StreamURL,
+		"agent":               "main",
+		"soul_enabled":        s.SoulEnabled,
+		"chrome_enabled":      s.ChromeEnabled,
+		"replace_soul":        s.ReplaceSoul,
+		"mode":                flagsToMode(s.SoulEnabled, s.ReplaceSoul),
+		"first_msg":           s.FirstMsg,
+		"spawned_by":          spawnedBy,
+		"peak_context_tokens": peakCtx,
 	}
 	if todosSnap != nil {
 		snap["todos"] = todosSnap
@@ -1854,6 +1855,8 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 	fmt.Fprintf(os.Stderr, "[%s] server: resumeSession project=%q (source=%s weiran=%s cc=%s)\n",
 		appName, resolvedProject, projectSource, shortID(id), shortID(ccID))
 
+	loadedFragments, pendingPatches, currentSoulMode := getSoulPatchState(id)
+
 	sess := &serverSession{
 		ID:       id,
 		Name:     displayName,
@@ -1861,20 +1864,23 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 		// ResumedFrom is no longer set on internal resume — the weiran id is
 		// stable, so there is no "from". Kept as a field for backward compat
 		// with persisted data and for future --fork-session support.
-		ResumedFrom: "",
-		ClaudeSID:   ccID, // pre-populate; init message will confirm (same value expected)
-		Project:     resolvedProject,
-		Model:       model,
-		Status:      "starting",
-		Category:    resolvedCategory,
-		CreatedAt:   now,
-		LastActive:  now,
-		SoulEnabled: resolvedSoulEnabled,
-		ReplaceSoul: resolvedReplaceSoul,
-		StreamURL:   fmt.Sprintf("/api/sessions/%s/stream", id),
-		broadcaster: bc,
-		hub:         sm.hub,
-		tasks:       newTaskTracker(),
+		ResumedFrom:     "",
+		ClaudeSID:       ccID, // pre-populate; init message will confirm (same value expected)
+		Project:         resolvedProject,
+		Model:           model,
+		Status:          "starting",
+		Category:        resolvedCategory,
+		CreatedAt:       now,
+		LastActive:      now,
+		SoulEnabled:     resolvedSoulEnabled,
+		ReplaceSoul:     resolvedReplaceSoul,
+		LoadedFragments: loadedFragments,
+		PendingPatches:  pendingPatches,
+		CurrentSoulMode: currentSoulMode,
+		StreamURL:       fmt.Sprintf("/api/sessions/%s/stream", id),
+		broadcaster:     bc,
+		hub:             sm.hub,
+		tasks:           newTaskTracker(),
 	}
 
 	// Atomic slot reservation:
@@ -2009,21 +2015,23 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 		if !proc.waitInit(30 * time.Second) {
 			fmt.Fprintf(os.Stderr, "[%s] server: init timeout for resume %s, sending message anyway\n", appName, shortID(sess.ID))
 		}
+		injection := sess.prepareSoulPatch(message)
 		userEvent, _ := json.Marshal(map[string]any{
 			"type":    "user",
-			"message": map[string]any{"role": "user", "content": message},
+			"message": map[string]any{"role": "user", "content": injection.DisplayMessage},
 		})
 		sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
 		// Log sendMessage failures instead of silently dropping them. A
 		// silent drop on an auto-wake makes it look like resume succeeded
 		// while CC actually never received the ping — masking whether the
 		// underlying "resume self-exits" bug is still present.
-		if err := proc.sendMessage(message); err != nil {
+		if err := proc.sendMessage(injection.Outbound); err != nil {
 			fmt.Fprintf(os.Stderr, "[%s] server: resume sendMessage failed weiran=%s auto_wake=%v err=%v\n",
 				appName, shortID(sess.ID), autoWoken, err)
+		} else {
+			sess.commitSoulPatchInjection(injection)
 		}
 	}
-
 	if autoWoken {
 		fmt.Fprintf(os.Stderr, "[%s] server: resumed weiran=%s cc=%s (auto-woken: transcript closed)\n",
 			appName, shortID(id), shortID(ccID))
@@ -2230,13 +2238,13 @@ func findSessionJSONL(sessionID string) string {
 
 // historyMessage is a parsed message from a session JSONL for the UI.
 type historyMessage struct {
-	Role       string         `json:"role"`                   // user, assistant, system, tool_use, tool_result, image
-	Content    string         `json:"content"`                // text content
-	ToolName   string         `json:"tool_name,omitempty"`    // for tool_use
-	ToolInput  string         `json:"tool_input,omitempty"`   // for tool_use
-	ToolUseID  string         `json:"tool_use_id,omitempty"`  // for tool_use / tool_result (pair them in UI)
-	Timestamp  string         `json:"timestamp,omitempty"`
-	Images     []historyImage `json:"images,omitempty"` // base64 images from tool results
+	Role      string         `json:"role"`                  // user, assistant, system, tool_use, tool_result, image
+	Content   string         `json:"content"`               // text content
+	ToolName  string         `json:"tool_name,omitempty"`   // for tool_use
+	ToolInput string         `json:"tool_input,omitempty"`  // for tool_use
+	ToolUseID string         `json:"tool_use_id,omitempty"` // for tool_use / tool_result (pair them in UI)
+	Timestamp string         `json:"timestamp,omitempty"`
+	Images    []historyImage `json:"images,omitempty"` // base64 images from tool results
 }
 
 type historyImage struct {
@@ -2308,14 +2316,14 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 			var sysPeek struct {
 				Subtype     string `json:"subtype"`
 				CompactMeta struct {
-					Trigger   string `json:"trigger"`
-					PreTokens int    `json:"preTokens"`
-					PreTokens2 int   `json:"pre_tokens"`
+					Trigger    string `json:"trigger"`
+					PreTokens  int    `json:"preTokens"`
+					PreTokens2 int    `json:"pre_tokens"`
 				} `json:"compactMetadata"`
 				CompactMeta2 struct {
-					Trigger   string `json:"trigger"`
-					PreTokens int    `json:"preTokens"`
-					PreTokens2 int   `json:"pre_tokens"`
+					Trigger    string `json:"trigger"`
+					PreTokens  int    `json:"preTokens"`
+					PreTokens2 int    `json:"pre_tokens"`
 				} `json:"compact_metadata"`
 			}
 			if json.Unmarshal(line, &sysPeek) == nil && sysPeek.Subtype == "compact_boundary" {
@@ -2346,7 +2354,7 @@ func parseSessionMessages(path string, limit int) []historyMessage {
 				Type      string          `json:"type"`
 				Text      string          `json:"text"`
 				Name      string          `json:"name"`
-				ID        string          `json:"id"`           // tool_use id
+				ID        string          `json:"id"`          // tool_use id
 				ToolUseID string          `json:"tool_use_id"` // tool_result → tool_use linkage
 				Input     json.RawMessage `json:"input"`
 			}

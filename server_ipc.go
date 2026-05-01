@@ -203,7 +203,7 @@ func handleIPCMessageFrom(sm *sessionManager, hub *wsHub, maxRounds int) http.Ha
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		targetSess.commitLoadedFragments(injection.NewFragments, injection.SoulMode)
+		targetSess.commitSoulPatchInjection(injection)
 
 		// Broadcast IPC event to WebSocket
 		if hub != nil {

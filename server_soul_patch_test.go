@@ -355,12 +355,20 @@ func TestPrepareSoulPatch_FlushesPendingPatches(t *testing.T) {
 		t.Errorf("user text must follow patches: %q", inj.Outbound)
 	}
 
-	// Pending should be drained.
+	// Pending should remain queued until send success is committed.
 	sess.mu.Lock()
 	pendingLeft := len(sess.PendingPatches)
 	sess.mu.Unlock()
+	if pendingLeft != 1 {
+		t.Errorf("pending should remain queued before commit, %d left", pendingLeft)
+	}
+
+	sess.commitSoulPatchInjection(inj)
+	sess.mu.Lock()
+	pendingLeft = len(sess.PendingPatches)
+	sess.mu.Unlock()
 	if pendingLeft != 0 {
-		t.Errorf("pending should be drained after flush, %d left", pendingLeft)
+		t.Errorf("pending should be drained after commit, %d left", pendingLeft)
 	}
 }
 
@@ -392,7 +400,40 @@ tags: [needword]`,
 	}
 }
 
-// ── Join semantics ────────────────────────────────────────────────────────────
+func TestPrepareSoulPatch_FailedSendReplaysPendingOnNextTurn(t *testing.T) {
+	withSoulDir(t, t.TempDir())
+	sess := newTestSession("s7", "", nil)
+	queuedBlock := wrapSoulPatchBlock("queued retry body")
+	sess.queueSoulPatch(queuedBlock)
+
+	inj1 := sess.prepareSoulPatch("first turn")
+	if !strings.Contains(inj1.Outbound, "queued retry body") {
+		t.Fatalf("first turn did not include queued patch: %q", inj1.Outbound)
+	}
+	// Simulate sendMessage failure: do NOT commit.
+
+	inj2 := sess.prepareSoulPatch("second turn")
+	if !strings.Contains(inj2.Outbound, "queued retry body") {
+		t.Errorf("uncommitted pending patch should replay on next turn: %q", inj2.Outbound)
+	}
+}
+
+func TestCommitSoulPatchInjection_KeepsConcurrentPending(t *testing.T) {
+	withSoulDir(t, t.TempDir())
+	sess := newTestSession("s8", "", nil)
+	sess.queueSoulPatch(wrapSoulPatchBlock("old pending"))
+
+	inj := sess.prepareSoulPatch("turn")
+	sess.queueSoulPatch(wrapSoulPatchBlock("new pending"))
+	sess.commitSoulPatchInjection(inj)
+
+	sess.mu.Lock()
+	pending := append([]string(nil), sess.PendingPatches...)
+	sess.mu.Unlock()
+	if len(pending) != 1 || !strings.Contains(pending[0], "new pending") {
+		t.Fatalf("commit should remove only flushed pending and keep concurrent entries, got %v", pending)
+	}
+}
 
 func TestJoinPatchAndMessage_NoBlocks(t *testing.T) {
 	if got := joinPatchAndMessage(nil, "msg"); got != "msg" {

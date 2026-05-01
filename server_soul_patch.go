@@ -169,11 +169,12 @@ func buildSoulPatchPayload(paths []string) (payload string, loaded []string, err
 //   - Sanitized: true if the user's input contained protocol markers that
 //     had to be disarmed.
 type soulPatchInjection struct {
-	Outbound        string
-	DisplayMessage  string
-	NewFragments    []string
-	SoulMode        SoulMode
-	Sanitized       bool
+	Outbound            string
+	DisplayMessage      string
+	NewFragments        []string
+	FlushedPendingCount int
+	SoulMode            SoulMode
+	Sanitized           bool
 }
 
 // prepareSoulPatch is the per-message lazy injector. Given an inbound user
@@ -229,16 +230,21 @@ func (s *serverSession) prepareSoulPatch(message string) soulPatchInjection {
 	var desiredPaths []string
 	var fragErr error
 
-	if isLazyAssemblyMode(mode) {
-		// Snapshot already-loaded set under lock for both the topic detector
-		// and the diff below.
-		s.mu.Lock()
-		already := make(map[string]bool, len(s.LoadedFragments))
-		for _, p := range s.LoadedFragments {
-			already[p] = true
-		}
-		s.mu.Unlock()
+	// Single snapshot of already-loaded set + pending patches under one lock
+	// acquisition. Both are needed regardless of mode (lazy uses `already`
+	// for the topic detector and the diff; eager skips the detector but
+	// computeNewFragments below still wants `already` to dedupe). Holding
+	// the lock once avoids a TOCTOU window where commitSoulPatchInjection
+	// from a concurrent turn mutates LoadedFragments between snapshots.
+	s.mu.Lock()
+	already := make(map[string]bool, len(s.LoadedFragments))
+	for _, p := range s.LoadedFragments {
+		already[p] = true
+	}
+	pending := append([]string(nil), s.PendingPatches...)
+	s.mu.Unlock()
 
+	if isLazyAssemblyMode(mode) {
 		allMetas, mErr := listAllFragmentMetas(soulDir)
 		if mErr != nil {
 			fragErr = mErr
@@ -250,27 +256,14 @@ func (s *serverSession) prepareSoulPatch(message string) soulPatchInjection {
 	}
 
 	if fragErr != nil || len(desiredPaths) == 0 {
-		s.mu.Lock()
-		pending := s.PendingPatches
-		s.PendingPatches = nil
-		s.mu.Unlock()
 		return soulPatchInjection{
-			Outbound:       joinPatchAndMessage(pending, clean),
-			DisplayMessage: clean,
-			SoulMode:       mode,
-			Sanitized:      sanitized,
+			Outbound:            joinPatchAndMessage(pending, clean),
+			DisplayMessage:      clean,
+			FlushedPendingCount: len(pending),
+			SoulMode:            mode,
+			Sanitized:           sanitized,
 		}
 	}
-
-	// Snapshot already-loaded set under lock, then compute diff outside.
-	s.mu.Lock()
-	already := make(map[string]bool, len(s.LoadedFragments))
-	for _, p := range s.LoadedFragments {
-		already[p] = true
-	}
-	pending := s.PendingPatches
-	s.PendingPatches = nil
-	s.mu.Unlock()
 
 	newFrags := computeNewFragments(desiredPaths, already)
 
@@ -288,11 +281,12 @@ func (s *serverSession) prepareSoulPatch(message string) soulPatchInjection {
 	}
 
 	return soulPatchInjection{
-		Outbound:       joinPatchAndMessage(blocks, clean),
-		DisplayMessage: clean,
-		NewFragments:   newFrags,
-		SoulMode:       mode,
-		Sanitized:      sanitized,
+		Outbound:            joinPatchAndMessage(blocks, clean),
+		DisplayMessage:      clean,
+		NewFragments:        newFrags,
+		FlushedPendingCount: len(pending),
+		SoulMode:            mode,
+		Sanitized:           sanitized,
 	}
 }
 
@@ -326,24 +320,39 @@ func joinPatchAndMessage(blocks []string, message string) string {
 // snapshot to the server_sessions DB so a restart-then-rehydrate cycle
 // keeps the cumulative loaded set intact.
 func (s *serverSession) commitLoadedFragments(newFrags []string, mode SoulMode) {
-	if len(newFrags) == 0 && mode == "" {
+	s.commitSoulPatchInjection(soulPatchInjection{NewFragments: newFrags, SoulMode: mode})
+}
+
+// commitSoulPatchInjection commits the state represented by a successfully
+// delivered soul-patch injection. Pending patches are removed by count from
+// the head of the queue so entries enqueued after prepareSoulPatch's snapshot
+// remain pending for a later turn.
+func (s *serverSession) commitSoulPatchInjection(inj soulPatchInjection) {
+	if len(inj.NewFragments) == 0 && inj.SoulMode == "" && inj.FlushedPendingCount == 0 {
 		return
 	}
 	s.mu.Lock()
-	if len(newFrags) > 0 {
+	if inj.FlushedPendingCount > 0 {
+		if inj.FlushedPendingCount >= len(s.PendingPatches) {
+			s.PendingPatches = nil
+		} else {
+			s.PendingPatches = append([]string(nil), s.PendingPatches[inj.FlushedPendingCount:]...)
+		}
+	}
+	if len(inj.NewFragments) > 0 {
 		seen := make(map[string]bool, len(s.LoadedFragments))
 		for _, p := range s.LoadedFragments {
 			seen[p] = true
 		}
-		for _, p := range newFrags {
+		for _, p := range inj.NewFragments {
 			if !seen[p] {
 				s.LoadedFragments = append(s.LoadedFragments, p)
 				seen[p] = true
 			}
 		}
 	}
-	if mode != "" {
-		s.CurrentSoulMode = string(mode)
+	if inj.SoulMode != "" {
+		s.CurrentSoulMode = string(inj.SoulMode)
 	}
 	// Snapshot under lock for the DB call outside it.
 	id := s.ID
