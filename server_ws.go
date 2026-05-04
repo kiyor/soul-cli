@@ -313,26 +313,59 @@ func (c *wsClient) handleMessage(raw []byte) {
 		}
 		sess.touch()
 		sess.setStatus("running")
-		// Capture first user message for hint display
+
+		// Mirror the REST POST /api/sessions/{id}/message path (server.go ~L1043).
+		// The previous WS handler skipped both of the steps below, which is why
+		// messages sent from the Web UI during a long-running turn or while an
+		// AskUserQuestion was pending appeared to be silently dropped:
+		//
+		//  1. dismissAllPendingAUQ: when claude is blocked on a control_request
+		//     for AskUserQuestion, raw stdin writes don't unblock it — the
+		//     subprocess only resumes when it gets the matching control_response.
+		//     Sending behavior=deny tells claude to read the new user message
+		//     instead of waiting on the question.
+		//
+		//  2. prepareSoulPatch: routes the turn through the lazy soul-patch
+		//     injector so newly-relevant fragments are prepended before the user
+		//     text. Without this, soul-mode turns coming through the WS path
+		//     diverge from REST/Telegram behavior.
+		//
+		// We deliberately do NOT add the Telegram-style busy-wait queue here —
+		// the Web UI is allowed to send mid-turn, and stream-json's stdin pipe
+		// already serializes writes via claudeBackend.mu.
+		sess.dismissAllPendingAUQ("user_message")
+		injection := sess.prepareSoulPatch(msg.Message)
+
+		// Capture first user message for hint display (sanitized display copy,
+		// not the patched outbound — the hint is for humans).
 		sess.mu.Lock()
-		if sess.FirstMsg == "" {
-			sess.FirstMsg = msg.Message
-			// Notify hub so sidebar updates with the new hint
-			if sess.hub != nil {
-				go sess.hub.notifySessions()
-			}
+		firstMsgCaptured := sess.FirstMsg == ""
+		if firstMsgCaptured {
+			sess.FirstMsg = injection.DisplayMessage
 		}
 		sess.mu.Unlock()
-		// Broadcast user message so it persists in history for session switching
+		if firstMsgCaptured && sess.hub != nil {
+			go sess.hub.notifySessions()
+		}
+
+		// Broadcast user message so it persists in history for session switching.
+		// Display version only — soul-patch payloads must never surface in UI.
 		userEvent, _ := json.Marshal(map[string]any{
 			"type":    "user",
-			"message": map[string]any{"role": "user", "content": msg.Message},
+			"message": map[string]any{"role": "user", "content": injection.DisplayMessage},
 		})
 		sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
-		if err := sess.process.sendMessage(msg.Message); err != nil {
+
+		if err := sess.process.sendMessage(injection.Outbound); err != nil {
 			c.sendJSON(map[string]string{"type": "error", "error": "send failed: " + err.Error()})
 			return
 		}
+
+		// Backend accepted → commit new fragments. Same failure semantics as
+		// the REST/Telegram paths: on send failure we deliberately don't commit
+		// so the patch re-fires next attempt.
+		sess.commitSoulPatchInjection(injection)
+
 		c.sendJSON(map[string]string{"type": "sent", "sid": msg.SID})
 		c.hub.notifySessions()
 
@@ -403,18 +436,37 @@ func (c *wsClient) handleMessage(raw []byte) {
 			return
 		}
 		if msg.InitMsg != "" {
+			// Sanitize literal soul-patch markers up front so FirstMsg (visible
+			// in the create snapshot below) is guaranteed clean; prepareSoulPatch
+			// in the goroutine will sanitize again as a fast no-op for the
+			// common case where the input has no markers. Mirrors server.go
+			// POST /api/sessions create path (~L858).
+			cleanInitial, _ := sanitizeSoulPatchInput(msg.InitMsg)
+			sess.mu.Lock()
+			if sess.FirstMsg == "" {
+				sess.FirstMsg = cleanInitial
+			}
+			sess.mu.Unlock()
 			go func() {
 				if !sess.process.waitInit(30 * time.Second) {
 					fmt.Fprintf(os.Stderr, "[%s] ws: create: init timeout for %s, sending message anyway\n", appName, shortID(sess.ID))
 				}
+				// Route through prepareSoulPatch for consistency with REST.
+				// The create-time prompt build already has fragments for the
+				// detected mode loaded, so the per-message diff is normally
+				// empty — but if the user's first message routes to a
+				// different mode, missing fragments are patched in here.
+				injection := sess.prepareSoulPatch(cleanInitial)
 				userEvent, _ := json.Marshal(map[string]any{
 					"type":    "user",
-					"message": map[string]any{"role": "user", "content": msg.InitMsg},
+					"message": map[string]any{"role": "user", "content": injection.DisplayMessage},
 				})
 				sess.broadcaster.broadcast(sseEvent{Event: "user", Data: userEvent})
-				if err := sess.process.sendMessage(msg.InitMsg); err != nil {
+				if err := sess.process.sendMessage(injection.Outbound); err != nil {
 					fmt.Fprintf(os.Stderr, "[%s] ws: create: failed to send initial message: %v\n", appName, err)
+					return
 				}
+				sess.commitSoulPatchInjection(injection)
 			}()
 		}
 		// Auto-subscribe client to the new session
