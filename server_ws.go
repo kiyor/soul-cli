@@ -462,6 +462,12 @@ func (c *wsClient) handleMessage(raw []byte) {
 			c.sendJSON(map[string]string{"type": "error", "error": "rate limit exceeded"})
 			return
 		}
+		// Guard against concurrent resume for the same session — a second resume
+		// while the first is still spawning CC would create an orphan process.
+		if _, loaded := c.hub.sm.resuming.LoadOrStore(msg.SID, true); loaded {
+			c.sendJSON(map[string]any{"type": "resume_failed", "session_id": msg.SID, "request_id": msg.RequestID, "error": "resume already in progress"})
+			return
+		}
 		// Acknowledge synchronously so the WS read loop is never blocked by
 		// resumeSession (which can take up to 30s on init timeout). The actual
 		// resume runs in a goroutine and posts back resumed/resume_failed.
@@ -474,6 +480,7 @@ func (c *wsClient) handleMessage(raw []byte) {
 		soulFiles := msg.SoulFiles
 		reqID := msg.RequestID
 		go func() {
+			defer c.hub.sm.resuming.Delete(sid)
 			// Recover from any panic inside resumeSession / spawnClaude so a
 			// crash on one resume request doesn't take the whole server down.
 			defer func() {

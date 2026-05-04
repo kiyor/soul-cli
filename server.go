@@ -1143,10 +1143,8 @@ func handleServer(args []string) {
 			http.Error(w, "loopback only", http.StatusForbidden)
 			return
 		}
-		if !rl.allow() {
-			http.Error(w, "rate limited", http.StatusTooManyRequests)
-			return
-		}
+		// No rate limiting for hook-error: it's loopback-only diagnostic traffic.
+		// Sharing the main rl would suppress error reports during legitimate bursts.
 		id := r.PathValue("id")
 		var req struct {
 			RuleID   string `json:"rule_id"`

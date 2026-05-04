@@ -386,8 +386,10 @@ func setEffortDB(sessionID, effort string) {
 		return
 	}
 	now := time.Now().Format(time.RFC3339)
-	db.Exec(`UPDATE server_sessions SET effort=?, updated_at=? WHERE session_id=?`,
-		effort, now, sessionID)
+	if _, err := db.Exec(`UPDATE server_sessions SET effort=?, updated_at=? WHERE session_id=?`,
+		effort, now, sessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] setEffortDB %s: %v\n", appName, shortID(sessionID), err)
+	}
 }
 
 // getEffortDB reads the persisted reasoning effort tier for a session.
@@ -399,8 +401,10 @@ func getEffortDB(sessionID string) string {
 		return ""
 	}
 	var v string
-	db.QueryRow(`SELECT COALESCE(effort,'') FROM server_sessions WHERE session_id=? OR claude_session_id=?`,
-		sessionID, sessionID).Scan(&v)
+	if err := db.QueryRow(`SELECT COALESCE(effort,'') FROM server_sessions WHERE session_id=? OR claude_session_id=?`,
+		sessionID, sessionID).Scan(&v); err != nil && err.Error() != "sql: no rows in result set" {
+		fmt.Fprintf(os.Stderr, "[%s] getEffortDB %s: %v\n", appName, shortID(sessionID), err)
+	}
 	return v
 }
 

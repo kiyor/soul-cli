@@ -215,7 +215,6 @@ func ipcList() {
 	fmt.Fprintln(w, "ID\tCC_ID\tTURNS\tCREATED\tLAST_ACTIVE\tNAME\tSTATUS\tMODEL\tCAT")
 	for _, s := range rows {
 		id := fmt.Sprintf("%v", s["id"])
-		short := shortID(id)
 
 		// Resolve weiran ID and Claude Code (cc) ID separately.
 		// - Active sessions:  id = weiran ID, claude_session_id = cc ID
@@ -240,7 +239,6 @@ func ipcList() {
 		if ccID != "" {
 			shortCC = shortID(ccID)
 		}
-		_ = short // legacy var kept for compatibility; not used in output
 
 		// Turns: num_turns (active) or user_turns (history) or messages count
 		turns := "-"

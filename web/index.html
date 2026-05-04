@@ -462,7 +462,7 @@
 
 <!-- Hook Error Drawer -->
 <div class="hook-error-drawer hidden" id="hook-errors">
-  <div class="hook-error-title">⚠️ Hook Errors <button class="hook-error-clear" onclick="document.getElementById('hook-errors').innerHTML='<div class=hook-error-title>⚠️ Hook Errors</div>';document.getElementById('hook-errors').classList.add('hidden')">Clear</button></div>
+  <div class="hook-error-title">⚠️ Hook Errors <button class="hook-error-clear" onclick="document.querySelectorAll('.hook-error-card').forEach(c=>c.remove());document.getElementById('hook-errors').classList.add('hidden')">Clear</button></div>
 </div>
 
 <!-- Image Lightbox -->

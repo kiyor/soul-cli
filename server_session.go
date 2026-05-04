@@ -1016,6 +1016,7 @@ type sessionManager struct {
 	stopReaper  chan struct{}
 	reaperDone  sync.WaitGroup // waited by shutdownAll to ensure reaper has exited
 	hub         *wsHub         // WebSocket hub for real-time notifications
+	resuming    sync.Map       // session_id → true; prevents concurrent resume spawning orphan processes
 }
 
 // newSessionManager creates a session manager and starts the TTL reaper.
