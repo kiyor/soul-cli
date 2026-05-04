@@ -460,6 +460,11 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toasts"></div>
 
+<!-- Hook Error Drawer -->
+<div class="hook-error-drawer hidden" id="hook-errors">
+  <div class="hook-error-title">⚠️ Hook Errors <button class="hook-error-clear" onclick="document.getElementById('hook-errors').innerHTML='<div class=hook-error-title>⚠️ Hook Errors</div>';document.getElementById('hook-errors').classList.add('hidden')">Clear</button></div>
+</div>
+
 <!-- Image Lightbox -->
 <div class="lightbox" id="lightbox" onclick="closeLightbox()">
   <div class="lightbox-close">&times;</div>
@@ -1371,6 +1376,9 @@ function handleSessionEvent(event,data){
       }
       break;
     case 'task_progress':
+      break;
+    case 'hook_error':
+      showHookError(data);
       break;
     case 'close':
       finalizeStream();clearTicker();setThinking(false);
@@ -3721,6 +3729,40 @@ function toast(text,type='info',duration=3000){
   el.style.animationDelay=`0s,${(duration-300)/1000}s`;
   container.appendChild(el);
   setTimeout(()=>el.remove(),duration);
+}
+
+// ── Hook Error Cards ──
+function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function showHookError(data){
+  const level=data.level||'error';
+  const ruleId=data.rule_id||'unknown';
+  const toolName=data.tool_name||'';
+  const msg=data.msg||'';
+  // Toast for immediate attention
+  toast(`⚠️ Hook [${ruleId}]: ${msg.slice(0,80)}`,level==='warn'?'info':'error',5000);
+  // Persistent card in the hook-error drawer
+  const drawer=document.getElementById('hook-errors');
+  if(!drawer)return;
+  drawer.classList.remove('hidden');
+  const card=document.createElement('div');
+  card.className='hook-error-card hook-error-'+level;
+  const ts=new Date((data.ts||0)*1000).toLocaleTimeString();
+  card.innerHTML=`
+    <div class="hook-error-header">
+      <span class="hook-error-rule">${escapeHtml(ruleId)}</span>
+      <span class="hook-error-tool">${escapeHtml(toolName)}</span>
+      <span class="hook-error-time">${ts}</span>
+      <button class="hook-error-dismiss" onclick="this.closest('.hook-error-card').remove();checkHookDrawerEmpty()">×</button>
+    </div>
+    <div class="hook-error-msg">${escapeHtml(msg)}</div>
+  `;
+  drawer.appendChild(card);
+  // Keep max 10 cards
+  while(drawer.children.length>11)drawer.children[1].remove();
+}
+function checkHookDrawerEmpty(){
+  const drawer=document.getElementById('hook-errors');
+  if(drawer&&drawer.querySelectorAll('.hook-error-card').length===0)drawer.classList.add('hidden');
 }
 
 // ── Lightbox ──
