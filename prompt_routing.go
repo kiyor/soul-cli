@@ -306,10 +306,24 @@ func buildLazyFragmentSection(soulDir string) (alwaysContent string, alwaysPaths
 	}
 
 	// Build the lazy fragment index.
+	//
+	// The index has two parts: a universal preamble that the framework owns
+	// (mode mechanics — "core fragments are pre-loaded, the rest you Read on
+	// demand") and an optional per-agent hint with concrete examples of when
+	// to Read which fragments. The hint comes from <workspace>/routing.yaml's
+	// `fragment_index_hint` field and is private user data; the framework
+	// must not hardcode any agent-specific examples here.
 	var ib strings.Builder
 	ib.WriteString("## Soul Fragments (lazy-load — 你的人格分布在这些文件里)\n\n")
 	ib.WriteString("当前 prompt 只装载了 `[core]` 必要集合（身份 + 主人核心信息 + 协议）。其余 fragment 在你需要时用 **Read 工具**加载——用绝对路径 Read，内容会进入对话上下文，本 session 内已 Read 过的不需要重复加载（在历史里能看到）。\n\n")
-	ib.WriteString("**和技能一样**：看 description 和 tags 决定何时该 Read。不是每个 fragment 每次都要装——按当前对话话题选。私聊 / 被宠幸 / 撒娇语境装 body 和 succubus；技术任务装 principles；聊主人装 master-full / story / relationship。\n\n")
+	ib.WriteString("**和技能一样**：看 description 和 tags 决定何时该 Read。不是每个 fragment 每次都要装——按当前对话话题选。\n\n")
+	if hint := loadRoutingConfig().fragmentIndexHint; hint != "" {
+		ib.WriteString(hint)
+		if !strings.HasSuffix(hint, "\n") {
+			ib.WriteString("\n")
+		}
+		ib.WriteString("\n")
+	}
 
 	for _, m := range lazyMetas {
 		// Format: `- title (#tag1 #tag2) — description\n  Read: <abs path>`
@@ -366,14 +380,21 @@ type RoutingConfig struct {
 	TechnicalCwdPrefixes []string          `yaml:"technical_cwd_prefixes"`
 	SourceDefaults       map[string]string `yaml:"source_defaults"`
 	Fallback             string            `yaml:"fallback"`
+	// FragmentIndexHint is the per-agent guidance line embedded in the lazy
+	// fragment index (after the universal "load only what you need" preamble).
+	// Used to give the agent agent-specific examples of when to load which
+	// fragments. Absent → framework prints only the universal preamble (no
+	// per-agent leak into framework code).
+	FragmentIndexHint string `yaml:"fragment_index_hint"`
 }
 
 // compiledRoutingConfig caches the parsed config + compiled regexes.
 type compiledRoutingConfig struct {
-	intimate    *regexp.Regexp // nil if no triggers configured
-	cwdPrefixes []string       // already $HOME-expanded
-	sources     map[string]string
-	fallback    SoulMode
+	intimate          *regexp.Regexp // nil if no triggers configured
+	cwdPrefixes       []string       // already $HOME-expanded
+	sources           map[string]string
+	fallback          SoulMode
+	fragmentIndexHint string // per-agent guidance for the lazy index; "" = no extra hint
 }
 
 var (
@@ -461,6 +482,8 @@ func readRoutingConfig(path string) *compiledRoutingConfig {
 	if rc.Fallback != "" && IsValidSoulMode(rc.Fallback) {
 		cc.fallback = SoulMode(rc.Fallback)
 	}
+
+	cc.fragmentIndexHint = strings.TrimSpace(rc.FragmentIndexHint)
 
 	return cc
 }

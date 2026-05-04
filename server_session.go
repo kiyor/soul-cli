@@ -100,6 +100,7 @@ type serverSession struct {
 	StreamURL     string          `json:"stream_url"`
 	SoulEnabled   bool            `json:"soul_enabled"`
 	ChromeEnabled bool            `json:"chrome_enabled"`
+	Effort        string          `json:"effort,omitempty"` // CC reasoning effort tier (low/medium/high/xhigh/max), persisted
 	ReplaceSoul   bool            `json:"replace_soul"`         // 本我模式 — use --system-prompt-file (replace) instead of --append-system-prompt-file
 	FirstMsg      string          `json:"first_msg,omitempty"`  // First user message (for hint display)
 	GalID         string          `json:"gal_id,omitempty"`     // GAL save id this session was resumed from
@@ -417,6 +418,7 @@ func (s *serverSession) snapshot() map[string]any {
 		"agent":               "main",
 		"soul_enabled":        s.SoulEnabled,
 		"chrome_enabled":      s.ChromeEnabled,
+		"effort":              s.Effort,
 		"replace_soul":        s.ReplaceSoul,
 		"mode":                flagsToMode(s.SoulEnabled, s.ReplaceSoul),
 		"first_msg":           s.FirstMsg,
@@ -1384,6 +1386,7 @@ func (sm *sessionManager) setChrome(id string, enabled bool) error {
 
 	// Re-attach stdout bridge (reload — no agent recording, no rename sync)
 	attachProcessBridge(newProc, sess, "", false)
+	applyPersistedEffort(sess)
 
 	if sm.hub != nil {
 		sm.hub.notifySessions()
@@ -1505,6 +1508,7 @@ func (sm *sessionManager) setMode(id, mode string) error {
 	sess.setStatus("running")
 
 	attachProcessBridge(newProc, sess, "", false)
+	applyPersistedEffort(sess)
 
 	if sm.hub != nil {
 		sm.hub.notifySessions()
@@ -1580,6 +1584,7 @@ func (sm *sessionManager) setModel(id string, model string) error {
 	sess.setStatus("running")
 
 	attachProcessBridge(newProc, sess, "", false)
+	applyPersistedEffort(sess)
 
 	if sm.hub != nil {
 		sm.hub.notifySessions()
@@ -1970,6 +1975,9 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 
 	sess.mu.Lock()
 	sess.process = proc
+	// Inherit persisted effort so the freshly-spawned CC subprocess starts on
+	// the same reasoning tier the user picked before the resume / restart.
+	sess.Effort = getEffortDB(id)
 	sess.mu.Unlock()
 	sess.setStatus("running")
 
@@ -1996,6 +2004,7 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 
 	// Attach stdout bridge with full sync (agent recording + CC name sync + auto-rename)
 	attachProcessBridge(proc, sess, "server-resume", true)
+	applyPersistedEffort(sess)
 
 	// Send initial message if provided — wait for Claude Code to emit init
 	// before writing to stdin (consistent with createSession's waitInit pattern).
@@ -2161,6 +2170,11 @@ func (sm *sessionManager) rehydrateSessions() {
 		if s.GalID != "" {
 			setGalID(sess.ID, s.GalID)
 		}
+		// Per-session effort restoration is handled inside resumeSession
+		// (it loads from getEffortDB and calls applyPersistedEffort after
+		// process spawn), so no extra work here. The Effort field on
+		// rehydratableSession is captured purely for diagnostics / future use.
+		_ = s.Effort
 
 		// Phase D — restore the cumulative soul-patch state. Without this the
 		// rehydrated session forgets which fragments are already in the

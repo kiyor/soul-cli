@@ -1169,3 +1169,56 @@ func TestRecordRoutingAudit_SessionIDFromOverrides(t *testing.T) {
 		t.Errorf("signals.FirstMessage = %q, want ping", sig.FirstMessage)
 	}
 }
+
+// TestBuildLazyFragmentSection_HintFromRoutingConfig verifies that the
+// per-agent hint in routing.yaml's fragment_index_hint flows into the lazy
+// index, and that an absent hint produces no agent-specific text in the
+// framework-rendered preamble (cross-agent no-leak invariant).
+func TestBuildLazyFragmentSection_HintFromRoutingConfig(t *testing.T) {
+	soulDir := t.TempDir()
+	// Minimal core fragment so the function has something to assemble.
+	coreMd := "---\nid: 01-identity\ntitle: ID\nmodes: [core, emotional]\n---\n# id body\n"
+	if err := os.MkdirAll(filepath.Join(soulDir, "core"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(soulDir, "core", "01-identity.md"), []byte(coreMd), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// One non-core fragment so the index has at least one entry.
+	lazyMd := "---\nid: 10-extra\ntitle: Extra\nmodes: [emotional]\ndescription: extra fragment\ntags: [test]\n---\nbody\n"
+	if err := os.MkdirAll(filepath.Join(soulDir, "persona"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(soulDir, "persona", "10-extra.md"), []byte(lazyMd), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("hint present is rendered", func(t *testing.T) {
+		hint := "AGENT_PRIVATE_HINT: weight loss talk → load profile."
+		withMockRoutingConfig(t, "fragment_index_hint: |\n  "+hint+"\nfallback: emotional\n")
+		_, _, idx, err := buildLazyFragmentSection(soulDir)
+		if err != nil {
+			t.Fatalf("buildLazyFragmentSection: %v", err)
+		}
+		if !strings.Contains(idx, hint) {
+			t.Errorf("index missing configured hint:\n%s", idx)
+		}
+	})
+
+	t.Run("hint absent has no agent-specific text", func(t *testing.T) {
+		withMockRoutingConfig(t, "fallback: emotional\n")
+		_, _, idx, err := buildLazyFragmentSection(soulDir)
+		if err != nil {
+			t.Fatalf("buildLazyFragmentSection: %v", err)
+		}
+		// The universal preamble should be there.
+		if !strings.Contains(idx, "Soul Fragments") {
+			t.Errorf("missing preamble in index:\n%s", idx)
+		}
+		// But no hardcoded agent-specific guidance (the old line mentioned
+		// specific fragment names like "body", "succubus", "principles").
+		if strings.Contains(idx, "succubus") || strings.Contains(idx, "principles") {
+			t.Errorf("index leaks agent-specific fragment names without hint configured:\n%s", idx)
+		}
+	})
+}

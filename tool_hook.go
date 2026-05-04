@@ -558,7 +558,10 @@ func runToolHook() {
 	cfgPath := defaultToolHookConfigPath()
 	cfg, err := loadToolHookConfig(cfgPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[tool-hook] config load error: %v\n", err)
+		// Config-level failure — affects every subsequent hook invocation.
+		// Surface to the active session UI so we don't silently break tool
+		// gating after a yaml typo.
+		hookErrorf("__config__", "error", in, "config load error: %v", err)
 		return
 	}
 
@@ -713,7 +716,7 @@ func runPreToolUseHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
 		// moves on — a partial deny reason would confuse the user.
 		if rule.Decision != "" {
 			if !validDecision(rule.Decision) {
-				fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: ignoring invalid decision %q\n", rule.ID, rule.Decision)
+				hookErrorf(rule.ID, "error", in, "ignoring invalid decision %q (allowed: deny, ask, allow)", rule.Decision)
 				continue
 			}
 			if len(body) > budgetRemaining {
@@ -818,7 +821,7 @@ func runRuleAction(action, ruleID string, in ToolHookInput) {
 	case "record_fragment_load":
 		actionRecordFragmentLoad(ruleID, in)
 	default:
-		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: unknown action %q\n", ruleID, action)
+		hookErrorf(ruleID, "error", in, "unknown action %q (allowed: mark_restart_initiator, record_fragment_load)", action)
 	}
 }
 
@@ -875,7 +878,7 @@ func actionRecordFragmentLoad(ruleID string, in ToolHookInput) {
 		strings.TrimRight(serverURL, "/")+"/api/sessions/"+weiranSID+"/loaded-fragment",
 		bytes.NewReader(bodyJSON))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: build request: %v\n", ruleID, err)
+		hookErrorf(ruleID, "error", in, "build request: %v", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -885,16 +888,82 @@ func actionRecordFragmentLoad(ruleID string, in ToolHookInput) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: post fragment-load failed: %v\n", ruleID, err)
+		hookErrorf(ruleID, "error", in, "post fragment-load failed: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: server returned %d for fragment-load\n", ruleID, resp.StatusCode)
+		hookErrorf(ruleID, "error", in, "server returned %d for fragment-load", resp.StatusCode)
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: recorded fragment load weiran=%s path=%s\n",
 		ruleID, shortID(weiranSID), filepath.Base(path))
+}
+
+// reportHookErrorToServer ships a hook failure to the running soul-cli
+// server so the active web UI can toast it. This is best-effort and
+// async-tolerant: stderr stays the durable log; the SSE event is just a
+// fast user-facing surface. Successful hook runs do NOT call this — the
+// UI stays quiet for the happy path.
+//
+// Routing: cc session_id → app session_id → POST hook-error.
+// If we can't resolve an app session, we fall back to the env-injected
+// <APPNAME>_SESSION_ID (set by `<binary> server` when spawning Claude
+// Code), so even hooks fired before the cc handshake DB row is written
+// can still reach the right session.
+func reportHookErrorToServer(ruleID, level, msg string, in ToolHookInput) {
+	prefix := ipcEnvPrefix()
+	appSID := ""
+	if in.SessionID != "" {
+		appSID = getWeiranSessionIDByClaudeSID(in.SessionID)
+	}
+	if appSID == "" {
+		appSID = os.Getenv(prefix + "_SESSION_ID")
+	}
+	if appSID == "" {
+		// No session to route to — stderr already has the line.
+		return
+	}
+	serverURL := os.Getenv(prefix + "_SERVER_URL")
+	if serverURL == "" {
+		// No URL — caller hasn't injected it; stderr is the only sink.
+		return
+	}
+	authToken := os.Getenv(prefix + "_AUTH_TOKEN")
+
+	bodyJSON, _ := json.Marshal(map[string]string{
+		"rule_id":   ruleID,
+		"event":     in.HookEventName,
+		"tool_name": in.ToolName,
+		"level":     level,
+		"msg":       msg,
+	})
+	req, err := http.NewRequest("POST",
+		strings.TrimRight(serverURL, "/")+"/api/sessions/"+appSID+"/hook-error",
+		bytes.NewReader(bodyJSON))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
+	// 1s — hook execution must not be slowed by reporting. If the server is
+	// down or busy, fall back silently to stderr.
+	client := &http.Client{Timeout: 1 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+}
+
+// hookErrorf is a stderr+UI dual writer: stderr for durable logs, server
+// for live UI toasts. Format matches fmt.Fprintf conventions.
+func hookErrorf(ruleID, level string, in ToolHookInput, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "[tool-hook] rule %s: %s\n", ruleID, msg)
+	reportHookErrorToServer(ruleID, level, msg, in)
 }
 
 // actionMarkRestartInitiator persists a custom rehydrate_message for the

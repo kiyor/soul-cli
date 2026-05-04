@@ -212,10 +212,35 @@ func ipcList() {
 
 	// 5. Render table
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTURNS\tCREATED\tLAST_ACTIVE\tNAME\tSTATUS\tMODEL\tCAT")
+	fmt.Fprintln(w, "ID\tCC_ID\tTURNS\tCREATED\tLAST_ACTIVE\tNAME\tSTATUS\tMODEL\tCAT")
 	for _, s := range rows {
 		id := fmt.Sprintf("%v", s["id"])
 		short := shortID(id)
+
+		// Resolve weiran ID and Claude Code (cc) ID separately.
+		// - Active sessions:  id = weiran ID, claude_session_id = cc ID
+		// - History sessions: id = cc ID,     weiran_id (if present) = weiran ID
+		var wID, ccID string
+		if isSessionActive(s) {
+			wID = id
+			ccID = strVal(s, "claude_session_id")
+		} else {
+			ccID = id
+			wID = strVal(s, "weiran_id")
+		}
+		// If active row also exposes a weiran_id, prefer the explicit field.
+		if v := strVal(s, "weiran_id"); v != "" {
+			wID = v
+		}
+		shortW := "-"
+		if wID != "" {
+			shortW = shortID(wID)
+		}
+		shortCC := "-"
+		if ccID != "" {
+			shortCC = shortID(ccID)
+		}
+		_ = short // legacy var kept for compatibility; not used in output
 
 		// Turns: num_turns (active) or user_turns (history) or messages count
 		turns := "-"
@@ -282,7 +307,7 @@ func ipcList() {
 			}
 		}
 		marker := ""
-		if id == myID {
+		if id == myID || wID == myID {
 			marker = " (me)"
 		}
 		// Truncate long names
@@ -300,8 +325,8 @@ func ipcList() {
 			cat = "-"
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s%s\t%s\t%s\t%s\n",
-			short, turns, created, lastActive, name, marker, status, model, cat)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s%s\t%s\t%s\t%s\n",
+			shortW, shortCC, turns, created, lastActive, name, marker, status, model, cat)
 	}
 	w.Flush()
 }

@@ -2,7 +2,7 @@
 // Strategy: Network-first with cache fallback (chat app needs real-time data)
 
 // Bump CACHE_NAME whenever SHELL_ASSETS/CDN_ASSETS change so old caches get evicted.
-const CACHE_NAME = 'weiran-v2';
+const CACHE_NAME = 'weiran-v3-hook-err-cards';
 const SHELL_ASSETS = [
   '/',
   '/manifest.json',

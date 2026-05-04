@@ -247,6 +247,12 @@ func (c *wsClient) handleMessage(raw []byte) {
 		// resolveBackendKind decide based on model name. Mirrors the REST
 		// /api/sessions field of the same name.
 		Backend string `json:"backend"`
+		// RequestID is an opaque token the client mints per request and
+		// expects echoed in the response. Used by `resume` to discriminate
+		// stale responses (A→B→A re-resume races): the client tracks the
+		// latest pending request_id and ignores any echo that doesn't match.
+		// Optional; empty value disables the check.
+		RequestID string `json:"request_id"`
 	}
 	if json.Unmarshal(raw, &msg) != nil {
 		c.sendJSON(map[string]string{"type": "error", "error": "invalid JSON"})
@@ -456,19 +462,60 @@ func (c *wsClient) handleMessage(raw []byte) {
 			c.sendJSON(map[string]string{"type": "error", "error": "rate limit exceeded"})
 			return
 		}
-		// Don't pass frontend model on resume — it may be stale/stripped (missing [1m] suffix).
-		// Let resumeSession resolve model from DB which preserves the correct value.
-		sess, err := c.hub.sm.resumeSession(msg.SID, msg.Message, msg.Name, "", "", msg.ReplaceSoul, msg.SoulFiles)
-		if err != nil {
-			c.sendJSON(map[string]string{"type": "error", "error": err.Error()})
-			return
-		}
-		// Auto-subscribe client to the new session before sending resumed
-		c.mu.Lock()
-		c.subSID = sess.ID
-		c.mu.Unlock()
-		c.sendJSON(map[string]any{"type": "resumed", "session": sess.snapshot()})
-		c.hub.notifySessions()
+		// Acknowledge synchronously so the WS read loop is never blocked by
+		// resumeSession (which can take up to 30s on init timeout). The actual
+		// resume runs in a goroutine and posts back resumed/resume_failed.
+		c.sendJSON(map[string]any{"type": "resuming", "session_id": msg.SID, "request_id": msg.RequestID})
+		// Snapshot fields needed inside the goroutine (msg is reused by caller).
+		sid := msg.SID
+		message := msg.Message
+		name := msg.Name
+		replaceSoul := msg.ReplaceSoul
+		soulFiles := msg.SoulFiles
+		reqID := msg.RequestID
+		go func() {
+			// Recover from any panic inside resumeSession / spawnClaude so a
+			// crash on one resume request doesn't take the whole server down.
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "[%s] ws resume goroutine panic sid=%s: %v\n", appName, shortID(sid), r)
+					c.sendJSON(map[string]any{
+						"type":        "resume_failed",
+						"session_id":  sid,
+						"request_sid": sid,
+						"request_id":  reqID,
+						"error":       fmt.Sprintf("server panic during resume: %v", r),
+					})
+				}
+			}()
+			// Don't pass frontend model on resume — it may be stale/stripped (missing [1m] suffix).
+			// Let resumeSession resolve model from DB which preserves the correct value.
+			sess, err := c.hub.sm.resumeSession(sid, message, name, "", "", replaceSoul, soulFiles)
+			if err != nil {
+				c.sendJSON(map[string]any{
+					"type":        "resume_failed",
+					"session_id":  sid,
+					"request_sid": sid,
+					"request_id":  reqID,
+					"error":       err.Error(),
+				})
+				return
+			}
+			// Auto-subscribe client to the new session before sending resumed
+			c.mu.Lock()
+			c.subSID = sess.ID
+			c.mu.Unlock()
+			// request_id echoes the client-minted opaque token so the
+			// frontend can ignore stale resumed events even in A→B→A
+			// re-resume races where request_sid alone isn't unique.
+			c.sendJSON(map[string]any{
+				"type":        "resumed",
+				"session":     sess.snapshot(),
+				"request_sid": sid,
+				"request_id":  reqID,
+			})
+			c.hub.notifySessions()
+		}()
 
 	default:
 		c.sendJSON(map[string]string{"type": "error", "error": "unknown type: " + msg.Type})
@@ -476,6 +523,14 @@ func (c *wsClient) handleMessage(raw []byte) {
 }
 
 func (c *wsClient) sendJSON(v any) {
+	// Recover from "send on closed channel" — happens when the client
+	// disconnected while a long-running goroutine (e.g. resume) is still
+	// trying to deliver a response. Drop silently rather than crash the server.
+	defer func() {
+		if r := recover(); r != nil {
+			// no-op: client gone
+		}
+	}()
 	data, _ := json.Marshal(v)
 	select {
 	case c.send <- data:

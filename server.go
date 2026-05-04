@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1126,6 +1127,60 @@ func handleServer(args []string) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 	}))
 
+	// Receive failure reports from `weiran tool-hook` subprocesses so the web
+	// UI can surface hook errors that would otherwise only land in stderr.
+	// Successful hook runs are deliberately silent — only error/warn paths
+	// hit this endpoint. Best-effort: if the session is gone, drop quietly.
+	mux.HandleFunc("POST /api/sessions/{id}/hook-error", authMiddleware(cfg.Token, func(w http.ResponseWriter, r *http.Request) {
+		// Loopback-only: this endpoint exists for the local tool-hook
+		// subprocess to ship error toasts to the UI. Server may bind
+		// 0.0.0.0 (LAN access for the web UI), and a leaked bearer token
+		// would otherwise let any remote holder inject fake hook_error
+		// events into any session. Reject anything that didn't originate
+		// from this host.
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			http.Error(w, "loopback only", http.StatusForbidden)
+			return
+		}
+		if !rl.allow() {
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		id := r.PathValue("id")
+		var req struct {
+			RuleID   string `json:"rule_id"`
+			Event    string `json:"event"`
+			ToolName string `json:"tool_name"`
+			Level    string `json:"level"`
+			Msg      string `json:"msg"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Msg == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing msg"})
+			return
+		}
+		if req.Level != "warn" && req.Level != "info" {
+			req.Level = "error"
+		}
+		sess := sm.getSession(id)
+		if sess == nil {
+			// Race with session GC / unknown weiran ID — already in stderr.
+			writeJSON(w, http.StatusOK, map[string]string{"status": "session_unknown"})
+			return
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"rule_id":   req.RuleID,
+			"event":     req.Event,
+			"tool_name": req.ToolName,
+			"level":     req.Level,
+			"msg":       req.Msg,
+			"ts":        time.Now().Unix(),
+		})
+		// broadcast → SSE subscribers + auto-fanout to WS hub via server_stream.go:110
+		sess.broadcaster.broadcast(sseEvent{Event: "hook_error", Data: payload})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "delivered"})
+	}))
+
 	// Answer an in-flight AskUserQuestion permission request from the Web UI.
 	// Body: {"request_id": "req_...", "answers": [{"question": "...", "answer": "A. label"}, ...]}
 	// The server merges the user's answers into the original updatedInput and
@@ -1587,6 +1642,21 @@ func handleServer(args []string) {
 		if err := sess.process.controlRequest(req.Subtype, req.Extra); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
+		}
+
+		// Persist apply_flag_settings.effort so it survives CC reloads
+		// (resume / rehydrate / model-switch). Without persistence the next
+		// CC subprocess would fall back to its built-in default and the
+		// user-picked tier silently disappears.
+		if req.Subtype == "apply_flag_settings" {
+			if settings, ok := req.Extra["settings"].(map[string]any); ok {
+				if eff, ok := settings["effort"].(string); ok {
+					sess.mu.Lock()
+					sess.Effort = eff
+					sess.mu.Unlock()
+					setEffortDB(sess.ID, eff)
+				}
+			}
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})

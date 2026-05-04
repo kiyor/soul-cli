@@ -107,6 +107,13 @@ func openServerDB() (*sql.DB, error) {
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN loaded_fragments TEXT NOT NULL DEFAULT '[]'`)
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN pending_patches TEXT NOT NULL DEFAULT '[]'`)
 		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN current_soul_mode TEXT NOT NULL DEFAULT ''`)
+
+		// Migration: add effort — Claude Code reasoning effort tier (low/medium/
+		// high/xhigh/max). Persisted per-session so that resume / rehydrate /
+		// session-switch in the Web UI all see the same effort the user picked,
+		// instead of inheriting another session's UI state or falling back to
+		// CC's own default. Empty string means "not set" → CC default applies.
+		serverDB.Exec(`ALTER TABLE server_sessions ADD COLUMN effort TEXT NOT NULL DEFAULT ''`)
 	})
 	if serverDBErr != nil {
 		return nil, serverDBErr
@@ -345,6 +352,56 @@ func setChromeEnabled(sessionID string, enabled bool) {
 	now := time.Now().Format(time.RFC3339)
 	db.Exec(`UPDATE server_sessions SET chrome_enabled=?, updated_at=? WHERE session_id=?`,
 		v, now, sessionID)
+}
+
+// applyPersistedEffort pushes the session's persisted effort tier into the
+// running CC subprocess via apply_flag_settings. Called after process spawn
+// (create / reload / resume / rehydrate) when sess.Effort is non-empty, so
+// the CC instance starts on the user's chosen tier rather than CC's default.
+//
+// Best-effort: a control-request failure logs to stderr but never blocks the
+// caller. The user can re-pick effort from the UI if it didn't take.
+func applyPersistedEffort(sess *serverSession) {
+	if sess == nil {
+		return
+	}
+	sess.mu.Lock()
+	effort := sess.Effort
+	proc := sess.process
+	sess.mu.Unlock()
+	if effort == "" || proc == nil {
+		return
+	}
+	extra := map[string]any{"settings": map[string]any{"effort": effort}}
+	if err := proc.controlRequest("apply_flag_settings", extra); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] server: applyPersistedEffort: %v\n", appName, err)
+	}
+}
+
+// setEffortDB persists the per-session reasoning effort tier.
+// Empty string is allowed and means "unset" (CC default applies).
+func setEffortDB(sessionID, effort string) {
+	db, err := openServerDB()
+	if err != nil {
+		return
+	}
+	now := time.Now().Format(time.RFC3339)
+	db.Exec(`UPDATE server_sessions SET effort=?, updated_at=? WHERE session_id=?`,
+		effort, now, sessionID)
+}
+
+// getEffortDB reads the persisted reasoning effort tier for a session.
+// Looks up by weiran session ID OR original Claude session ID so a resume
+// can inherit the previous CC instance's setting. Returns "" if unset.
+func getEffortDB(sessionID string) string {
+	db, err := openServerDB()
+	if err != nil {
+		return ""
+	}
+	var v string
+	db.QueryRow(`SELECT COALESCE(effort,'') FROM server_sessions WHERE session_id=? OR claude_session_id=?`,
+		sessionID, sessionID).Scan(&v)
+	return v
 }
 
 // setGalID persists the gal_id for a session.
@@ -912,6 +969,7 @@ type rehydratableSession struct {
 	RehydrateMsg    string
 	ChromeEnabled   bool
 	GalID           string
+	Effort          string
 
 	// Phase D — Runtime Soul Patch Protocol state. Restored after restart so
 	// the lazy injector keeps its monotonic-add semantics across the bounce.
