@@ -585,8 +585,32 @@ func resolveFuzzyModel(input string) (string, error) {
 		return resolved, nil
 	}
 
-	// 2. Already fully qualified (contains "/") — validate & pass through
+	// 2. Already fully qualified (contains "/") — validate provider name exists.
+	// Without validation, a typo like "openai/gpt-5.5" (provider type, not name)
+	// silently passes through and the spawn fails opaquely downstream.
 	if strings.Contains(input, "/") {
+		parts := strings.SplitN(input, "/", 2)
+		provName, modelName := parts[0], parts[1]
+		allProviders, _ := loadAllProviders()
+		if allProviders == nil {
+			// Config unloaded (e.g. test bench, fresh install) — preserve legacy pass-through
+			return input, nil
+		}
+		if _, ok := allProviders[provName]; !ok {
+			// Build hint: list providers that have a model containing modelName
+			var hints []string
+			for pn, prov := range allProviders {
+				for _, m := range prov.Models {
+					if strings.EqualFold(m, modelName) || strings.Contains(strings.ToLower(m), strings.ToLower(modelName)) {
+						hints = append(hints, pn+"/"+m)
+					}
+				}
+			}
+			if len(hints) > 0 {
+				return "", fmt.Errorf("unknown provider %q in %q (did you mean %s? or use bare %q to fuzzy-match)", provName, input, strings.Join(hints, ", "), modelName)
+			}
+			return "", fmt.Errorf("unknown provider %q in %q (try `%s models` or `%s providers`)", provName, input, appName, appName)
+		}
 		return input, nil
 	}
 

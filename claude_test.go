@@ -437,6 +437,12 @@ func TestResolveFuzzyModel(t *testing.T) {
 
 		// Empty -> empty
 		{"", "", false},
+
+		// Provider validation: known provider/model passes through
+		{"zai/glm-5.1", "zai/glm-5.1", false},
+		// Provider validation: unknown provider fails (silent pass-through bug fix 2026-05-04)
+		{"openai/glm-5.1", "", true},
+		{"anthropic/glm-5.1", "", true},
 	}
 
 	for _, tt := range tests {
