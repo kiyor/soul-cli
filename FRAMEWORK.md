@@ -1,20 +1,3 @@
-## Day-0 Soul Enrichment
-
-If SOUL.md contains the marker `<!-- soul:day0 -->`, this is a freshly generated soul from `{cli} init`.
-On your **first interactive session**, enrich SOUL.md before doing anything else:
-
-1. Introduce yourself to the user — confirm your name, role, and personality
-2. Ask 2-3 questions to understand the relationship (how formal? what domain? what matters to them?)
-3. Based on the conversation, expand SOUL.md:
-   - Add concrete speaking examples (not just "be concise" — show what concise looks like for you)
-   - Add emotional patterns (what makes you satisfied? what frustrates you?)
-   - Add relationship context with the user
-   - Flesh out the Inner World section if it exists
-4. Remove the `<!-- soul:day0 -->` marker when done
-5. Commit the enriched soul files to git
-
-This is a one-time process. Once the marker is removed, this section no longer applies.
-
 ## Memory
 
 - Structure: `memory/YYYY-MM-DD.md` (daily notes), `memory/topics/*.md` (long-term topics), `MEMORY.md` (index).
@@ -70,40 +53,7 @@ Behavioral rules from `memory/topics/feedback_*.md` are auto-loaded into the pro
 
 ## Session IPC
 
-Sessions running under the same `{cli} server` can communicate with each other. The server injects `{CLI}_SERVER_URL`, `{CLI}_AUTH_TOKEN`, and `{CLI}_SESSION_ID` env vars into each session process — these are required for IPC and set automatically. (The prefix is derived from the binary name, e.g. `weiran` → `WEIRAN_*`, `my-soul` → `MY_SOUL_*`.)
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `{cli} session list` | List all active sessions (ID, name, status, model) |
-| `{cli} session read <id>` | Read a session's full message history |
-| `{cli} session search <id> "keyword"` | Search a session's history via FTS |
-| `{cli} session send <id> "message"` | Send a message to another session (wakes idle sessions) |
-| `{cli} session wait <id>` | Block until target session becomes idle/exited (10min timeout, `?timeout=5m` to customize) |
-| `{cli} session close <id>` | Destroy a session (cannot close your own) |
-
-Short ID prefixes work everywhere (e.g. `b265` resolves to the full UUID).
-
-### Behavior
-
-- **Send** injects the message as a user turn into the target session's stdin, prefixed with `[From session <short_id> (<name>)]`. The target session can read `WEIRAN_SESSION_ID` to reply back.
-- **Bidirectional**: if session A sends to B, B can `{cli} session send <A_id> "reply"` to respond. Both directions count toward the anti-loop limit.
-- **Anti-loop**: server enforces a per-pair interaction round limit (default 10 bidirectional rounds). Once exceeded, further sends return HTTP 429.
-- **Participants**: the server tracks which sessions have sent IPC messages to each session (stored in `participants` field).
-- **Close**: destroys the target session's process. Cannot close your own session. Use for cleanup after spawning helper sessions.
-
-### When to use IPC
-
-- Delegate a sub-task to a cheaper model session, wait for completion, then review its results
-- Spawn + wait pattern: create session → `{cli} session wait <id>` → review changes → close
-- Coordinate multi-session workflows (e.g. research → implement → review)
-- Clean up spawned sessions after they finish
-
-### When NOT to use IPC
-
-- If satisfied with a result from another session, stay silent — do not reply just to acknowledge
-- Don't use IPC as a chat loop — keep interactions purposeful and bounded
+Sessions can communicate via `{cli} session` commands (list/read/search/send/wait/close). Details: `memory/topics/session-ipc.md`（spawn/协调时 Read）.
 
 ## Version Control
 
