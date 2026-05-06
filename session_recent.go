@@ -16,7 +16,7 @@ import (
 //
 // `session list` goes through the server and only knows about *running*
 // sessions. Once a session exits, its JSONL sits in ~/.claude/projects/ or
-// ~/.openclaw/agents/<agent>/sessions/ and becomes invisible to `list`.
+// <appDir>/codex/ and becomes invisible to `list`.
 //
 // `session recent` fills that gap: walk all known JSONL locations, sort by
 // mtime desc, optionally grep file contents for a keyword, and print a
@@ -122,7 +122,7 @@ func printRecentHelp() {
 	fmt.Fprintf(os.Stderr, "usage: %s session recent [--grep KEYWORD] [-n N] [--json]\n", appName)
 	fmt.Fprintln(os.Stderr, "  List recent session JSONL files by mtime across:")
 	fmt.Fprintln(os.Stderr, "    - $CLAUDE_CONFIG_DIR/projects/*/*.jsonl")
-	fmt.Fprintln(os.Stderr, "    - $HOME/.openclaw/agents/*/sessions/*.jsonl")
+	fmt.Fprintln(os.Stderr, "    - <appDir>/codex/*.jsonl")
 	fmt.Fprintln(os.Stderr, "    - archive sources registered with `db add-source`")
 	fmt.Fprintln(os.Stderr, "  Flags:")
 	fmt.Fprintln(os.Stderr, "    -n N          limit output to N rows (default 20)")

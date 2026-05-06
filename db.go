@@ -161,6 +161,18 @@ func openDB() (*sql.DB, error) {
 		`CREATE INDEX IF NOT EXISTS idx_whook_action ON webhook_audit(action)`,
 		`CREATE INDEX IF NOT EXISTS idx_whook_status ON webhook_audit(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_whook_req ON webhook_audit(request_id)`,
+		// content_hook_pending: cross-process queue for PostAssistantMsg.
+		// Server writes pending injections when assistant text matches rules;
+		// tool-hook binary drains them on next PreToolUse/PostToolUse call.
+		`CREATE TABLE IF NOT EXISTS content_hook_pending (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			rule_id    TEXT NOT NULL,
+			injection  TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			consumed   INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_chp_session ON content_hook_pending(session_id, consumed)`,
 	}
 	for _, s := range schemas {
 		if _, err := db.Exec(s); err != nil {

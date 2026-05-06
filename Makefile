@@ -1,4 +1,5 @@
 APP_NAME   ?= weiran
+UPPER_APP_NAME := $(shell echo $(APP_NAME) | tr '[:lower:]-' '[:upper:]_')
 # VENDOR is the codesign / bundle-id namespace (e.g. me.<vendor>.<app>).
 # Override with `make VENDOR=me.alice install` for your own builds. The
 # default `local` is generic so soul-cli's open-source build doesn't
@@ -51,16 +52,18 @@ $(INFO_PLIST_BUILT): $(INFO_PLIST_TMPL) VERSION
 	     $(INFO_PLIST_TMPL) > $(INFO_PLIST_BUILT)
 
 build: $(INFO_PLIST_BUILT)
+	@mkdir -p $(INSTALL_DIR)
 	@# external linker required to embed __info_plist section via -sectcreate.
 	@# Deterministic: same commit + same plist content = identical binary.
-	go build -ldflags "$(LDFLAGS) -linkmode=external -extldflags=-Wl,-sectcreate,__TEXT,__info_plist,$(INFO_PLIST_BUILT)" -o $(APP_NAME) .
+	@# Build directly to INSTALL_DIR — no stale binary left in project dir
+	@# or ~/go/bin/ that could shadow via PATH priority.
+	go build -ldflags "$(LDFLAGS) -linkmode=external -extldflags=-Wl,-sectcreate,__TEXT,__info_plist,$(INFO_PLIST_BUILT)" -o $(INSTALL_DIR)/$(APP_NAME) .
 
 setup-codesign:
 	@CODESIGN_IDENTITY="$(CODESIGN_IDENTITY)" ./scripts/setup-codesign.sh
 
 install: build
-	mkdir -p $(INSTALL_DIR)
-	cp $(APP_NAME) $(INSTALL_DIR)/$(APP_NAME)
+	@# Binary already at INSTALL_DIR from build target.
 	@# Write build metadata NEXT TO the binary (not INTO it) so commit/date
 	@# changes don't alter CDHash. Runtime reads via loadBuildMeta().
 	@printf 'version=%s\ncommit=%s\ndate=%s\n' '$(VERSION)' '$(COMMIT)' '$(DATE)' > $(INSTALL_DIR)/$(APP_NAME).meta
@@ -96,6 +99,8 @@ test:
 clean:
 	rm -f $(APP_NAME)
 	rm -rf build
+	@# Remove stale binary from ~/go/bin if it exists (avoids PATH shadowing)
+	@rm -f $(HOME)/go/bin/$(APP_NAME) 2>/dev/null || true
 
 ## ── LaunchAgent (server mode) ──
 #
@@ -113,6 +118,7 @@ clean:
 $(PLIST_BUILT): $(PLIST_SRC_TMPL) Makefile
 	@mkdir -p build
 	@sed -e 's|@@APP_NAME@@|$(APP_NAME)|g' \
+	     -e 's|@@UPPER_APP_NAME@@|$(UPPER_APP_NAME)|g' \
 	     -e 's|@@VENDOR@@|$(VENDOR)|g' \
 	     -e 's|@@HOME@@|$(HOME)|g' \
 	     -e 's|@@INSTALL_DIR@@|$(INSTALL_DIR)|g' \
@@ -139,7 +145,7 @@ server-status:
 	@launchctl print gui/$$(id -u)/$(PLIST_NAME) 2>/dev/null || echo "not loaded"
 
 server-logs:
-	@tail -f $(HOME)/.openclaw/data/$(APP_NAME)-server.stderr.log
+	@tail -f $(HOME)/$(APP_NAME)/data/$(APP_NAME)-server.stderr.log
 
 ## ── Linked instances (hengzhun, etc.) ──
 

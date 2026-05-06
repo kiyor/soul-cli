@@ -17,7 +17,7 @@ func setupFTSTest(t *testing.T) func() {
 	dir := t.TempDir()
 	dbPath = filepath.Join(dir, "test.db")
 	workspace = dir
-	memDir := filepath.Join(dir, "memory")
+	memDir := filepath.Join(dir, "memory", "daily")
 	os.MkdirAll(memDir, 0755)
 	return func() {
 		dbPath = origDB
@@ -62,7 +62,7 @@ func TestIndexDailyNotes_Basic(t *testing.T) {
 	defer setupFTSTest(t)()
 
 	// Create 3 fake daily notes
-	memDir := filepath.Join(workspace, "memory")
+	memDir := filepath.Join(workspace, "memory", "daily")
 	files := map[string]string{
 		"2026-04-01.md": "# Day 1\n\n在 Venice Beach 散步, 和 Kiyor 聊 GLM 5.1 的切换.",
 		"2026-04-02.md": "# Day 2\n\n心跳巡检 #100, 服务正常, backlog 清零.",
@@ -104,7 +104,7 @@ func TestIndexDailyNotes_Basic(t *testing.T) {
 func TestIndexDailyNotes_Incremental(t *testing.T) {
 	defer setupFTSTest(t)()
 
-	memDir := filepath.Join(workspace, "memory")
+	memDir := filepath.Join(workspace, "memory", "daily")
 	file := filepath.Join(memDir, "2026-04-09.md")
 	os.WriteFile(file, []byte("original content"), 0644)
 
@@ -135,7 +135,7 @@ func TestIndexDailyNotes_Incremental(t *testing.T) {
 func TestSearchFTS_Daily(t *testing.T) {
 	defer setupFTSTest(t)()
 
-	memDir := filepath.Join(workspace, "memory")
+	memDir := filepath.Join(workspace, "memory", "daily")
 	os.WriteFile(filepath.Join(memDir, "2026-04-01.md"),
 		[]byte("心跳巡检 #200, GLM 5.1 切换成功. in04 highspeed 配置生效."), 0644)
 	os.WriteFile(filepath.Join(memDir, "2026-04-02.md"),
@@ -225,7 +225,7 @@ func TestSearchFTS_Sessions(t *testing.T) {
 func TestRebuildFTS(t *testing.T) {
 	defer setupFTSTest(t)()
 
-	memDir := filepath.Join(workspace, "memory")
+	memDir := filepath.Join(workspace, "memory", "daily")
 	os.WriteFile(filepath.Join(memDir, "2026-04-09.md"),
 		[]byte("test content for rebuild"), 0644)
 	indexDailyNotes()
@@ -280,7 +280,7 @@ func TestSanitizeFTSQuery(t *testing.T) {
 func TestSearchFTS_PunctuationQuery(t *testing.T) {
 	defer setupFTSTest(t)()
 
-	memDir := filepath.Join(workspace, "memory")
+	memDir := filepath.Join(workspace, "memory", "daily")
 	os.WriteFile(filepath.Join(memDir, "2026-04-01.md"),
 		[]byte("心跳巡检 #207, GLM 5.1 切换成功."), 0644)
 

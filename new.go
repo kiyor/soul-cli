@@ -14,8 +14,8 @@ import (
 // handleNew resets all Telegram direct sessions (chat + system channels)
 // fixes the issue where OpenClaw /new only clears system channel but not chat channel
 func handleNew() {
-	sessionsFile := filepath.Join(appHome, "agents", "main", "sessions", "sessions.json")
-	sessDir := filepath.Join(appHome, "agents", "main", "sessions")
+	sessionsFile := filepath.Join(appDir, "telegram", "sessions.json")
+	sessDir := filepath.Join(appDir, "telegram")
 
 	data, err := os.ReadFile(sessionsFile)
 	if err != nil {

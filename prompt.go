@@ -406,13 +406,14 @@ func buildPrompt() buildPromptResult {
 
 	// Today's daily note only (tail-first: newest content preserved on truncation).
 	// Yesterday/older notes available via FTS5 search when needed.
+	// Heartbeat logs live in memory/daily/heartbeat/ and are NOT injected into the prompt.
 	if profile.IncludeDailyNotes {
 		today := time.Now().Format("2006-01-02")
 		dailyBudget := 10000
 		if profile.DailyNoteBudget > 0 {
 			dailyBudget = profile.DailyNoteBudget
 		}
-		p := filepath.Join(workspace, "memory", today+".md")
+		p := filepath.Join(workspace, "memory", "daily", today+".md")
 		if content, ok := loadFileTailWithBudget(p, dailyBudget); ok {
 			if totalChars+len(content) > maxBootstrapTotalChars {
 				fmt.Fprintf(&b, "\n# === Daily Note: %s ===\n\n⚠️ [skipped: bootstrap total exceeded limit]\n", today)
@@ -608,12 +609,15 @@ func loadFileTailWithBudget(path string, maxChars int) (string, bool) {
 // buildTelegramContext extracts recent user/assistant messages from the main
 // agent's active TG session JSONL, reading backwards from tail until token
 // budget is reached. Returns formatted text and JSONL file path.
+//
+// Legacy: reads from <appHome>/data/telegram/sessions.json (previously
+// agents/main/sessions/sessions.json under OpenClaw). Returns empty if
+// the file doesn't exist (server mode manages TG sessions internally).
 func buildTelegramContext(tokenBudget int) (string, string) {
-	sessionsFile := filepath.Join(appHome, "agents", "main", "sessions", "sessions.json")
+	sessionsFile := filepath.Join(appDir, "telegram", "sessions.json")
 	data, err := os.ReadFile(sessionsFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "["+appName+"] TG: cannot read sessions.json: %v\n", err)
-		return "", ""
+		return "", "" // no TG session data — normal for server-managed sessions
 	}
 
 	// Parse sessions.json, find telegram direct session
@@ -654,8 +658,8 @@ func buildTelegramContext(tokenBudget int) (string, string) {
 		return "", ""
 	}
 
-	sessDir := filepath.Join(appHome, "agents", "main", "sessions")
-	jsonlPath := filepath.Join(sessDir, bestID+".jsonl")
+	tgSessDir := filepath.Join(appDir, "telegram")
+	jsonlPath := filepath.Join(tgSessDir, bestID+".jsonl")
 
 	f, err := os.Open(jsonlPath)
 	if err != nil {
@@ -943,7 +947,7 @@ func buildCCSessionContext(n int, charBudget int) string {
 	}
 
 	var out strings.Builder
-	out.WriteString("Recent Claude Code conversations for context. Read corresponding JSONL for details.\n\n")
+	out.WriteString(fmt.Sprintf("Recent Claude Code conversations for context. Use `%s session read <id>` for details.\n\n", appName))
 
 	for _, s := range picked {
 		title, userPrompts := extractCCSessionUserPrompts(s.path, charBudget)
@@ -1055,10 +1059,10 @@ func writePrompt(result buildPromptResult) {
 		today := time.Now().Format("2006-01-02")
 		yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
 		for _, day := range []string{today, yesterday} {
-			p := filepath.Join(workspace, "memory", day+".md")
+			p := filepath.Join(workspace, "memory", "daily", day+".md")
 			if data, err := os.ReadFile(p); err == nil {
 				t := estimateTokens(string(data))
-				fmt.Fprintf(os.Stderr, "  memory/%s.md: ~%dk tokens\n", day, t/1000)
+				fmt.Fprintf(os.Stderr, "  memory/daily/%s.md: ~%dk tokens\n", day, t/1000)
 			}
 		}
 		fmt.Fprint(os.Stderr, "["+appName+"] consider trimming oversized daily notes or MEMORY.md\n")
@@ -1248,39 +1252,46 @@ Unavailable: IndexTTS voice, temperature control.
 Jira token is set via JIRA_TOKEN env var. Run `+"`%[2]s --help`"+` for all subcommands.`, agentNick, appName, ownerName)
 }
 
-func injectServerModeContext(content string) string {
-	// Replace the environment section with server mode version
-	// Try both Chinese and English markers
-	for _, marker := range []string{"## 当前环境", "## Current Environment"} {
-		idx := strings.Index(content, marker)
-		if idx < 0 {
-			continue
+// findSectionEnd finds the end of a markdown section starting after the heading.
+// Stops at any heading (# through ####), frontmatter fence (---), or end of string.
+func findSectionEnd(rest string) int {
+	lines := strings.SplitAfter(rest, "\n")
+	pos := 0
+	for i, line := range lines {
+		if i == 0 {
+			pos += len(line)
+			continue // skip the heading line itself
 		}
-		// Find the end of the section (next ## heading or end of string)
-		rest := content[idx+len(marker):]
-		endIdx := strings.Index(rest, "\n## ")
-		if endIdx < 0 {
-			return content[:idx] + buildServerModeEnv() + "\n"
+		trimmed := strings.TrimLeft(line, " \t")
+		if len(trimmed) > 0 && trimmed[0] == '#' || strings.HasPrefix(trimmed, "---") {
+			return pos
 		}
-		return content[:idx] + buildServerModeEnv() + "\n" + rest[endIdx+1:]
+		pos += len(line)
 	}
-	// No section found, append
-	return content + "\n" + buildServerModeEnv() + "\n"
+	return -1 // no next section found
+}
+
+func injectServerModeContext(content string) string {
+	return replaceEnvSection(content, buildServerModeEnv())
 }
 
 // injectServerModeContext2 replaces the environment section with a custom override.
 func injectServerModeContext2(content, override string) string {
+	return replaceEnvSection(content, override)
+}
+
+func replaceEnvSection(content, replacement string) string {
 	for _, marker := range []string{"## 当前环境", "## Current Environment"} {
 		idx := strings.Index(content, marker)
 		if idx < 0 {
 			continue
 		}
 		rest := content[idx+len(marker):]
-		endIdx := strings.Index(rest, "\n## ")
+		endIdx := findSectionEnd(rest)
 		if endIdx < 0 {
-			return content[:idx] + override + "\n"
+			return content[:idx] + replacement + "\n"
 		}
-		return content[:idx] + override + "\n" + rest[endIdx+1:]
+		return content[:idx] + replacement + "\n" + rest[endIdx:]
 	}
-	return content + "\n" + override + "\n"
+	return content + "\n" + replacement + "\n"
 }

@@ -197,17 +197,7 @@ func handleDoctor() {
 		}
 	}
 
-	// 2. OpenClaw Gateway process
-	fmt.Println("\n── OpenClaw Gateway ──")
-	out, err := exec.Command("pgrep", "-fl", "openclaw").CombinedOutput()
-	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-		warn("openclaw gateway process not detected")
-	} else {
-		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		ok("gateway running (%d processes)", len(lines))
-	}
-
-	// 3. Model endpoints
+	// 2. Model endpoints
 	fmt.Println("\n── Model Endpoints ──")
 	endpoint := getModelEndpoint()
 	if endpoint == "" {
@@ -853,13 +843,6 @@ func handleConfig() {
 		fmt.Printf("  %s %s\n", exists, d)
 	}
 
-	fmt.Println("\n── OpenClaw Config ──")
-	fmt.Printf("  config:       %s\n", openclawConfigPath)
-	if _, err := os.Stat(openclawConfigPath); err == nil {
-		fmt.Printf("  status:       ✅ readable\n")
-	} else {
-		fmt.Printf("  status:       ❌ %v\n", err)
-	}
 }
 
 // handleModels lists every model available via --model, grouped by provider.

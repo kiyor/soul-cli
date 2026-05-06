@@ -26,27 +26,21 @@ func getTelegramToken() string {
 	if cachedTelegramToken != "" {
 		return cachedTelegramToken
 	}
-	data, err := os.ReadFile(filepath.Join(appHome, "openclaw.json"))
-	if err != nil {
-		return ""
+	// 1. config.json server.telegram.botToken
+	if cfgData, err := os.ReadFile(filepath.Join(appDir, "config.json")); err == nil {
+		var root struct {
+			Server struct {
+				Telegram struct {
+					BotToken string `json:"botToken"`
+				} `json:"telegram"`
+			} `json:"server"`
+		}
+		if json.Unmarshal(cfgData, &root) == nil && root.Server.Telegram.BotToken != "" {
+			cachedTelegramToken = root.Server.Telegram.BotToken
+			return cachedTelegramToken
+		}
 	}
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return ""
-	}
-	// channels.telegram.botToken
-	channels, _ := cfg["channels"].(map[string]interface{})
-	tg, _ := channels["telegram"].(map[string]interface{})
-	if token, ok := tg["botToken"].(string); ok && token != "" {
-		cachedTelegramToken = token
-		return token
-	}
-	// fallback: channels.telegram.accounts.main.botToken
-	accounts, _ := tg["accounts"].(map[string]interface{})
-	main, _ := accounts["main"].(map[string]interface{})
-	token, _ := main["botToken"].(string)
-	cachedTelegramToken = token
-	return token
+	return ""
 }
 
 func sendTelegramPhoto(photoURL, caption string) {

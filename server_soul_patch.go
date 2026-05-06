@@ -196,6 +196,38 @@ type soulPatchInjection struct {
 // not yet appended to LoadedFragments — callers commit only after the
 // backend successfully receives the message, so a sendMessage failure
 // doesn't poison the loaded set.
+// prepareSoulPatchResumeOnly is the resume-path variant that skips topic
+// fragment detection. Resume/rehydrate messages are infrastructure (server
+// restart notices, context continuations) and must not trigger personality
+// fragment loading — otherwise words in the canned message (e.g. "your work")
+// match fragment tags and cause repeated injection on every restart.
+//
+// It still sanitizes input and flushes any queued PendingPatches.
+func (s *serverSession) prepareSoulPatchResumeOnly(message string) soulPatchInjection {
+	clean, sanitized := sanitizeSoulPatchInput(message)
+
+	s.mu.Lock()
+	pending := append([]string(nil), s.PendingPatches...)
+	s.mu.Unlock()
+
+	// Resolve mode for the injection record (audit/debug) but don't
+	// load fragments.
+	signals := gatherRoutingSignals()
+	signals.FirstMessage = clean
+	if s.Project != "" {
+		signals.LaunchDir = s.Project
+	}
+	mode := detectSoulMode(signals)
+
+	return soulPatchInjection{
+		Outbound:            joinPatchAndMessage(pending, clean),
+		DisplayMessage:      clean,
+		FlushedPendingCount: len(pending),
+		SoulMode:            mode,
+		Sanitized:           sanitized,
+	}
+}
+
 func (s *serverSession) prepareSoulPatch(message string) soulPatchInjection {
 	clean, sanitized := sanitizeSoulPatchInput(message)
 

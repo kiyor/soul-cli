@@ -28,7 +28,7 @@ import (
 //
 // File layout
 // -----------
-// Path:  ~/.openclaw/agents/main/sessions/<thread_id>.jsonl
+// Path:  <appDir>/codex/<thread_id>.jsonl
 // One JSON object per line. Schema fields below match the subset that
 // parseSessionMessages / parseSessionSubagents inspect:
 //
@@ -69,11 +69,7 @@ func codexJSONLPath(threadID string) string {
 	if threadID == "" {
 		return ""
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".openclaw", "agents", "main", "sessions", threadID+".jsonl")
+	return filepath.Join(appDir, "codex", threadID+".jsonl")
 }
 
 // appendCodexJSONL serializes obj as a single JSON line and appends it to

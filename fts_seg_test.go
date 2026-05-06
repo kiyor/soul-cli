@@ -106,7 +106,7 @@ func TestSegmentText_ChineseWordBoundaries(t *testing.T) {
 func TestSearchFTS_ChineseSegmented(t *testing.T) {
 	defer setupFTSTest(t)()
 
-	memDir := strings.TrimRight(workspace, "/") + "/memory"
+	memDir := strings.TrimRight(workspace, "/") + "/memory/daily"
 
 	// 心跳巡检 #200, 服务全部健康, backlog 清零.
 	writeTestFile(t, memDir+"/2026-04-01.md",

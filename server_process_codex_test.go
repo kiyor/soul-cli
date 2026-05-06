@@ -21,9 +21,11 @@ import (
 // we drive its eventsCh directly.
 func newCodexBridgeTestSession(t *testing.T) (*serverSession, *codexBackend, *subscriber) {
 	t.Helper()
-	// Sandbox HOME so emitCodexSyntheticInit's JSONL write doesn't escape
-	// into the developer's real ~/.openclaw/agents/main/sessions/.
-	t.Setenv("HOME", t.TempDir())
+	// Sandbox appDir so emitCodexSyntheticInit's JSONL write doesn't escape
+	// into the developer's real data directory.
+	origAppDir := appDir
+	appDir = t.TempDir()
+	t.Cleanup(func() { appDir = origAppDir })
 	bc := newBroadcaster()
 	sess := &serverSession{
 		ID:          "test-session",

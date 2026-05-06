@@ -233,12 +233,7 @@ func preflight() []string {
 		warnings = append(warnings, fmt.Sprintf("claude binary not found: %s", claudeBin))
 	}
 
-	// 2. check openclaw.json is readable
-	if _, err := os.Stat(openclawConfigPath); err != nil {
-		warnings = append(warnings, "openclaw.json not readable")
-	}
-
-	// 3. check model endpoint reachability (quick 2s timeout)
+	// 2. check model endpoint reachability (quick 2s timeout)
 	endpoint := getModelEndpoint()
 	if endpoint != "" {
 		client := &http.Client{Timeout: 2 * time.Second}
@@ -253,7 +248,7 @@ func preflight() []string {
 		}
 	}
 
-	// 4. disk space (macOS: /tmp and workspace partition)
+	// 3. disk space (macOS: /tmp and workspace partition)
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(workspace, &stat); err == nil {
 		freeGB := float64(stat.Bavail*uint64(stat.Bsize)) / (1024 * 1024 * 1024)
@@ -265,47 +260,13 @@ func preflight() []string {
 	return warnings
 }
 
-// getModelEndpoint reads available provider baseURL from openclaw.json
-// tries primary model then fallback models' providers in order
+// getModelEndpoint reads available provider baseURL from config.json
+// tries the first provider with a baseURL set
 func getModelEndpoint() string {
-	data, err := os.ReadFile(openclawConfigPath)
-	if err != nil {
-		return ""
-	}
-	var cfg struct {
-		Agents struct {
-			Defaults struct {
-				Model struct {
-					Primary   string   `json:"primary"`
-					Fallbacks []string `json:"fallbacks"`
-				} `json:"model"`
-			} `json:"defaults"`
-		} `json:"agents"`
-		Models struct {
-			Providers map[string]struct {
-				BaseURL string `json:"baseUrl"`
-			} `json:"providers"`
-		} `json:"models"`
-	}
-	if json.Unmarshal(data, &cfg) != nil {
-		return ""
-	}
-
-	// collect model IDs to check: primary + fallbacks
-	candidates := []string{cfg.Agents.Defaults.Model.Primary}
-	candidates = append(candidates, cfg.Agents.Defaults.Model.Fallbacks...)
-
-	for _, model := range candidates {
-		if model == "" {
-			continue
-		}
-		parts := strings.SplitN(model, "/", 2)
-		if len(parts) < 2 {
-			continue
-		}
-		provider := parts[0]
-		if p, ok := cfg.Models.Providers[provider]; ok && p.BaseURL != "" {
-			return p.BaseURL + "/models"
+	all, _ := loadAllProviders()
+	for _, prov := range all {
+		if prov.BaseURL != "" {
+			return prov.BaseURL + "/models"
 		}
 	}
 	return ""

@@ -791,7 +791,7 @@ func attachProcessBridge(proc *claudeBackend, sess *serverSession, source string
 			sess.setTodos(todos)
 		}, makeOnMemoryAudit(sess), makeOnCanUseTool(sess), makeOnTask(sess), func(total int64) {
 			sess.updatePeakContext(total)
-		})
+		}, makeOnSegmentComplete(sess))
 		// Process exited: invalidate pending AUQ (the control_request is gone
 		// with the subprocess) and mark in-flight tasks cancelled so the UI
 		// stops showing them as still running.
@@ -817,6 +817,26 @@ func attachProcessBridge(proc *claudeBackend, sess *serverSession, source string
 	sess.mu.Unlock()
 	watchExit(proc, sess)
 	drainStderr(proc, sess)
+}
+
+// makeOnSegmentComplete returns a callback for PostAssistantMsg content hook.
+// Called when a mid-turn assistant text segment completes (tool_use follows).
+// Opens its own DB handle so evaluation doesn't block the main stream.
+func makeOnSegmentComplete(sess *serverSession) func(text string) {
+	db := openAuditDB()
+	if db != nil {
+		ensureContentHookTable(db)
+	}
+	return func(text string) {
+		sess.mu.Lock()
+		sessionID := sess.ClaudeSID // CC session ID — matches what tool-hook binary sees
+		sess.mu.Unlock()
+		if sessionID == "" {
+			return
+		}
+		// Run evaluation async to not block the stream handler
+		go evalPostAssistantMsg(db, sessionID, text)
+	}
 }
 
 // makeOnMemoryAudit returns a callback that logs memory operations to the audit DB.
@@ -2025,7 +2045,9 @@ func (sm *sessionManager) resumeSession(inputID, message, displayName, categoryO
 		if !proc.waitInit(30 * time.Second) {
 			fmt.Fprintf(os.Stderr, "[%s] server: init timeout for resume %s, sending message anyway\n", appName, shortID(sess.ID))
 		}
-		injection := sess.prepareSoulPatch(message)
+		// Use resume-only variant: skip topic fragment detection so
+		// infrastructure messages (restart notices) don't trigger injection.
+		injection := sess.prepareSoulPatchResumeOnly(message)
 		userEvent, _ := json.Marshal(map[string]any{
 			"type":    "user",
 			"message": map[string]any{"role": "user", "content": injection.DisplayMessage},
@@ -2177,19 +2199,13 @@ func (sm *sessionManager) rehydrateSessions() {
 		// rehydratableSession is captured purely for diagnostics / future use.
 		_ = s.Effort
 
-		// Phase D — restore the cumulative soul-patch state. Without this the
-		// rehydrated session forgets which fragments are already in the
-		// model's persona prefix (the resumed claude --resume picks up the
-		// JSONL with the patches from before the restart) and would re-patch
-		// them on the first post-restart user turn, breaking cache prefixes
-		// and causing the model to absorb the same content twice.
-		if len(s.LoadedFragments) > 0 || len(s.PendingPatches) > 0 || s.CurrentSoulMode != "" {
-			sess.mu.Lock()
-			sess.LoadedFragments = append([]string(nil), s.LoadedFragments...)
-			sess.PendingPatches = append([]string(nil), s.PendingPatches...)
-			sess.CurrentSoulMode = s.CurrentSoulMode
-			sess.mu.Unlock()
-		}
+		// Phase D — soul-patch state is already restored inside resumeSession
+		// (via getSoulPatchState reading the authoritative DB value). Do NOT
+		// overwrite here with the stale snapshot from getRehydratableSessions
+		// which was captured before resumeSession's commitSoulPatchInjection
+		// could update the DB. The old overwrite caused LoadedFragments to
+		// regress to the pre-resume snapshot, making fragments appear "new"
+		// again on the next user message.
 
 		wakeNote := "idle"
 		if s.RehydrateMsg != "" {
@@ -2233,19 +2249,10 @@ func findSessionJSONL(sessionID string) string {
 		}
 	}
 
-	// OpenClaw sessions: ~/.openclaw/agents/*/sessions/
-	home, _ := os.UserHomeDir()
-	ocAgents := filepath.Join(home, ".openclaw", "agents")
-	if entries, err := os.ReadDir(ocAgents); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			path := filepath.Join(ocAgents, e.Name(), "sessions", fname)
-			if _, err := os.Stat(path); err == nil {
-				return path
-			}
-		}
+	// Codex transcripts: <appDir>/codex/
+	codexPath := filepath.Join(appDir, "codex", fname)
+	if _, err := os.Stat(codexPath); err == nil {
+		return codexPath
 	}
 
 	return ""

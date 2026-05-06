@@ -353,7 +353,7 @@ var cronTemplate = template.Must(template.New("cron").Parse(`# Memory Consolidat
 3. For each pending file: tail last 500 lines, extract key conversations
    - OpenClaw JSONL: type "message", message.role "user"
    - Claude Code JSONL: type "user", message.content
-4. Write to {{.Workspace}}/memory/{{.Today}}.md
+4. Write to {{.Workspace}}/memory/daily/{{.Today}}.md
 5. Valuable long-term memories → update MEMORY.md or memory/topics/
 6. Soul fine-tuning: any new understanding of the user? Minor edits to SOUL.md / USER.md (optional)
 7. **Write summaries file** (auto-imports to DB after exit):

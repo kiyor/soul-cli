@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -194,9 +195,13 @@ func serveSSE(w http.ResponseWriter, r *http.Request, broadcaster *sseBroadcaste
 // Web UI through an ask_user_question SSE event. If the callback is nil
 // or returns false, bridgeStdout auto-allows the tool (preserving prior
 // bypassPermissions behavior for tools that unexpectedly reach this path).
-func bridgeStdout(proc *claudeBackend, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage), onMemoryAudit func(*memoryAuditEntry), onCanUseTool func(json.RawMessage) bool, onTask func(event string, raw json.RawMessage), onUsage func(total int64)) {
+func bridgeStdout(proc *claudeBackend, broadcaster *sseBroadcaster, onInit func(json.RawMessage), onResult func(json.RawMessage), onTodos func(json.RawMessage), onMemoryAudit func(*memoryAuditEntry), onCanUseTool func(json.RawMessage) bool, onTask func(event string, raw json.RawMessage), onUsage func(total int64), onSegmentComplete func(text string)) {
 	// Track pending memory tool_use ops waiting for their tool_result
 	pendingMemOps := make(map[string]*pendingMemoryOp)
+
+	// Accumulate assistant text for content-hook segment detection.
+	// Reset on tool_use (segment boundary). Evaluated when tool_use arrives.
+	var segmentBuf strings.Builder
 
 	proc.readLines(func(msgType string, raw json.RawMessage) {
 		// Route control_response to sync waiters
@@ -242,6 +247,24 @@ func bridgeStdout(proc *claudeBackend, broadcaster *sseBroadcaster, onInit func(
 			if total := extractAssistantContextTotal(raw); total > 0 {
 				onUsage(total)
 			}
+		}
+
+		// PostAssistantMsg content hook: accumulate assistant text segments.
+		// When a tool_use arrives, the preceding text is a complete mid-turn
+		// segment — evaluate content hook rules against it.
+		if event == "assistant" {
+			if text := extractAssistantText(raw); text != "" {
+				segmentBuf.WriteString(text)
+			}
+		}
+		if event == "tool_use" && onSegmentComplete != nil && segmentBuf.Len() > 0 {
+			onSegmentComplete(segmentBuf.String())
+			segmentBuf.Reset()
+		}
+		// On result (turn end), clear segment buf without evaluating —
+		// msg3 (final segment) is left for the official Stop hook.
+		if msgType == "result" {
+			segmentBuf.Reset()
 		}
 
 		// Forward tool_use / tool_result to the per-session task tracker so it
@@ -414,4 +437,27 @@ func mapEventType(msgType string, raw json.RawMessage) string {
 	default:
 		return msgType
 	}
+}
+
+// extractAssistantText pulls concatenated text content from an assistant
+// stream-json event. Returns "" if no text blocks or parse failure.
+func extractAssistantText(raw json.RawMessage) string {
+	var peek struct {
+		Message struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(raw, &peek) != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, c := range peek.Message.Content {
+		if c.Type == "text" && c.Text != "" {
+			sb.WriteString(c.Text)
+		}
+	}
+	return sb.String()
 }

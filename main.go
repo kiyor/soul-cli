@@ -43,8 +43,8 @@ var (
 	home    = os.Getenv("HOME")
 	appName string // derived from os.Args[0] basename, e.g. "weiran", "soul"
 
-	workspace string // dynamically read from openclaw.json, fallback ~/.openclaw/workspace
-	agentName      string // read from openclaw.json agents.list main agent name, defaults to appName
+	workspace string // <appHome>/workspace
+	agentName string // defaults to appName, overridable via config.json
 	agentAvatarURL    string // optional avatar image URL (from config.json "avatarUrl")
 	agentWelcomeImage string // optional full-body welcome image URL (from config.json "welcomeImage")
 	userAvatarURL     string // optional user avatar image URL (from config.json "userAvatarUrl")
@@ -130,16 +130,15 @@ var (
 	// Skill directories
 	skillDirs []string
 
-	// Telegram (read from config.json / openclaw.json / <APPNAME>_TG_CHAT_ID)
+	// Telegram (read from config.json / <APPNAME>_TG_CHAT_ID)
 	tgChatID string
 
-	// Base directory: <APPNAME>_HOME env overrides default ~/.openclaw
-	appHome            string
-	openclawConfigPath string
+	// Base directory: <APPNAME>_HOME env, then WEIRAN_HOME, then ~/.<appName>
+	appHome string
 
 	// Version management
 	versionsDir string // <appDir>/.versions/
-	appBin      string // ~/go/bin/<appName>
+	appBin      string // ~/.local/bin/<appName>
 	maxVersions = 3
 
 	// App data directory: where sessions.db, metrics.jsonl, hooks/, .versions/ live
@@ -203,10 +202,9 @@ func initAppName() {
 
 	// Derive early vars that depend on appName
 	upperName := strings.ToUpper(strings.ReplaceAll(appName, "-", "_"))
-	appHome = envOrDefault(upperName+"_HOME", envOrDefault("WEIRAN_HOME", filepath.Join(home, ".openclaw")))
-	openclawConfigPath = filepath.Join(appHome, "openclaw.json")
+	appHome = envOrDefault(upperName+"_HOME", envOrDefault("WEIRAN_HOME", filepath.Join(home, appName)))
 	lockfile = filepath.Join(os.TempDir(), appName+".lock")
-	appBin = filepath.Join(home, "go", "bin", appName)
+	appBin = filepath.Join(home, ".local", "bin", appName)
 
 	// Claude Code config dir isolation: CLAUDE_CONFIG_DIR env → default ~/.claude
 	claudeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
@@ -217,64 +215,13 @@ func initAppName() {
 	}
 }
 
-// initWorkspace reads workspace path and agent name from openclaw.json and initializes all derived paths.
-// Fallback: if the config file doesn't exist or fails to parse, uses ~/.openclaw/workspace.
+// initWorkspace initializes workspace path and all derived paths.
+// Workspace defaults to <appHome>/workspace.
 func initWorkspace() {
-	defaultWS := filepath.Join(appHome, "workspace")
-	workspace = defaultWS
+	workspace = filepath.Join(appHome, "workspace")
 	agentName = appName
 
-	data, err := os.ReadFile(openclawConfigPath)
-	if err == nil {
-		var cfg struct {
-			Agents struct {
-				Defaults struct {
-					Workspace string `json:"workspace"`
-				} `json:"defaults"`
-				List []struct {
-					ID        string `json:"id"`
-					Name      string `json:"name"`
-					Default   bool   `json:"default"`
-					Workspace string `json:"workspace"`
-				} `json:"list"`
-			} `json:"agents"`
-		}
-		if json.Unmarshal(data, &cfg) == nil {
-			// Match agent: first try appName as agent ID, then "main", then default
-			var matched bool
-			for _, a := range cfg.Agents.List {
-				if a.ID == appName {
-					if a.Workspace != "" {
-						workspace = a.Workspace
-					}
-					if a.Name != "" {
-						agentName = a.Name
-					}
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				for _, a := range cfg.Agents.List {
-					if a.ID == "main" || a.Default {
-						if a.Workspace != "" {
-							workspace = a.Workspace
-						}
-						if a.Name != "" {
-							agentName = a.Name
-						}
-						break
-					}
-				}
-			}
-			// If matched agent has no workspace of its own, use defaults
-			if workspace == defaultWS && cfg.Agents.Defaults.Workspace != "" {
-				workspace = cfg.Agents.Defaults.Workspace
-			}
-		}
-	}
-
-	// Telegram chat ID: read from openclaw credentials (lowest priority)
+	// Telegram chat ID: read from credentials (lowest priority)
 	allowFromPath := filepath.Join(appHome, "credentials", "telegram-default-allowFrom.json")
 	if afData, err := os.ReadFile(allowFromPath); err == nil {
 		var af struct {
@@ -340,6 +287,7 @@ func initWorkspace() {
 	versionsDir = filepath.Join(appDir, ".versions")
 	initSessionSources()
 	skillDirs = []string{
+		filepath.Join(claudeConfigDir, "skills"),
 		filepath.Join(appHome, "skills"),
 		filepath.Join(workspace, "skills"),
 	}
@@ -424,7 +372,7 @@ func migrateAppData(legacyDir, newDir string) {
 
 // loadConfig reads user configuration from config.json.
 // Config file is located in the app data directory.
-// All fields are optional; if unset, values are read from environment variables or openclaw.json.
+// All fields are optional; if unset, values are read from environment variables.
 func loadConfig() {
 	configPaths := []string{
 		filepath.Join(appHome, "data", "config.json"),               // new location
@@ -489,7 +437,7 @@ func loadConfig() {
 		jiraToken = envJira
 	}
 
-	// telegramChatID: env > config.json > openclaw credentials (already read above)
+	// telegramChatID: env > config.json > credentials (already read above)
 	if cfg.TelegramChatID != "" && tgChatID == "" {
 		tgChatID = cfg.TelegramChatID
 	}
@@ -504,7 +452,7 @@ func loadConfig() {
 		}
 	}
 
-	// agentName: config.json override (if openclaw.json didn't set it)
+	// agentName: config.json override
 	if cfg.AgentName != "" && agentName == appName {
 		agentName = cfg.AgentName
 	}
@@ -826,7 +774,7 @@ Hooks:
 Environment variables:
   JIRA_TOKEN                Jira agent token (can also be set in config.json)
   {{UPPER}}_TG_CHAT_ID     Telegram chat ID (can also be set in config.json)
-  {{UPPER}}_HOME            Base directory (default: ~/.openclaw)
+  {{UPPER}}_HOME            Base directory (default: ~/.<appName>)
 
 Examples:
   {{NAME}}                              # start interactive session

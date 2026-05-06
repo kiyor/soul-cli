@@ -151,7 +151,7 @@ func mustDoJSON(client *http.Client, req *http.Request, w io.Writer) {
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %s: %v\n", req.Method, req.URL, err)
-		fmt.Fprintln(os.Stderr, "Hint: is weiran-cu running? `make -C ~/.openclaw/workspace/projects/weiran-cu status`")
+		fmt.Fprintf(os.Stderr, "Hint: is weiran-cu running? `make -C %s/projects/weiran-cu status`\n", workspace)
 		os.Exit(1)
 	}
 	defer resp.Body.Close()

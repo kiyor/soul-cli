@@ -10,13 +10,15 @@ import (
 	"testing"
 )
 
-// withTempHome redirects HOME so codexJSONLPath writes into a per-test
+// withTempHome redirects appDir so codexJSONLPath writes into a per-test
 // temp dir. Returns the resolved JSONL path for assertions.
 func withTempHome(t *testing.T, threadID string) string {
 	t.Helper()
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-	return filepath.Join(tmp, ".openclaw", "agents", "main", "sessions", threadID+".jsonl")
+	origAppDir := appDir
+	appDir = tmp
+	t.Cleanup(func() { appDir = origAppDir })
+	return filepath.Join(tmp, "codex", threadID+".jsonl")
 }
 
 func readAllLines(t *testing.T, path string) []string {

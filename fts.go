@@ -320,20 +320,46 @@ func splitSQL(s string) []string {
 // dailyNoteDatePattern matches filenames like "2026-04-09.md"
 var dailyNoteDatePattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})\.md$`)
 
-// indexDailyNotes walks workspace/memory/*.md and upserts daily notes.
+// indexDailyNotes walks workspace/memory/daily/*.md and upserts daily notes.
+// Heartbeat logs (memory/daily/heartbeat/*.md) are indexed separately with
+// a "hb:" date prefix so they don't pollute normal daily note search results.
 // Unchanged files (matching mtime+hash) are skipped. Returns (added, skipped, err).
 func indexDailyNotes() (int, int, error) {
-	dir := filepath.Join(workspace, "memory")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0, 0, fmt.Errorf("read memory dir: %w", err)
-	}
-
 	db, err := openDB()
 	if err != nil {
 		return 0, 0, err
 	}
 	defer db.Close()
+
+	totalAdded, totalSkipped := 0, 0
+
+	// Index normal daily notes
+	a, s, err := indexDailyDir(db, filepath.Join(workspace, "memory", "daily"), "")
+	if err != nil {
+		return 0, 0, err
+	}
+	totalAdded += a
+	totalSkipped += s
+
+	// Index heartbeat daily notes (date key prefixed with "hb:" to avoid collisions)
+	a, s, _ = indexDailyDir(db, filepath.Join(workspace, "memory", "daily", "heartbeat"), "hb:")
+	totalAdded += a
+	totalSkipped += s
+
+	return totalAdded, totalSkipped, nil
+}
+
+// indexDailyDir indexes all YYYY-MM-DD.md files in a directory into the daily_notes table.
+// datePrefix is prepended to the date key (e.g. "hb:" for heartbeat logs, "" for normal notes).
+func indexDailyDir(db *sql.DB, dir, datePrefix string) (int, int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// Heartbeat dir may not exist yet — not an error
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("read dir %s: %w", dir, err)
+	}
 
 	added, skipped := 0, 0
 	for _, e := range entries {
@@ -344,7 +370,7 @@ func indexDailyNotes() (int, int, error) {
 		if m == nil {
 			continue
 		}
-		date := m[1]
+		date := datePrefix + m[1]
 		path := filepath.Join(dir, e.Name())
 
 		info, err := e.Info()
@@ -555,24 +581,6 @@ func indexSessionContent() (int, int, error) {
 		}
 	}
 
-	// OpenClaw sessions — scan all agents
-	agentsDir := filepath.Join(appHome, "agents")
-	if entries, err := os.ReadDir(agentsDir); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			sessDir := filepath.Join(agentsDir, e.Name(), "sessions")
-			if subentries, err := os.ReadDir(sessDir); err == nil {
-				for _, se := range subentries {
-					if !se.IsDir() && strings.HasSuffix(se.Name(), ".jsonl") {
-						jsonlFiles = append(jsonlFiles, filepath.Join(sessDir, se.Name()))
-					}
-				}
-			}
-		}
-	}
-
 	// Archive sources — old .claude backups registered via `db add-source`
 	for _, archDir := range archiveProjectsDirs() {
 		if entries, err := os.ReadDir(archDir); err == nil {
@@ -664,7 +672,7 @@ type ftsHit struct {
 }
 
 // searchFTS runs MATCH against one or more FTS5 virtual tables.
-// scope: "daily" | "session" | "content" | "both" (default = all three).
+// scope: "daily" | "session" | "content" | "heartbeat" | "both" (default = all except heartbeat).
 // query: raw user input, will be segmented and sanitized.
 // limit: max rows per source.
 // sanitizeFTSQuery makes a user query safe for FTS5 MATCH by:
@@ -709,23 +717,40 @@ func searchFTS(query, scope string, limit int) ([]ftsHit, error) {
 
 	var hits []ftsHit
 
-	if scope == "daily" || scope == "all" {
-		rows, err := db.Query(`
-			SELECT date, snippet(daily_notes_fts, 1, '[', ']', ' … ', 24), rank
+	if scope == "daily" || scope == "heartbeat" || scope == "all" {
+		// Build WHERE clause: filter by date prefix for heartbeat vs normal.
+		// "all" (default) excludes heartbeat to keep search clean — use "heartbeat" scope explicitly.
+		dateFilter := ""
+		switch scope {
+		case "daily", "all":
+			dateFilter = ` AND daily_notes.date NOT LIKE 'hb:%'`
+		case "heartbeat":
+			dateFilter = ` AND daily_notes.date LIKE 'hb:%'`
+		}
+		q := fmt.Sprintf(`
+			SELECT daily_notes.date, snippet(daily_notes_fts, 1, '[', ']', ' … ', 24), rank
 			FROM daily_notes_fts
-			WHERE daily_notes_fts MATCH ?
+			JOIN daily_notes ON daily_notes.rowid = daily_notes_fts.rowid
+			WHERE daily_notes_fts MATCH ?%s
 			ORDER BY rank
-			LIMIT ?`, match, limit)
+			LIMIT ?`, dateFilter)
+		rows, err := db.Query(q, match, limit)
 		if err != nil {
 			return nil, fmt.Errorf("daily search: %w", err)
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var h ftsHit
-			h.Source = "daily"
+			if scope == "heartbeat" {
+				h.Source = "heartbeat"
+			} else {
+				h.Source = "daily"
+			}
 			if err := rows.Scan(&h.Date, &h.Snippet, &h.Rank); err != nil {
 				continue
 			}
+			// Strip "hb:" prefix from date for display
+			h.Date = strings.TrimPrefix(h.Date, "hb:")
 			hits = append(hits, h)
 		}
 		if err := rows.Err(); err != nil {
@@ -826,10 +851,10 @@ func handleFTSRebuild() {
 	fmt.Println("fts-rebuild: ok")
 }
 
-// handleFTSSearch implements `weiran db search-fts <query> [--scope=daily|session|content|both] [--limit=N] [--json]`
+// handleFTSSearch implements `weiran db search-fts <query> [--scope=daily|session|content|heartbeat|both] [--limit=N] [--json]`
 func handleFTSSearch(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: "+appName+" db search-fts <query> [--scope=daily|session|content|both] [--limit=N] [--json]")
+		fmt.Fprintln(os.Stderr, "usage: "+appName+" db search-fts <query> [--scope=daily|session|content|heartbeat|both] [--limit=N] [--json]")
 		os.Exit(1)
 	}
 	scope := "both"

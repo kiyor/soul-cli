@@ -55,6 +55,11 @@ const (
 	HookEventTeammateIdle     = "TeammateIdle"
 	HookEventTaskCreated      = "TaskCreated"
 	HookEventTaskCompleted    = "TaskCompleted"
+
+	// Server-side only (not a CC hook event — evaluated by weiran server,
+	// consumed by tool-hook binary via content_hook_pending table).
+	// Listed here so `weiran tool-hook events` and rule validation recognize it.
+	HookEventPostAssistantMsg = "PostAssistantMsg"
 )
 
 // AllHookEvents is the ordered list Claude Code accepts at the top level of
@@ -80,11 +85,14 @@ var AllHookEvents = []string{
 // knownHookEvents is the set form of AllHookEvents for O(1) lookup.
 // Events outside this set are still audited but flagged as "unknown event"
 // so we notice when Claude Code adds a new hook we haven't wired.
+// Also includes server-side-only events (PostAssistantMsg) for rule validation.
 var knownHookEvents = func() map[string]bool {
-	m := make(map[string]bool, len(AllHookEvents))
+	m := make(map[string]bool, len(AllHookEvents)+1)
 	for _, e := range AllHookEvents {
 		m[e] = true
 	}
+	// Server-side events not in CC's settings.json but valid in tool-hooks.yaml
+	m[HookEventPostAssistantMsg] = true
 	return m
 }()
 
@@ -629,6 +637,16 @@ func runPreToolUseHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
 	budgetRemaining := cfg.Budget
 	var injections []string
 	budgetUsedTotal := 0
+
+	// Drain any pending PostAssistantMsg content hook injections (written by
+	// the server when it detected keywords in mid-turn assistant text).
+	if pending := drainContentHookPending(db, sessionID); len(pending) > 0 {
+		injections = append(injections, pending...)
+		for _, p := range pending {
+			budgetUsedTotal += len(p)
+			budgetRemaining -= len(p)
+		}
+	}
 
 	for _, rule := range cfg.Rules {
 		if rule.Disabled || rule.ID == "" {
@@ -1273,6 +1291,15 @@ func runPostToolUseHook(in ToolHookInput, cfg *ToolHookConfig, db *sql.DB) {
 	var injections []string
 	budgetUsedTotal := 0
 
+	// Drain pending PostAssistantMsg content hook injections (same as PreToolUse).
+	if pending := drainContentHookPending(db, sessionID); len(pending) > 0 {
+		injections = append(injections, pending...)
+		for _, p := range pending {
+			budgetUsedTotal += len(p)
+			budgetRemaining -= len(p)
+		}
+	}
+
 	for _, rule := range cfg.Rules {
 		if rule.Disabled || rule.ID == "" {
 			continue
@@ -1884,6 +1911,8 @@ func handleToolHookEvents() {
 		}
 		fmt.Printf("  %-20s %s\n", e, matcher)
 	}
+	fmt.Println("\nServer-side events (evaluated by weiran server, not CC hook binary):")
+	fmt.Printf("  %-20s %s\n", HookEventPostAssistantMsg, "rule-driven (match_prompt on assistant text, server writes → tool-hook drains)")
 	fmt.Println("\nEvents not listed above are still accepted — their event_name is recorded verbatim in the audit table, flagged as unknown.")
 }
 

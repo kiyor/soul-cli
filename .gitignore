@@ -11,6 +11,7 @@ soul-cli
 soul
 /bin/
 site/
+.qoder/
 hengzhun
 # legacy hardcoded plist, replaced by launchagent.plist.tmpl
 com.kiyor.weiran-server.plist

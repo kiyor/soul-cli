@@ -24,9 +24,7 @@ type agentDef struct {
 }
 
 // loadAgents reads agent definitions from config.json's "agents" field.
-// Falls back to openclaw.json for backward compatibility.
 func loadAgents() ([]agentDef, error) {
-	// Try config.json first (soul-cli native config)
 	configPaths := []string{
 		filepath.Join(appHome, "data", "config.json"),
 		filepath.Join(workspace, "scripts", appName, "config.json"),
@@ -59,35 +57,7 @@ func loadAgents() ([]agentDef, error) {
 		return agents, nil
 	}
 
-	// Fallback: read from openclaw.json (legacy)
-	data, err := os.ReadFile(openclawConfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("no agents in config.json and cannot read openclaw.json: %w", err)
-	}
-	var ocCfg struct {
-		Agents struct {
-			Defaults struct {
-				Workspace string `json:"workspace"`
-			} `json:"defaults"`
-			List []struct {
-				ID        string `json:"id"`
-				Name      string `json:"name"`
-				Workspace string `json:"workspace"`
-			} `json:"list"`
-		} `json:"agents"`
-	}
-	if err := json.Unmarshal(data, &ocCfg); err != nil {
-		return nil, fmt.Errorf("parse openclaw.json: %w", err)
-	}
-	agents := make([]agentDef, 0, len(ocCfg.Agents.List))
-	for _, a := range ocCfg.Agents.List {
-		ws := a.Workspace
-		if ws == "" {
-			ws = ocCfg.Agents.Defaults.Workspace
-		}
-		agents = append(agents, agentDef{ID: a.ID, Name: a.Name, Workspace: ws})
-	}
-	return agents, nil
+	return nil, fmt.Errorf("no agents defined in config.json")
 }
 
 // findAgent looks up an agent by ID (exact) or name (prefix match)

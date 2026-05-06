@@ -196,15 +196,21 @@ func buildSkillIndex() string {
 		return ""
 	}
 
+	// Group skills by directory for compact output
+	dirSkills := make(map[string][]string)
+	var dirOrder []string
+	for _, s := range skills {
+		if _, exists := dirSkills[s.Dir]; !exists {
+			dirOrder = append(dirOrder, s.Dir)
+		}
+		dirSkills[s.Dir] = append(dirSkills[s.Dir], s.Name)
+	}
+
 	var b strings.Builder
 	b.WriteString("## Available Skills\n\n")
-	b.WriteString(fmt.Sprintf("Read `%s/skills/<name>/SKILL.md` for full usage and trigger conditions.\n\n", appHome))
-	names := make([]string, 0, len(skills))
-	for _, s := range skills {
-		names = append(names, s.Name)
+	for _, dir := range dirOrder {
+		b.WriteString(fmt.Sprintf("- %s\n  %s\n", dir, strings.Join(dirSkills[dir], ", ")))
 	}
-	b.WriteString(strings.Join(names, " · "))
-	b.WriteString("\n")
 	return b.String()
 }
 
@@ -218,8 +224,8 @@ type projectEntry struct {
 	Desc string
 }
 
-// extractProjectDesc extracts a one-line description from CLAUDE.md
-// uses safeReadFile to reject symlinked CLAUDE.md
+// extractProjectDesc extracts a one-line description from CLAUDE.md or CLAUDE.local.md
+// uses safeReadFile to reject symlinked files
 func extractProjectDesc(path string) string {
 	data, err := safeReadFile(path)
 	if err != nil {
@@ -268,9 +274,12 @@ func findCLAUDEMDsInner(root string, maxDepth int, visited map[deviceInode]bool)
 		visited[di] = true
 	}
 
+	// Prefer CLAUDE.local.md over CLAUDE.md (local overrides shared, like Claude Code itself)
+	localCandidate := filepath.Join(root, "CLAUDE.local.md")
 	candidate := filepath.Join(root, "CLAUDE.md")
-	// only accept regular files, reject symlinked CLAUDE.md (prevent prompt injection)
-	if info, err := lstatSafe(candidate); err == nil && !info.IsDir() {
+	if info, err := lstatSafe(localCandidate); err == nil && !info.IsDir() {
+		results = append(results, localCandidate)
+	} else if info, err := lstatSafe(candidate); err == nil && !info.IsDir() {
 		results = append(results, candidate)
 	}
 	entries, err := os.ReadDir(root)
@@ -311,7 +320,11 @@ func buildProjectIndex() string {
 			continue
 		}
 		// for directories that are projects themselves (e.g. familydash), only scan self
-		candidate := filepath.Join(root, "CLAUDE.md")
+		// Prefer CLAUDE.local.md over CLAUDE.md
+		candidate := filepath.Join(root, "CLAUDE.local.md")
+		if _, err := os.Stat(candidate); err != nil {
+			candidate = filepath.Join(root, "CLAUDE.md")
+		}
 		if _, err := os.Stat(candidate); err == nil && !seen[candidate] {
 			seen[candidate] = true
 			shortPath := strings.Replace(candidate, home, "~", 1)
@@ -336,7 +349,7 @@ func buildProjectIndex() string {
 	var b strings.Builder
 	b.WriteString("## Project Context Index\n\n")
 	b.WriteString("The following projects have CLAUDE.md. When working on a project, `Read` its CLAUDE.md first for full context.\n\n")
-	b.WriteString("| CLAUDE.md Path | Description |\n|----------------|-------------|\n")
+	b.WriteString("| Path | Description |\n|------|-------------|\n")
 	for _, p := range projects {
 		fmt.Fprintf(&b, "| `%s` | %s |\n", p.Path, p.Desc)
 	}

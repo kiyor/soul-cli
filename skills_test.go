@@ -123,12 +123,49 @@ func TestFindCLAUDEMDs_NegativeDepth(t *testing.T) {
 	}
 }
 
+func TestFindCLAUDEMDs_PrefersLocal(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create both CLAUDE.md and CLAUDE.local.md
+	os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("shared desc"), 0644)
+	os.WriteFile(filepath.Join(dir, "CLAUDE.local.md"), []byte("local override"), 0644)
+
+	results := findCLAUDEMDs(dir, 0)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result (local preferred), got %d", len(results))
+	}
+	if !strings.HasSuffix(results[0], "CLAUDE.local.md") {
+		t.Errorf("expected CLAUDE.local.md, got %s", results[0])
+	}
+
+	// Verify the description comes from local
+	desc := extractProjectDesc(results[0])
+	if desc != "local override" {
+		t.Errorf("expected 'local override', got '%s'", desc)
+	}
+}
+
+func TestFindCLAUDEMDs_FallbackToRegular(t *testing.T) {
+	dir := t.TempDir()
+
+	// Only CLAUDE.md, no local
+	os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("shared desc"), 0644)
+
+	results := findCLAUDEMDs(dir, 0)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !strings.HasSuffix(results[0], "CLAUDE.md") {
+		t.Errorf("expected CLAUDE.md, got %s", results[0])
+	}
+}
+
 func TestBuildProjectIndex_NotEmpty(t *testing.T) {
 	idx := buildProjectIndex()
 	if idx == "" {
 		t.Fatal("project index is empty")
 	}
-	if !strings.Contains(idx, "| CLAUDE.md") {
+	if !strings.Contains(idx, "| Path |") {
 		t.Error("missing table header")
 	}
 }

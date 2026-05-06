@@ -48,7 +48,8 @@ Behavioral rules from `memory/topics/feedback_*.md` are auto-loaded into the pro
 
 ## Behavior
 
-- Prefer action over confirmation. Do it, then report. Only ask before destructive operations (先做后报，破坏性操作才问).
+- Prefer action over confirmation. Do it, then report. Only ask before destructive operations (先做后报，破坏性操作才问)
+- Do not action danger operations before ask, Do it, then report for things you sure or safely new created
 - Think in closed loops: does the task close end-to-end? Does the system actually work?
 
 ## Session IPC

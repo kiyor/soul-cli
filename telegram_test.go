@@ -16,18 +16,21 @@ func TestGetTelegramToken_FromConfig(t *testing.T) {
 	}
 }
 
-// setTestHome overrides both home and appHome for test isolation
+// setTestHome overrides home, appHome, and appDir for test isolation
 func setTestHome(t *testing.T, dir string) {
 	t.Helper()
 	origHome := home
-	origWeiranHome := appHome
+	origAppHome := appHome
+	origAppDir := appDir
 	origCachedToken := cachedTelegramToken
 	home = dir
-	appHome = filepath.Join(dir, ".openclaw")
+	appHome = filepath.Join(dir, ".weiran")
+	appDir = filepath.Join(dir, ".weiran", "data")
 	cachedTelegramToken = "" // clear cache for test isolation
 	t.Cleanup(func() {
 		home = origHome
-		appHome = origWeiranHome
+		appHome = origAppHome
+		appDir = origAppDir
 		cachedTelegramToken = origCachedToken
 	})
 }
@@ -45,9 +48,9 @@ func TestGetTelegramToken_BadJSON(t *testing.T) {
 	dir := t.TempDir()
 	setTestHome(t, dir)
 
-	ocDir := filepath.Join(dir, ".openclaw")
-	os.MkdirAll(ocDir, 0755)
-	os.WriteFile(filepath.Join(ocDir, "openclaw.json"), []byte("not json"), 0644)
+	dataDir := filepath.Join(dir, ".weiran", "data")
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "config.json"), []byte("not json"), 0644)
 
 	token := getTelegramToken()
 	if token != "" {
@@ -59,9 +62,9 @@ func TestGetTelegramToken_EmptyConfig(t *testing.T) {
 	dir := t.TempDir()
 	setTestHome(t, dir)
 
-	ocDir := filepath.Join(dir, ".openclaw")
-	os.MkdirAll(ocDir, 0755)
-	os.WriteFile(filepath.Join(ocDir, "openclaw.json"), []byte(`{}`), 0644)
+	dataDir := filepath.Join(dir, ".weiran", "data")
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "config.json"), []byte(`{}`), 0644)
 
 	token := getTelegramToken()
 	if token != "" {
@@ -69,33 +72,18 @@ func TestGetTelegramToken_EmptyConfig(t *testing.T) {
 	}
 }
 
-func TestGetTelegramToken_NestedAccounts(t *testing.T) {
+func TestGetTelegramToken_ConfigJSON(t *testing.T) {
 	dir := t.TempDir()
 	setTestHome(t, dir)
 
-	ocDir := filepath.Join(dir, ".openclaw")
-	os.MkdirAll(ocDir, 0755)
-	config := `{"channels":{"telegram":{"accounts":{"main":{"botToken":"test-token-12345678901234567890"}}}}}`
-	os.WriteFile(filepath.Join(ocDir, "openclaw.json"), []byte(config), 0644)
+	dataDir := filepath.Join(dir, ".weiran", "data")
+	os.MkdirAll(dataDir, 0755)
+	config := `{"server":{"telegram":{"botToken":"test-token-12345678901234567890"}}}`
+	os.WriteFile(filepath.Join(dataDir, "config.json"), []byte(config), 0644)
 
 	token := getTelegramToken()
 	if token != "test-token-12345678901234567890" {
-		t.Errorf("expected nested token, got %q", token)
-	}
-}
-
-func TestGetTelegramToken_DirectToken(t *testing.T) {
-	dir := t.TempDir()
-	setTestHome(t, dir)
-
-	ocDir := filepath.Join(dir, ".openclaw")
-	os.MkdirAll(ocDir, 0755)
-	config := `{"channels":{"telegram":{"botToken":"direct-token-99999999999999999999"}}}`
-	os.WriteFile(filepath.Join(ocDir, "openclaw.json"), []byte(config), 0644)
-
-	token := getTelegramToken()
-	if token != "direct-token-99999999999999999999" {
-		t.Errorf("expected direct token, got %q", token)
+		t.Errorf("expected config.json token, got %q", token)
 	}
 }
 
@@ -116,7 +104,7 @@ func TestTrySendTelegramPhoto_NoToken(t *testing.T) {
 	disableTelegram = false
 	t.Cleanup(func() { disableTelegram = true })
 
-	err := trySendTelegramPhoto("https://example.com/img.jpg", "caption")
+	err := trySendTelegramPhoto("https://example.com/photo.jpg", "test")
 	if err == nil {
 		t.Error("expected error when no token")
 	}

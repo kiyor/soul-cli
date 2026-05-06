@@ -519,21 +519,6 @@ func recentSessions(limit int) []sessionFile {
 		}
 	}
 
-	// OpenClaw sessions — dynamic scan of agents directory, no longer hardcoded
-	agentsDir := filepath.Join(appHome, "agents")
-	if entries, err := os.ReadDir(agentsDir); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			sessDir := filepath.Join(agentsDir, e.Name(), "sessions")
-			if _, err := os.Stat(sessDir); err != nil {
-				continue
-			}
-			collect(&all, sessDir, "oc-"+e.Name(), cutoff)
-		}
-	}
-
 	// Archive sources (old .claude backups)
 	for _, archiveDir := range archiveProjectsDirs() {
 		if entries, err := os.ReadDir(archiveDir); err == nil {

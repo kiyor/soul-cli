@@ -107,33 +107,25 @@ func TestCronTimeout(t *testing.T) {
 }
 
 func TestGetModelEndpoint(t *testing.T) {
-	// Create a temp openclaw.json
+	// Isolate all config search paths
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "openclaw.json")
+	origAppHome, origAppDir, origWS := appHome, appDir, workspace
+	appHome = dir
+	appDir = filepath.Join(dir, "data")
+	workspace = filepath.Join(dir, "ws")
+	os.MkdirAll(appDir, 0755)
+	defer func() { appHome = origAppHome; appDir = origAppDir; workspace = origWS }()
 
 	cfg := map[string]interface{}{
-		"agents": map[string]interface{}{
-			"defaults": map[string]interface{}{
-				"model": map[string]interface{}{
-					"primary":   "zai/glm-5.1",
-					"fallbacks": []string{"minimax/MiniMax-M2.7"},
-				},
-			},
-		},
-		"models": map[string]interface{}{
-			"providers": map[string]interface{}{
-				"minimax": map[string]interface{}{
-					"baseUrl": "https://api.minimax.chat/v1",
-				},
+		"providers": map[string]interface{}{
+			"minimax": map[string]interface{}{
+				"baseUrl": "https://api.minimax.chat/v1",
+				"type":    "openai",
 			},
 		},
 	}
 	data, _ := json.Marshal(cfg)
-	os.WriteFile(cfgPath, data, 0644)
-
-	origPath := openclawConfigPath
-	openclawConfigPath = cfgPath
-	defer func() { openclawConfigPath = origPath }()
+	os.WriteFile(filepath.Join(appDir, "config.json"), data, 0644)
 
 	got := getModelEndpoint()
 	want := "https://api.minimax.chat/v1/models"
@@ -143,9 +135,12 @@ func TestGetModelEndpoint(t *testing.T) {
 }
 
 func TestGetModelEndpoint_NoCfg(t *testing.T) {
-	origPath := openclawConfigPath
-	openclawConfigPath = "/nonexistent/openclaw.json"
-	defer func() { openclawConfigPath = origPath }()
+	dir := t.TempDir()
+	origAppHome, origAppDir, origWS := appHome, appDir, workspace
+	appHome = dir
+	appDir = filepath.Join(dir, "data")
+	workspace = filepath.Join(dir, "ws")
+	defer func() { appHome = origAppHome; appDir = origAppDir; workspace = origWS }()
 
 	got := getModelEndpoint()
 	if got != "" {
