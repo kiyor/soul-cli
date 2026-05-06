@@ -813,6 +813,7 @@ func feedbackSectionStart(s string) int {
 // pre-Phase-C). This is the structural counterpart to the byte-diff check
 // captured manually before/after the reorder commit.
 func TestBuildPrompt_FlagOffLayoutUnchanged(t *testing.T) {
+	requireWorkspace(t)
 	withFragmentLoading(t, false)
 	result := buildPrompt()
 	soul := soulSectionStart(result.content)
@@ -832,6 +833,7 @@ func TestBuildPrompt_FlagOffLayoutUnchanged(t *testing.T) {
 // SOUL.md section appears AFTER IDENTITY.md and AFTER the FEEDBACK section,
 // just before the dynamic boundary. This is the C-1 reorder.
 func TestBuildPrompt_FlagOnLayoutSoulIsLast(t *testing.T) {
+	requireWorkspace(t)
 	withFragmentLoading(t, true)
 	withSoulModeEnv(t, "emotional")
 	result := buildPrompt()
@@ -864,6 +866,7 @@ func TestBuildPrompt_FlagOnLayoutSoulIsLast(t *testing.T) {
 // portion. Restores all globals via t.Cleanup.
 func runStaticPrompt(t *testing.T, flagOn bool, soulMode string) string {
 	t.Helper()
+	requireWorkspace(t)
 	withFragmentLoading(t, flagOn)
 	if soulMode != "" {
 		withSoulModeEnv(t, soulMode)

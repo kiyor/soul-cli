@@ -112,6 +112,7 @@ func extractSkillNamesFromIndex(idx string) []string {
 }
 
 func TestBuildSkillIndex_NotEmpty(t *testing.T) {
+	requireWorkspace(t)
 	idx := buildSkillIndex()
 	if idx == "" {
 		t.Fatal("skill index is empty")
@@ -127,6 +128,7 @@ func TestBuildSkillIndex_NotEmpty(t *testing.T) {
 }
 
 func TestBuildSkillIndex_NoDuplicates(t *testing.T) {
+	requireWorkspace(t)
 	idx := buildSkillIndex()
 	seen := make(map[string]bool)
 	for _, name := range extractSkillNamesFromIndex(idx) {
@@ -448,6 +450,7 @@ func TestHelpText(t *testing.T) {
 // ── Prompt Build Tests ──
 
 func TestBuildPrompt_ContainsSkills(t *testing.T) {
+	requireWorkspace(t)
 	result := buildPrompt()
 	if !strings.Contains(result.content, "=== Skills ===") {
 		t.Error("prompt missing Skills section")
@@ -458,6 +461,7 @@ func TestBuildPrompt_ContainsSkills(t *testing.T) {
 }
 
 func TestBuildPrompt_ContainsIdentity(t *testing.T) {
+	requireWorkspace(t)
 	result := buildPrompt()
 	required := []string{"SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"}
 	for _, r := range required {
@@ -468,6 +472,7 @@ func TestBuildPrompt_ContainsIdentity(t *testing.T) {
 }
 
 func TestBuildPrompt_ContainsNotify(t *testing.T) {
+	requireWorkspace(t)
 	result := buildPrompt()
 	if !strings.Contains(result.content, appName+" notify") && !strings.Contains(result.content, "notify") {
 		t.Error("prompt should mention notify capability")
@@ -508,6 +513,7 @@ func TestBuildTelegramContext(t *testing.T) {
 }
 
 func TestBuildPrompt_HasTelegram(t *testing.T) {
+	requireWorkspace(t)
 	// This test depends on an active Telegram session being present on disk.
 	// Skip gracefully when no TG session data is available.
 	result := buildPromptWithOverrides(promptOverrides{Mode: "server"})
@@ -518,6 +524,7 @@ func TestBuildPrompt_HasTelegram(t *testing.T) {
 }
 
 func TestEstimateTokensLargePrompt(t *testing.T) {
+	requireWorkspace(t)
 	result := buildPrompt()
 	tokens := estimateTokens(result.content)
 	t.Logf("chars: %d, estimated tokens: %d", len(result.content), tokens)

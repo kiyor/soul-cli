@@ -214,6 +214,7 @@ func TestWritePrompt_LargePrompt(t *testing.T) {
 }
 
 func TestBuildPrompt_ContainsTelegramSection(t *testing.T) {
+	requireWorkspace(t)
 	result := buildPrompt()
 	if !strings.Contains(result.content, "Telegram") {
 		t.Error("prompt should mention Telegram")
@@ -221,6 +222,7 @@ func TestBuildPrompt_ContainsTelegramSection(t *testing.T) {
 }
 
 func TestBuildPrompt_ContainsStartupProtocol(t *testing.T) {
+	requireWorkspace(t)
 	result := buildPrompt()
 	// Check for either custom BOOT.md content or default boot protocol
 	if !strings.Contains(result.content, "Boot Protocol") && !strings.Contains(result.content, "启动协议") {
@@ -280,6 +282,7 @@ func TestProfileForMode(t *testing.T) {
 }
 
 func TestBuildPrompt_HeartbeatMode(t *testing.T) {
+	requireWorkspace(t)
 	origMode := currentMode
 	currentMode = "heartbeat"
 	defer func() { currentMode = origMode }()
@@ -307,6 +310,7 @@ func TestBuildPrompt_HeartbeatMode(t *testing.T) {
 }
 
 func TestBuildPrompt_HasReasonableSize(t *testing.T) {
+	requireWorkspace(t)
 	result := buildPrompt()
 	tokens := estimateTokens(result.content)
 	t.Logf("prompt: %d chars, ~%d tokens", len(result.content), tokens)
